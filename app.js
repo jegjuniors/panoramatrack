@@ -1067,21 +1067,14 @@ async function savePinReset(){
 
 /* ─── Master tabs ─── */
 function switchMasterTab(tab){
-  ['overview','jobsites','empdept','activities','submissions','log'].forEach(t=>{
+  ['overview','jobsites','employees','departments','activities','submissions','log'].forEach(t=>{
     document.getElementById('mpanel-'+t).style.display=t===tab?'block':'none';
     document.getElementById('mtab-'+t).classList.toggle('active',t===tab);
   });
   if(tab==='overview')refreshMasterOverview();
   if(tab==='jobsites'){refreshJobsitePanel();refreshNewJobsiteSupChecks();}
-  if(tab==='empdept'){
-    // Always reset accordion to known state: employees open, departments closed
-    document.getElementById('empdept-emp-panel').classList.add('accordion-open');
-    document.getElementById('empdept-emp-chevron').textContent='▾';
-    document.getElementById('empdept-dept-panel').classList.remove('accordion-open');
-    document.getElementById('empdept-dept-chevron').textContent='▸';
-    refreshMasterEmps();
-    refreshDepartmentsPanel();
-  }
+  if(tab==='employees')refreshMasterEmps();
+  if(tab==='departments')refreshDepartmentsPanel();
   if(tab==='activities')refreshActivitiesPanel();
   if(tab==='submissions')refreshSubmissionsPanel();
   if(tab==='log'){
@@ -1092,14 +1085,6 @@ function switchMasterTab(tab){
     document.getElementById('m-filter-flags').value='';
     initMasterLogDates();
   }
-}
-
-function toggleEmpDeptSection(section){
-  const panel=document.getElementById('empdept-'+section+'-panel');
-  const chevron=document.getElementById('empdept-'+section+'-chevron');
-  const opening=!panel.classList.contains('accordion-open');
-  panel.classList.toggle('accordion-open');
-  chevron.textContent=opening?'▾':'▸';
 }
 
 /* ─── Master: Activities panel ─── */
@@ -2367,7 +2352,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.4',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.3',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

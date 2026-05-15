@@ -189,4 +189,3 @@ select{cursor:pointer}
 .row-estimated td{font-style:italic;color:var(--amber)!important;}
 .row-estimated{border-left:3px solid var(--amber);}
 
-.accordion-panel{display:none;}.accordion-panel.accordion-open{display:block;}
