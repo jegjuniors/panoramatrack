@@ -1086,13 +1086,19 @@ function switchMasterTab(tab){
   }
 }
 
-/* ─── Employee/Dept accordion toggle ─── */
 function toggleEmpDeptSection(section){
   const panel=document.getElementById('empdept-'+section+'-panel');
   const chevron=document.getElementById('empdept-'+section+'-chevron');
-  const isOpen=panel.style.display!=='none';
-  panel.style.display=isOpen?'none':'block';
-  chevron.textContent=isOpen?'▸':'▾';
+  const isOpen=panel.getAttribute('data-open')==='1';
+  if(isOpen){
+    panel.style.display='none';
+    panel.setAttribute('data-open','0');
+    chevron.textContent='▸';
+  } else {
+    panel.style.display='block';
+    panel.setAttribute('data-open','1');
+    chevron.textContent='▾';
+  }
 }
 
 /* ─── Master: Activities panel ─── */
