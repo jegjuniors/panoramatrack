@@ -14,6 +14,7 @@
 **GitHub repo:** https://github.com/jegjuniors/panoramatrack (private)
 **Master password:** `master2024`
 **Auto-clock rule:** Open punches auto-clock out at 12 hours
+**Current version:** v35.1
 
 ### ⚠️ File Structure (split as of May 14, 2026)
 The app was previously a single `index.html`. It is now 3 files:
@@ -21,9 +22,13 @@ The app was previously a single `index.html`. It is now 3 files:
 |---|---|
 | `index.html` | HTML shell only — markup, links to styles.css and app.js |
 | `styles.css` | All CSS styles |
-| `app.js` | All JavaScript (~2,500 lines) |
+| `app.js` | All JavaScript (~2,511 lines) |
 
 **When making changes:** Claude only needs to read/edit the relevant file. Most changes will be to `app.js` only.
+
+**Version rule:** Minor changes = increment by 0.1 (e.g. v35.1 → v35.2). Significant changes = confirm first, increment by whole number. Version appears in two places:
+- `index.html` line ~152 — kiosk screen display: `>v35.1</div>`
+- `app.js` line ~2338 — backup payload: `app_version:'v35.1'`
 
 ---
 
@@ -44,7 +49,7 @@ The app was previously a single `index.html`. It is now 3 files:
 | `punches` | Clock-in/out records (`clock_in`, `clock_out`, `jobsite`, `activities`, `auto_clocked`) |
 | `employees` | Employee records (`name`, `pin`, `department`, `active`, `supervisor_password`, `supervisor_jobsites`) |
 | `activities` | Activity codes with `sort_order` and `active` flag |
-| `jobsites` | Jobsite list with `active`/`archived` state |
+| `jobsites` | Jobsite list with `active`/`archived` state, plus `address`, `gc`, `job_number`, `corfix_url` fields |
 | `submissions` | Export submission records (`employee_id`, `period_start`, `period_end`, `submitted_by`, `status`: `preliminary` or `final`) |
 
 > Note: Supervisors are employees where `department = 'Supervisor'`. No separate supervisors table.
@@ -61,28 +66,26 @@ The app was previously a single `index.html`. It is now 3 files:
 - Duplicate submission detection (blocks re-submitting a final)
 - Archived jobsites panel
 - Submissions tracking panel (master admin)
-- Dark/light/auto theme toggle
+- Dark/light/auto theme toggle (kiosk + persists app-wide)
 - PWA manifest + installable on iOS/Android
 - PDF export with activity codes (e.g. `41-001 (Interior Steel)`)
 - Preliminary export allowed for in-progress periods
 - Multi-period view in supervisor log (Today / Yesterday / Current / Last / 2 periods ago)
+- In-app "Backup Now" button (master admin) — downloads JSON of all tables
+- Corfix safety reminder — pops up at clock-in if jobsite has a Corfix URL configured
+- Jobsite extra fields — address, GC, job number, Corfix URL (editable in master admin)
 
 ---
 
 ## 🚧 What Was Last Being Worked On
 
 **Last session date:** May 14, 2026
-**Task in progress:** Workflow improvements — split monolithic index.html into 3 files, set up GitHub repo, connected Netlify auto-deploy
-**Status:** App fully working. No feature changes made. Workflow significantly improved.
+**Tasks completed this session:**
+- Fixed version display: was incorrectly showing `v36` — corrected to `v35.1` in both `index.html` and `app.js`
+- Confirmed no material ordering system remnants remain in the codebase (was previously started and abandoned — already fully removed)
+- Version increment rules established and documented above
 
-**Key changes made:**
-- Split `index.html` into `index.html` + `styles.css` + `app.js`
-- Created GitHub repo (jegjuniors/panoramatrack, private)
-- Connected Netlify to GitHub for auto-deploy on push
-- Git installed on developer's Windows machine
-
-**Known issue / next step:**
-- Fill in your top priority feature from the roadmap here before starting next chat
+**Status:** App fully working. No functional changes — version fix and housekeeping only.
 
 ---
 
@@ -98,8 +101,8 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 **Priority short-list:**
 - [ ] Tighten Supabase RLS policies (anon key currently allows full DB read/write)
-- [ ] In-app "Backup Now" button in master admin panel
 - [ ] Kiosk lock screen — return to PIN entry after inactivity
+- [ ] Hash employee PINs (currently plaintext in DB)
 
 ---
 
@@ -118,6 +121,10 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 | Export confirm flow | `openExportConfirm()` |
 | Activity code lookup | `actCodeMap` / `formatTaskCode()` |
 | Supabase client | Top of `app.js` — `SUPABASE_URL` / `SUPABASE_KEY` |
+| Theme toggle | `applyTheme()` / `setTheme()` / `pt-theme` (localStorage) |
+| Backup | `runBackup()` |
+| Corfix reminder | `showCorfixReminder()` / `JOBSITE_DATA` |
+| Version display | `index.html` line ~152 and `app.js` line ~2338 |
 
 ---
 
@@ -129,4 +136,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: May 14, 2026_
+_Last updated: May 14, 2026 — v35.1_
