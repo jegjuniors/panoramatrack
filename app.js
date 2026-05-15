@@ -1344,14 +1344,13 @@ function refreshMasterEmps(){
     const isSup=e.dept==='Supervisor';
     const sites=(e.supervisorJobsites||[]).map(j=>`<span class="badge b-blue" style="font-size:10px;">${j}</span>`).join(' ');
     return `<tr>
-      <td>${e.name}${isSup?'<span class="badge b-amber" style="font-size:10px;margin-left:4px;">SUP</span>':''}</td>
+      <td>${e.name}${isSup?'<span class="badge b-amber" style="font-size:10px;margin-left:4px;">SUP</span>':''}${!e.active?'<span style="font-size:10px;color:var(--txt3);margin-left:4px;">(inactive)</span>':''}</td>
       <td><code style="font-size:12px;">${e.pin}</code></td>
       <td>${e.dept}</td>
       <td style="max-width:160px;">${isSup?(sites||'<span style="color:var(--txt3);font-size:11px;">None</span>'):'—'}</td>
-      <td><span class="badge ${e.active?'b-in':'b-out'}">${e.active?'Active':'Inactive'}</span></td>
       <td style="white-space:nowrap;">
         <button class="btn-sm" onclick="openEmpModal(${e.id},'master')" style="margin-right:4px;">Edit</button>
-        <button class="btn-sm danger" onclick="toggleEmpActive(${e.id})">${e.active?'Deactivate':'Activate'}</button>
+        <button class="btn-sm ${e.active?'danger':'primary'}" onclick="toggleEmpActive(${e.id})">${e.active?'Deactivate':'Activate'}</button>
       </td>
     </tr>`;
   }).join('');
@@ -2352,7 +2351,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.4',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.5',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
