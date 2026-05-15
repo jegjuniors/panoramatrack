@@ -188,3 +188,5 @@ select{cursor:pointer}
 #prelim-banner .prelim-actions{display:flex;gap:8px;margin-top:8px;}
 .row-estimated td{font-style:italic;color:var(--amber)!important;}
 .row-estimated{border-left:3px solid var(--amber);}
+
+.accordion-panel{display:none;}.accordion-panel.accordion-open{display:block;}

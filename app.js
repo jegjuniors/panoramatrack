@@ -1075,9 +1075,9 @@ function switchMasterTab(tab){
   if(tab==='jobsites'){refreshJobsitePanel();refreshNewJobsiteSupChecks();}
   if(tab==='empdept'){
     // Always reset accordion to known state: employees open, departments closed
-    document.getElementById('empdept-emp-panel').style.display='block';
+    document.getElementById('empdept-emp-panel').classList.add('accordion-open');
     document.getElementById('empdept-emp-chevron').textContent='▾';
-    document.getElementById('empdept-dept-panel').style.display='none';
+    document.getElementById('empdept-dept-panel').classList.remove('accordion-open');
     document.getElementById('empdept-dept-chevron').textContent='▸';
     refreshMasterEmps();
     refreshDepartmentsPanel();
@@ -1097,9 +1097,9 @@ function switchMasterTab(tab){
 function toggleEmpDeptSection(section){
   const panel=document.getElementById('empdept-'+section+'-panel');
   const chevron=document.getElementById('empdept-'+section+'-chevron');
-  const closed=panel.style.display==='none';
-  panel.style.display=closed?'block':'none';
-  chevron.textContent=closed?'▾':'▸';
+  const opening=!panel.classList.contains('accordion-open');
+  panel.classList.toggle('accordion-open');
+  chevron.textContent=opening?'▾':'▸';
 }
 
 /* ─── Master: Activities panel ─── */

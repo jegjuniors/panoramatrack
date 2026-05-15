@@ -421,7 +421,7 @@
   <div id="mpanel-empdept" style="display:none;">
 
     <!-- Employees accordion section -->
-    <div style="border:0.5px solid var(--bdr);border-radius:var(--radius);overflow:hidden;margin-bottom:12px;">
+    <div style="border:0.5px solid var(--bdr);border-radius:var(--radius);margin-bottom:12px;">
       <div onclick="toggleEmpDeptSection('employees')" style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:var(--bg2);cursor:pointer;user-select:none;">
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:13px;">👥</span>
@@ -432,13 +432,13 @@
           <span id="empdept-emp-chevron" style="font-size:16px;color:var(--txt3);">▾</span>
         </div>
       </div>
-      <div id="empdept-emp-panel" data-open="1" style="display:none;border-top:0.5px solid var(--bdr);padding:12px 14px;">
+      <div id="empdept-emp-panel" class="accordion-panel accordion-open" style="border-top:0.5px solid var(--bdr);padding:12px 14px;">
         <table><thead><tr><th>Name</th><th>PIN</th><th>Dept</th><th>Jobsite(s)</th><th>Status</th><th></th></tr></thead><tbody id="m-emp-table"></tbody></table>
       </div>
     </div>
 
     <!-- Departments accordion section -->
-    <div style="border:0.5px solid var(--bdr);border-radius:var(--radius);overflow:hidden;">
+    <div style="border:0.5px solid var(--bdr);border-radius:var(--radius);">
       <div onclick="toggleEmpDeptSection('departments')" style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:var(--bg2);cursor:pointer;user-select:none;">
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:13px;">🏢</span>
@@ -446,7 +446,7 @@
         </div>
         <span id="empdept-dept-chevron" style="font-size:16px;color:var(--txt3);">▸</span>
       </div>
-      <div id="empdept-dept-panel" data-open="0" style="display:none;border-top:0.5px solid var(--bdr);padding:12px 14px;">
+      <div id="empdept-dept-panel" class="accordion-panel" style="border-top:0.5px solid var(--bdr);padding:12px 14px;">
         <p style="font-size:11px;color:var(--txt2);margin-bottom:10px;">Supervisor, Driver and General are protected and cannot be deleted.</p>
         <div id="dept-list" style="margin-bottom:16px;"></div>
         <div style="background:var(--bg2);border-radius:var(--radius);padding:14px;border:0.5px solid var(--bdr);">
