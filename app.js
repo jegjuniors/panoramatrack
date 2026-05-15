@@ -734,7 +734,7 @@ function masterLogin(){
   if(document.getElementById('master-pass-inp').value===MASTER_PASSWORD){
     stopSupTimeout();
     startMasterTimeout();
-    sessionStorage.setItem('pt_session',JSON.stringify({type:'master',ts:Date.now()}));
+    localStorage.setItem('pt_session',JSON.stringify({type:'master',ts:Date.now()}));
   startMasterTimeout();
   showScreen('screen-master');switchMasterTab('overview');
   } else {document.getElementById('master-login-err').textContent='Incorrect master password.';}
@@ -753,7 +753,7 @@ function supLogin(){
     : (activeSup.jobsites[0]||'No sites assigned');
   document.getElementById('sup-dash-site').textContent=`Supervising: ${siteLabel}`;
   stopMasterTimeout();startSupTimeout();
-  sessionStorage.setItem('pt_session',JSON.stringify({type:'sup',supId:activeSup.id,ts:Date.now()}));
+  localStorage.setItem('pt_session',JSON.stringify({type:'sup',supId:activeSup.id,ts:Date.now()}));
   startSupTimeout();
   showScreen('screen-sup');switchSupTab('live');
   checkPrelimReminder();
@@ -2351,7 +2351,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.5',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.6',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -2393,21 +2393,21 @@ function dismissPrelimBanner(){
 
 /* ─── App boot ─── */
 
-/* ─── Session persistence across refresh (10 min window) ─── */
-const SESSION_PERSIST_MS = 10 * 60 * 1000;
+/* ─── Session persistence across refresh (8 hour window) ─── */
+const SESSION_PERSIST_MS = 8 * 60 * 60 * 1000;
 function tryRestoreSession(){
   try{
-    const raw=sessionStorage.getItem('pt_session');
+    const raw=localStorage.getItem('pt_session');
     if(!raw)return;
     const s=JSON.parse(raw);
     if(!s||!s.ts)return;
-    if(Date.now()-s.ts>SESSION_PERSIST_MS){sessionStorage.removeItem('pt_session');return;}
+    if(Date.now()-s.ts>SESSION_PERSIST_MS){localStorage.removeItem('pt_session');return;}
     if(s.type==='master'){
       startMasterTimeout();
       showScreen('screen-master');switchMasterTab('overview');
     } else if(s.type==='sup'&&s.supId){
       const sup=supervisors.find(sv=>sv.id===s.supId);
-      if(!sup){sessionStorage.removeItem('pt_session');return;}
+      if(!sup){localStorage.removeItem('pt_session');return;}
       activeSup={...sup,jobsites:sup.jobsites||[]};
       activeSup.activeSite=activeSup.jobsites[0]||null;
       document.getElementById('sup-dash-title').textContent=sup.name;
@@ -2416,7 +2416,7 @@ function tryRestoreSession(){
       startSupTimeout();
       showScreen('screen-sup');switchSupTab('live');
     }
-  }catch(e){sessionStorage.removeItem('pt_session');}
+  }catch(e){localStorage.removeItem('pt_session');}
 }
 
 
@@ -2429,13 +2429,15 @@ let supWarnTimer=null;
 function resetSupTimer(){
   clearTimeout(supTimeoutTimer);clearTimeout(supWarnTimer);
   document.getElementById('timeout-bar').style.display='none';
+  // Refresh session timestamp so 8-hour window resets on activity
+  try{const s=JSON.parse(localStorage.getItem('pt_session')||'{}');if(s.type)localStorage.setItem('pt_session',JSON.stringify({...s,ts:Date.now()}));}catch(e){}
   supWarnTimer=setTimeout(()=>{
     document.getElementById('timeout-bar').style.display='block';
   },SUP_WARN_MS);
   supTimeoutTimer=setTimeout(()=>{
     document.getElementById('timeout-bar').style.display='none';
     activeSup=null;
-    sessionStorage.removeItem('pt_session');
+    localStorage.removeItem('pt_session');
     showKiosk();
     showNotif('!','Session expired','You have been logged out due to inactivity','#854F0B',3000);
   },SUP_TIMEOUT_MS);
@@ -2464,12 +2466,14 @@ let masterWarnTimer=null;
 function resetMasterTimer(){
   clearTimeout(masterTimeoutTimer);clearTimeout(masterWarnTimer);
   document.getElementById('timeout-bar').style.display='none';
+  // Refresh session timestamp so 8-hour window resets on activity
+  try{const s=JSON.parse(localStorage.getItem('pt_session')||'{}');if(s.type)localStorage.setItem('pt_session',JSON.stringify({...s,ts:Date.now()}));}catch(e){}
   masterWarnTimer=setTimeout(()=>{
     document.getElementById('timeout-bar').style.display='block';
   },MASTER_WARN_MS);
   masterTimeoutTimer=setTimeout(()=>{
     document.getElementById('timeout-bar').style.display='none';
-    sessionStorage.removeItem('pt_session');
+    localStorage.removeItem('pt_session');
     showKiosk();
     showNotif('!','Session expired','Master admin session timed out','#854F0B',3000);
   },MASTER_TIMEOUT_MS);
