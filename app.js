@@ -1073,7 +1073,15 @@ function switchMasterTab(tab){
   });
   if(tab==='overview')refreshMasterOverview();
   if(tab==='jobsites'){refreshJobsitePanel();refreshNewJobsiteSupChecks();}
-  if(tab==='empdept'){refreshMasterEmps();refreshDepartmentsPanel();}
+  if(tab==='empdept'){
+    // Always reset accordion to known state: employees open, departments closed
+    document.getElementById('empdept-emp-panel').style.display='block';
+    document.getElementById('empdept-emp-chevron').textContent='▾';
+    document.getElementById('empdept-dept-panel').style.display='none';
+    document.getElementById('empdept-dept-chevron').textContent='▸';
+    refreshMasterEmps();
+    refreshDepartmentsPanel();
+  }
   if(tab==='activities')refreshActivitiesPanel();
   if(tab==='submissions')refreshSubmissionsPanel();
   if(tab==='log'){
@@ -1089,16 +1097,9 @@ function switchMasterTab(tab){
 function toggleEmpDeptSection(section){
   const panel=document.getElementById('empdept-'+section+'-panel');
   const chevron=document.getElementById('empdept-'+section+'-chevron');
-  const isOpen=panel.getAttribute('data-open')==='1';
-  if(isOpen){
-    panel.style.display='none';
-    panel.setAttribute('data-open','0');
-    chevron.textContent='▸';
-  } else {
-    panel.style.display='block';
-    panel.setAttribute('data-open','1');
-    chevron.textContent='▾';
-  }
+  const closed=panel.style.display==='none';
+  panel.style.display=closed?'block':'none';
+  chevron.textContent=closed?'▾':'▸';
 }
 
 /* ─── Master: Activities panel ─── */
