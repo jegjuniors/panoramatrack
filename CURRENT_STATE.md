@@ -14,7 +14,7 @@
 **GitHub repo:** https://github.com/jegjuniors/panoramatrack (private)
 **Master password:** `master2024`
 **Auto-clock rule:** Open punches auto-clock out at 12 hours
-**Current version:** v35.3
+**Current version:** v35.4
 
 ### ⚠️ File Structure (split as of May 14, 2026)
 The app was previously a single `index.html`. It is now 3 files:
@@ -27,8 +27,8 @@ The app was previously a single `index.html`. It is now 3 files:
 **When making changes:** Claude only needs to read/edit the relevant file. Most changes will be to `app.js` only.
 
 **Version rule:** Minor changes = increment by 0.1 (e.g. v35.1 → v35.2). Significant changes = confirm first, increment by whole number. Version appears in two places:
-- `index.html` line ~152 — kiosk screen display: `>v35.3</div>`
-- `app.js` line ~2338 — backup payload: `app_version:'v35.3'`
+- `index.html` line ~152 — kiosk screen display: `>v35.4</div>`
+- `app.js` line ~2338 — backup payload: `app_version:'v35.4'`
 
 ---
 
@@ -82,6 +82,7 @@ The app was previously a single `index.html`. It is now 3 files:
 
 **Last session date:** May 14, 2026
 **Tasks completed this session:**
+- **v35.4:** PanoramaTrack logo is now clickable in the supervisor dashboard header and master admin dashboard header — clicking it navigates back to the kiosk screen. (`onclick="showKiosk()"` + `cursor:pointer` added to both header logos at lines 241 and 335 in `index.html`).
 - Fixed version display: was incorrectly showing `v36` — corrected to `v35.1` in both `index.html` and `app.js`
 - Confirmed no material ordering system remnants remain in the codebase (was previously started and abandoned — already fully removed)
 - Version increment rules established and documented above
@@ -145,4 +146,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: May 14, 2026 — v35.3_
+_Last updated: May 14, 2026 — v35.4_
