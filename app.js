@@ -1377,27 +1377,34 @@ function populateMasterFilters(){
   const me=document.getElementById('m-filter-emp');
   if(me)me.innerHTML='<option value="">All employees</option>'+employees.map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
 }
+let _masterPeriodMode='current';
 function initMasterLogDates(){
-  const now=new Date();
-  if(!document.getElementById('m-log-to').value){
-    document.getElementById('m-log-to').value=toDateStr(now);
-    const f=new Date(now);f.setDate(f.getDate()-13);
-    document.getElementById('m-log-from').value=toDateStr(f);
-  }
+  setMasterPeriod('current');
 }
-function setMasterLogPeriod(days,allTime){
+function setMasterPeriod(mode){
+  _masterPeriodMode=mode;
+  ['today','yesterday','current','last','prev2'].forEach(m=>{
+    const btn=document.getElementById('mpbtn-'+m);
+    if(btn){btn.style.fontWeight=m===mode?'700':'500';btn.style.background=m===mode?'var(--blue-l)':'';btn.style.color=m===mode?'var(--blue-d)':'';}
+  });
   const now=new Date();
-  if(allTime){
-    document.getElementById('m-log-from').value='';
-    document.getElementById('m-log-to').value='';
-  } else if(days===0){
-    document.getElementById('m-log-from').value=toDateStr(now);
-    document.getElementById('m-log-to').value=toDateStr(now);
-  } else {
-    document.getElementById('m-log-to').value=toDateStr(now);
-    const f=new Date(now);f.setDate(f.getDate()-(days-1));
-    document.getElementById('m-log-from').value=toDateStr(f);
+  let from,to;
+  if(mode==='today'){
+    from=new Date(now);from.setHours(0,0,0,0);
+    to=new Date(now);to.setHours(23,59,59,999);
+  } else if(mode==='yesterday'){
+    const y=new Date(now);y.setDate(y.getDate()-1);
+    from=new Date(y);from.setHours(0,0,0,0);
+    to=new Date(y);to.setHours(23,59,59,999);
+  } else if(mode==='current'){
+    const p=getPeriodByOffset(0);from=p.start;to=p.end;
+  } else if(mode==='last'){
+    const p=getPeriodByOffset(1);from=p.start;to=p.end;
+  } else if(mode==='prev2'){
+    const p=getPeriodByOffset(2);from=p.start;to=p.end;
   }
+  document.getElementById('m-log-from').value=toDateStr(from);
+  document.getElementById('m-log-to').value=toDateStr(to);
   refreshMasterLog();
 }
 let _masterLogs=[]; // cached result of last DB query
@@ -2335,7 +2342,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.2',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

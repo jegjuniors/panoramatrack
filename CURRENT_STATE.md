@@ -14,7 +14,7 @@
 **GitHub repo:** https://github.com/jegjuniors/panoramatrack (private)
 **Master password:** `master2024`
 **Auto-clock rule:** Open punches auto-clock out at 12 hours
-**Current version:** v35.1
+**Current version:** v35.2
 
 ### ⚠️ File Structure (split as of May 14, 2026)
 The app was previously a single `index.html`. It is now 3 files:
@@ -22,13 +22,13 @@ The app was previously a single `index.html`. It is now 3 files:
 |---|---|
 | `index.html` | HTML shell only — markup, links to styles.css and app.js |
 | `styles.css` | All CSS styles |
-| `app.js` | All JavaScript (~2,511 lines) |
+| `app.js` | All JavaScript (~2,515 lines) |
 
 **When making changes:** Claude only needs to read/edit the relevant file. Most changes will be to `app.js` only.
 
 **Version rule:** Minor changes = increment by 0.1 (e.g. v35.1 → v35.2). Significant changes = confirm first, increment by whole number. Version appears in two places:
-- `index.html` line ~152 — kiosk screen display: `>v35.1</div>`
-- `app.js` line ~2338 — backup payload: `app_version:'v35.1'`
+- `index.html` line ~152 — kiosk screen display: `>v35.2</div>`
+- `app.js` line ~2338 — backup payload: `app_version:'v35.2'`
 
 ---
 
@@ -71,6 +71,7 @@ The app was previously a single `index.html`. It is now 3 files:
 - PDF export with activity codes (e.g. `41-001 (Interior Steel)`)
 - Preliminary export allowed for in-progress periods
 - Multi-period view in supervisor log (Today / Yesterday / Current / Last / 2 periods ago)
+- Master admin Report tab: same period buttons as supervisor (Today / Yesterday / Current / Last / 2 periods ago), defaults to current pay period on open
 - In-app "Backup Now" button (master admin) — downloads JSON of all tables
 - Corfix safety reminder — pops up at clock-in if jobsite has a Corfix URL configured
 - Jobsite extra fields — address, GC, job number, Corfix URL (editable in master admin)
@@ -84,8 +85,9 @@ The app was previously a single `index.html`. It is now 3 files:
 - Fixed version display: was incorrectly showing `v36` — corrected to `v35.1` in both `index.html` and `app.js`
 - Confirmed no material ordering system remnants remain in the codebase (was previously started and abandoned — already fully removed)
 - Version increment rules established and documented above
+- **v35.2:** Master admin Report tab now defaults to current pay period on open. Replaced quick-select buttons (Today / Last 7 days / Last 14 days / All time) with supervisor-style period buttons (Today / Yesterday / Current period / Last period / 2 periods ago), with matching active-highlight behaviour. Old `setMasterLogPeriod()` replaced by `setMasterPeriod(mode)` mirroring `setSupPeriod()`.
 
-**Status:** App fully working. No functional changes — version fix and housekeeping only.
+**Status:** App fully working.
 
 ---
 
@@ -124,6 +126,8 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 | Theme toggle | `applyTheme()` / `setTheme()` / `pt-theme` (localStorage) |
 | Backup | `runBackup()` |
 | Corfix reminder | `showCorfixReminder()` / `JOBSITE_DATA` |
+| Master report period select | `setMasterPeriod(mode)` / `_masterPeriodMode` |
+| Supervisor period select | `setSupPeriod(mode)` / `_supPeriodMode` |
 | Version display | `index.html` line ~152 and `app.js` line ~2338 |
 
 ---
@@ -136,4 +140,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: May 14, 2026 — v35.1_
+_Last updated: May 14, 2026 — v35.2_
