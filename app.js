@@ -1077,7 +1077,14 @@ function switchMasterTab(tab){
   if(tab==='departments')refreshDepartmentsPanel();
   if(tab==='activities')refreshActivitiesPanel();
   if(tab==='submissions')refreshSubmissionsPanel();
-  if(tab==='log'){populateMasterFilters();initMasterLogDates();refreshMasterLog();}
+  if(tab==='log'){
+    populateMasterFilters();
+    // Reset all filters to defaults whenever the tab is opened directly
+    document.getElementById('m-filter-site').value='';
+    document.getElementById('m-filter-emp').value='';
+    document.getElementById('m-filter-flags').value='';
+    initMasterLogDates();
+  }
 }
 
 /* ─── Master: Activities panel ─── */
@@ -1354,21 +1361,24 @@ function refreshMasterEmps(){
 /* ─── Navigate from overview tiles to Report tab with pre-set filters ─── */
 function goToReport({today=false, flags=false, site=''}={}){
   switchMasterTab('log');
-  // Override filters after switchMasterTab's initMasterLogDates runs
-  const now=new Date();
-  const todayStr=toDateStr(now);
+  // switchMasterTab already resets all dropdowns and calls initMasterLogDates (current period).
+  // Now override only what this specific tile needs.
   if(flags){
-    // Use current pay period date range
+    // Needs Review tile: current period range, flags filter on
     const pp=getPeriodByOffset(0);
     document.getElementById('m-log-from').value=toDateStr(pp.start);
     document.getElementById('m-log-to').value=toDateStr(pp.end);
+    // Highlight 'current' period button to match date range shown
+    ['today','yesterday','current','last','prev2'].forEach(m=>{
+      const btn=document.getElementById('mpbtn-'+m);
+      if(btn){btn.style.fontWeight=m==='current'?'700':'500';btn.style.background=m==='current'?'var(--blue-l)':'';btn.style.color=m==='current'?'var(--blue-d)':'';}
+    });
     document.getElementById('m-filter-flags').value='auto';
   } else if(today||site){
-    document.getElementById('m-log-from').value=todayStr;
-    document.getElementById('m-log-to').value=todayStr;
+    // Clocked In Now tile or site card: today date range, highlight Today button
+    setMasterPeriod('today');
+    if(site)document.getElementById('m-filter-site').value=site;
   }
-  if(site)document.getElementById('m-filter-site').value=site;
-  document.getElementById('m-filter-emp').value='';
   refreshMasterLog();
 }
 
@@ -2342,7 +2352,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.2',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.3',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

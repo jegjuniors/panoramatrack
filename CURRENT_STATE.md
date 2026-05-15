@@ -14,7 +14,7 @@
 **GitHub repo:** https://github.com/jegjuniors/panoramatrack (private)
 **Master password:** `master2024`
 **Auto-clock rule:** Open punches auto-clock out at 12 hours
-**Current version:** v35.2
+**Current version:** v35.3
 
 ### ⚠️ File Structure (split as of May 14, 2026)
 The app was previously a single `index.html`. It is now 3 files:
@@ -27,8 +27,8 @@ The app was previously a single `index.html`. It is now 3 files:
 **When making changes:** Claude only needs to read/edit the relevant file. Most changes will be to `app.js` only.
 
 **Version rule:** Minor changes = increment by 0.1 (e.g. v35.1 → v35.2). Significant changes = confirm first, increment by whole number. Version appears in two places:
-- `index.html` line ~152 — kiosk screen display: `>v35.2</div>`
-- `app.js` line ~2338 — backup payload: `app_version:'v35.2'`
+- `index.html` line ~152 — kiosk screen display: `>v35.3</div>`
+- `app.js` line ~2338 — backup payload: `app_version:'v35.3'`
 
 ---
 
@@ -86,6 +86,11 @@ The app was previously a single `index.html`. It is now 3 files:
 - Confirmed no material ordering system remnants remain in the codebase (was previously started and abandoned — already fully removed)
 - Version increment rules established and documented above
 - **v35.2:** Master admin Report tab now defaults to current pay period on open. Replaced quick-select buttons (Today / Last 7 days / Last 14 days / All time) with supervisor-style period buttons (Today / Yesterday / Current period / Last period / 2 periods ago), with matching active-highlight behaviour. Old `setMasterLogPeriod()` replaced by `setMasterPeriod(mode)` mirroring `setSupPeriod()`.
+- **v35.3:** Fixed Report tab filter reset behaviour in master admin panel:
+  - Clicking the Report tab via the nav bar now resets all filters (jobsite → All, employee → All, flags → All records) and defaults to current pay period.
+  - "Clocked in now" tile now correctly highlights the **Today** button (previously Current Period stayed highlighted even though date range was set to today).
+  - "Needs review" tile correctly sets flags filter to "Needs review only" — all other entry points always reset it to "All records".
+  - Site card clicks from the overview now correctly use today's date with Today button highlighted, plus the site pre-selected.
 
 **Status:** App fully working.
 
@@ -140,4 +145,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: May 14, 2026 — v35.2_
+_Last updated: May 14, 2026 — v35.3_
