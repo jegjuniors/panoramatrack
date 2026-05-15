@@ -14,7 +14,7 @@
 **GitHub repo:** https://github.com/jegjuniors/panoramatrack (private)
 **Master password:** `master2024`
 **Auto-clock rule:** Open punches auto-clock out at 12 hours
-**Current version:** v35.3
+**Current version:** v35.4
 
 ### ⚠️ File Structure (split as of May 14, 2026)
 The app was previously a single `index.html`. It is now 3 files:
@@ -90,7 +90,7 @@ The app was previously a single `index.html`. It is now 3 files:
   - Clicking the Report tab via the nav bar now resets all filters (jobsite → All, employee → All, flags → All records) and defaults to current pay period.
   - "Clocked in now" tile now correctly highlights the **Today** button (previously Current Period stayed highlighted even though date range was set to today).
   - "Needs review" tile correctly sets flags filter to "Needs review only" — all other entry points always reset it to "All records".
-  - Site card clicks from the overview now correctly use today's date with Today button highlighted, plus the site pre-selected.
+- **v35.4:** Combined Employees and Departments admin tabs into a single **Employee/Dept** tab with two collapsible accordion sections (👥 Employees expanded by default, 🏢 Departments collapsed). Accordion toggle handled by `toggleEmpDeptSection(section)`. The overview "Total employees" tile now links to the combined tab. `switchMasterTab` updated to use `'empdept'` instead of `'employees'` and `'departments'` separately.
 
 **Status:** App fully working.
 
@@ -145,4 +145,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: May 14, 2026 — v35.3_
+_Last updated: May 14, 2026 — v35.4_
