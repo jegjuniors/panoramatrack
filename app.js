@@ -50,6 +50,21 @@ function showDbError(msg){
   showCustomAlert('Database error',msg+' — check your connection and refresh.');
 }
 
+/* ─── Theme ─── */
+function applyTheme(t){
+  const app=document.getElementById('app');
+  app.removeAttribute('data-theme');
+  if(t==='light'||t==='dark'||t==='auto') app.setAttribute('data-theme',t);
+  ['light','dark','auto'].forEach(m=>{
+    const btn=document.getElementById('theme-btn-'+m);
+    if(btn) btn.classList.toggle('active',m===t);
+  });
+}
+function setTheme(t){
+  localStorage.setItem('pt-theme',t);
+  applyTheme(t);
+}
+
 /* ─── Date/time helpers ─── */
 function fmt(d){return d instanceof Date?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'—'}
 // Full: "Tue, May 6 · 08:30 AM"
@@ -82,6 +97,7 @@ setInterval(()=>checkAutoServer(),30000);
 
 /* ─── Boot: load all data from Supabase ─── */
 async function bootApp(){
+  applyTheme(localStorage.getItem('pt-theme')||'dark');
   setLoading('Connecting to database…');
   try {
     // Load jobsites
