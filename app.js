@@ -23,7 +23,7 @@ let JOBSITE_DATA={};  // name → {address, gc, jobNumber, corfixUrl}
 let supervisors=[]; // derived at runtime from employees where dept='Supervisor'
 let DEPARTMENTS=[]; // loaded from DB
 let employees=[];
-let APP_SETTINGS={  // pay rules — loaded from Supabase `settings` row on boot (v36.1)
+let APP_SETTINGS={  // pay rules — loaded from Supabase `pt_settings` row on boot (v36.1)
   roundingEnabled:false, roundingMinutes:15,
   schedEndEnabled:false, schedEndTime:'15:30', schedEndWindow:15
 };
@@ -87,7 +87,7 @@ function toLocal(d){if(!(d instanceof Date))return '';const p=n=>String(n).padSt
 function toDateStr(d){if(!(d instanceof Date))return '';const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`}
 
 /* ─── Pay-rule engine (v36.1) ──────────────────────────────────────────────
-   Settings live in Supabase (`settings` row, id=1) so every device agrees.
+   Settings live in Supabase (`pt_settings` row, id=1) so every device agrees.
    Both rules are DISPLAY/EXPORT-ONLY — raw punches in the DB are never changed.
    Order is credit-then-round. Auto-clocked & estimated punches are left exact. */
 function applySettingsRow(r){
@@ -195,7 +195,7 @@ async function bootApp(){
     // Load pay-rule settings (v36.1). Defaults stay in effect if the row is missing.
     setLoading('Loading settings…');
     try{
-      const {data:setData}=await sb.from('settings').select('*').eq('id',1).maybeSingle();
+      const {data:setData}=await sb.from('pt_settings').select('*').eq('id',1).maybeSingle();
       if(setData)applySettingsRow(setData);
     }catch(setErr){ console.warn('Settings load failed, using defaults:',setErr); }
 
@@ -1134,7 +1134,7 @@ async function saveSettings(){
     updated_at:new Date().toISOString()
   };
   msg.style.color='var(--txt2)';msg.textContent='Saving…';
-  const {error}=await sb.from('settings').upsert(row,{onConflict:'id'});
+  const {error}=await sb.from('pt_settings').upsert(row,{onConflict:'id'});
   if(error){msg.style.color='var(--red)';msg.textContent='Could not save: '+error.message;return}
   applySettingsRow(row);            // update this device immediately
   msg.style.color='var(--green)';msg.textContent='Saved. Pay rules updated across all devices.';
