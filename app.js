@@ -23,6 +23,10 @@ let JOBSITE_DATA={};  // name → {address, gc, jobNumber, corfixUrl}
 let supervisors=[]; // derived at runtime from employees where dept='Supervisor'
 let DEPARTMENTS=[]; // loaded from DB
 let employees=[];
+let APP_SETTINGS={  // pay rules — loaded from Supabase `settings` row on boot (v36.1)
+  roundingEnabled:false, roundingMinutes:15,
+  schedEndEnabled:false, schedEndTime:'15:30', schedEndWindow:15
+};
 let timeLog=[];      // active punches only cached in memory for speed
 let currentPin='';
 let pendingClockOut=null;
@@ -82,6 +86,54 @@ function fmtDate(d){return d instanceof Date?d.toLocaleDateString([],{weekday:'l
 function toLocal(d){if(!(d instanceof Date))return '';const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`}
 function toDateStr(d){if(!(d instanceof Date))return '';const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`}
 
+/* ─── Pay-rule engine (v36.1) ──────────────────────────────────────────────
+   Settings live in Supabase (`settings` row, id=1) so every device agrees.
+   Both rules are DISPLAY/EXPORT-ONLY — raw punches in the DB are never changed.
+   Order is credit-then-round. Auto-clocked & estimated punches are left exact. */
+function applySettingsRow(r){
+  APP_SETTINGS={
+    roundingEnabled:!!r.rounding_enabled,
+    roundingMinutes:r.rounding_minutes||15,
+    schedEndEnabled:!!r.sched_end_enabled,
+    schedEndTime:r.sched_end_time||'15:30',
+    schedEndWindow:(r.sched_end_window!=null?r.sched_end_window:15)
+  };
+}
+// Round a Date to the nearest interval using local clock minutes (7/8 breakpoint
+// for 15-min; same nearest-rule for 6/5). Timezone-safe — works on local time-of-day.
+function roundTime(d,intervalMin){
+  if(!intervalMin||intervalMin<1)return d;
+  const r=new Date(d);
+  const total=r.getHours()*60+r.getMinutes()+r.getSeconds()/60;
+  const rounded=Math.round(total/intervalMin)*intervalMin;
+  r.setHours(0,rounded,0,0); // setHours normalizes minute overflow into hours/day
+  return r;
+}
+// Credit a clock-out up to the scheduled end if it falls inside the window before it.
+// Never clips a later punch-out (real overtime is paid). No credit for genuine early leaves.
+function applySchedEnd(inT,outT){
+  const [eh,em]=(APP_SETTINGS.schedEndTime||'15:30').split(':').map(Number);
+  const sched=new Date(outT);sched.setHours(eh,em,0,0);
+  const winStart=new Date(sched.getTime()-(APP_SETTINGS.schedEndWindow||15)*60000);
+  if(outT>=winStart&&outT<sched)return sched;
+  return outT;
+}
+// Effective {in,out} after applying enabled rules. Synthetic punches untouched.
+function adjustedTimes(entry){
+  let inT=entry.in,outT=entry.out;
+  if(!outT)return {in:inT,out:null};
+  if(entry.autoClocked||entry.estimatedOut)return {in:inT,out:outT};
+  if(APP_SETTINGS.schedEndEnabled)outT=applySchedEnd(inT,outT);
+  if(APP_SETTINGS.roundingEnabled){inT=roundTime(inT,APP_SETTINGS.roundingMinutes);outT=roundTime(outT,APP_SETTINGS.roundingMinutes);}
+  return {in:inT,out:outT};
+}
+// Paid hours for a punch (null if still open). Used everywhere hours are totalled.
+function paidHours(entry){
+  if(!entry.out)return null;
+  const a=adjustedTimes(entry);
+  return Math.max(0,(a.out-a.in)/3600000);
+}
+
 function updateClock(){
   const now=new Date();
   const el=document.getElementById('kiosk-time');const de=document.getElementById('kiosk-date');
@@ -139,6 +191,13 @@ async function bootApp(){
     if(actErr)throw actErr;
     ALL_ACTIVITIES=actData.map(r=>({id:r.id,name:r.name,code:r.code||'',sortOrder:r.sort_order,active:r.active}));
     ACTIVITIES=ALL_ACTIVITIES.filter(a=>a.active);
+
+    // Load pay-rule settings (v36.1). Defaults stay in effect if the row is missing.
+    setLoading('Loading settings…');
+    try{
+      const {data:setData}=await sb.from('settings').select('*').eq('id',1).maybeSingle();
+      if(setData)applySettingsRow(setData);
+    }catch(setErr){ console.warn('Settings load failed, using defaults:',setErr); }
 
     // Load open punches (no clock-out) into memory for live status
     setLoading('Loading active punches…');
@@ -982,13 +1041,13 @@ async function refreshSupLog(){
 
   container.innerHTML=Object.entries(empMap).map(([empId,data])=>{
     const records=data.records;
-    const totalHrs=records.reduce((s,l)=>s+(l.out?((l.out-l.in)/3600000):0),0);
+    const totalHrs=records.reduce((s,l)=>s+(paidHours(l)||0),0);
     const flags=records.filter(l=>l.autoClocked).length;
     const still=records.filter(l=>!l.out).length;
     const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
-      const hrs=l.out?((l.out-l.in)/3600000).toFixed(2):'—';
+      const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
       const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
       const actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
       const isAssignedSite=(activeSup.jobsites||[]).includes(l.jobsite);
@@ -1050,6 +1109,37 @@ function toggleEmpCard(id){
   if(chev)chev.textContent=open?'▾':'▸';
 }
 
+/* ─── Master: Settings (pay rules, v36.1) ─── */
+function refreshSettingsPanel(){
+  document.getElementById('set-rounding-enabled').checked=APP_SETTINGS.roundingEnabled;
+  document.getElementById('set-rounding-minutes').value=String(APP_SETTINGS.roundingMinutes||15);
+  document.getElementById('set-sched-enabled').checked=APP_SETTINGS.schedEndEnabled;
+  document.getElementById('set-sched-time').value=APP_SETTINGS.schedEndTime||'15:30';
+  document.getElementById('set-sched-window').value=APP_SETTINGS.schedEndWindow||15;
+  document.getElementById('set-save-msg').textContent='';
+}
+async function saveSettings(){
+  const msg=document.getElementById('set-save-msg');
+  const roundingMinutes=parseInt(document.getElementById('set-rounding-minutes').value,10)||15;
+  const schedTime=document.getElementById('set-sched-time').value||'15:30';
+  let schedWindow=parseInt(document.getElementById('set-sched-window').value,10);
+  if(isNaN(schedWindow)||schedWindow<1)schedWindow=15;
+  const row={
+    id:1,
+    rounding_enabled:document.getElementById('set-rounding-enabled').checked,
+    rounding_minutes:roundingMinutes,
+    sched_end_enabled:document.getElementById('set-sched-enabled').checked,
+    sched_end_time:schedTime,
+    sched_end_window:schedWindow,
+    updated_at:new Date().toISOString()
+  };
+  msg.style.color='var(--txt2)';msg.textContent='Saving…';
+  const {error}=await sb.from('settings').upsert(row,{onConflict:'id'});
+  if(error){msg.style.color='var(--red)';msg.textContent='Could not save: '+error.message;return}
+  applySettingsRow(row);            // update this device immediately
+  msg.style.color='var(--green)';msg.textContent='Saved. Pay rules updated across all devices.';
+}
+
 /* ─── Supervisor: Employees ─── */
 function refreshSupEmps(){
   const tbody=document.getElementById('s-emp-table');
@@ -1101,7 +1191,7 @@ async function savePinReset(){
 
 /* ─── Master tabs ─── */
 function switchMasterTab(tab){
-  ['overview','jobsites','employees','departments','activities','submissions','log'].forEach(t=>{
+  ['overview','jobsites','employees','departments','activities','submissions','log','settings'].forEach(t=>{
     document.getElementById('mpanel-'+t).style.display=t===tab?'block':'none';
     document.getElementById('mtab-'+t).classList.toggle('active',t===tab);
   });
@@ -1111,6 +1201,7 @@ function switchMasterTab(tab){
   if(tab==='departments')refreshDepartmentsPanel();
   if(tab==='activities')refreshActivitiesPanel();
   if(tab==='submissions')refreshSubmissionsPanel();
+  if(tab==='settings')refreshSettingsPanel();
   if(tab==='log'){
     populateMasterFilters();
     // Reset all filters to defaults whenever the tab is opened directly
@@ -1477,7 +1568,7 @@ async function refreshMasterLog(){
   // Update preview summary
   const prev=document.getElementById('m-report-preview');
   if(logs.length){
-    const totalHrs=logs.reduce((s,l)=>s+(l.out?((l.out-l.in)/3600000):0),0);
+    const totalHrs=logs.reduce((s,l)=>s+(paidHours(l)||0),0);
     const empCount=new Set(logs.map(l=>l.empId)).size;
     const flags=logs.filter(l=>l.autoClocked).length;
     prev.innerHTML=`<strong>${logs.length}</strong> records &nbsp;·&nbsp; <strong>${empCount}</strong> employee${empCount!==1?'s':''} &nbsp;·&nbsp; <strong>${totalHrs.toFixed(1)}h</strong> total${flags?` &nbsp;·&nbsp; <strong style="color:#e07070;">${flags} ⚠️ need review</strong>`:''}`;
@@ -1488,7 +1579,7 @@ async function refreshMasterLog(){
   if(!logs.length){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--txt2);padding:20px;">No records match</td></tr>';return}
   tbody.innerHTML=[...logs].reverse().map(l=>{
     const idx=timeLog.indexOf(l);
-    const hrs=l.out?((l.out-l.in)/3600000).toFixed(2):'—';
+    const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
     const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
     const actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
     const si=JOBSITES.indexOf(l.jobsite);const color=si>=0?getSiteColor(si):'#555';
@@ -1523,8 +1614,9 @@ function doMasterExport(){
   const logs=_masterLogs||masterExportRange.logs||[];
   const header=['Employee','Department','Jobsite','Clock In','Clock Out','Hours','Activities','Auto-Clocked'];
   const rows=logs.map(l=>{
-    const hrs=l.out?((l.out-l.in)/3600000).toFixed(2):'';
-    return [l.name,l.dept,l.jobsite,fmtDt(l.in),l.out?fmtDt(l.out):'Still in',hrs,(l.activity||[]).join('; '),l.autoClocked?'YES':'NO'].map(v=>`"${v}"`).join(',');
+    const at=adjustedTimes(l);
+    const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'';
+    return [l.name,l.dept,l.jobsite,fmtDt(at.in),at.out?fmtDt(at.out):'Still in',hrs,(l.activity||[]).join('; '),l.autoClocked?'YES':'NO'].map(v=>`"${v}"`).join(',');
   });
   const csv=[header.join(','),...rows].join('\n');
   const blob=new Blob([csv],{type:'text/csv'});
@@ -1789,7 +1881,7 @@ async function updateExportPreview(){
   if(to<=from){prev.textContent='End date must be after start date.';return}
   prev.textContent='Loading…';
   const logs=await fetchExportLogs(from,to);
-  const total=logs.reduce((s,l)=>s+(l.out?((l.out-l.in)/3600000):0),0);
+  const total=logs.reduce((s,l)=>s+(paidHours(l)||0),0);
   const flags=logs.filter(l=>l.autoClocked).length;
   const empCount=new Set(logs.map(l=>l.empId)).size;
   prev.innerHTML=`<strong>${logs.length}</strong> punch records · <strong>${empCount}</strong> employee${empCount!==1?'s':''} · <strong>${total.toFixed(1)}h</strong> total${flags?` · <strong style="color:#e07070;">${flags} ⚠️ need review</strong>`:''}`;
@@ -2079,17 +2171,19 @@ function generatePDF(){
   function consolidate(punches){
     const dayMap={};
     punches.forEach(p=>{
+      const at=adjustedTimes(p);   // effective in/out after pay rules (raw for synthetic punches)
+      const aIn=at.in,aOut=at.out;
       // Key by date + jobsite so different sites on same day stay separate rows
       const dayKey=p.in.toDateString()+'|'+(p.jobsite||'');
       if(!dayMap[dayKey])dayMap[dayKey]={
-        date:p.in,clockIn:p.in,clockOut:p.out,
+        date:aIn,clockIn:aIn,clockOut:aOut,
         hrs:0,acts:new Set(),jobsite:p.jobsite||'—',
         hasAuto:false,hasEstimated:false
       };
       const d=dayMap[dayKey];
-      if(p.in<d.clockIn)d.clockIn=p.in;
-      if(p.out&&(!d.clockOut||p.out>d.clockOut))d.clockOut=p.out;
-      if(p.out)d.hrs+=((p.out-p.in)/3600000);
+      if(aIn<d.clockIn)d.clockIn=aIn;
+      if(aOut&&(!d.clockOut||aOut>d.clockOut))d.clockOut=aOut;
+      const ph=paidHours(p);if(ph!=null)d.hrs+=ph;
       (p.activity||[]).forEach(a=>{if(a!=='Auto-clocked')d.acts.add(a);});
       if(p.autoClocked)d.hasAuto=true;
       if(p.estimatedOut)d.hasEstimated=true;
@@ -2431,7 +2525,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v36.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v36.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
