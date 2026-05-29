@@ -1805,6 +1805,17 @@ async function openExportConfirm(){
   const logs=await fetchExportLogs(from,to);
   if(!logs.length){err.textContent='No punch records found for this date range and jobsite(s).';return}
 
+  // ── Review gate: block submit while any punch in this report is still auto-clocked ──
+  // (Supervisors only — master admin export path is intentionally not gated.)
+  // An auto-clocked punch flips auto_clocked=false once a supervisor edits in a real
+  // clock-out, so this set clears automatically as each one is addressed. Applies to
+  // both preliminary and final submissions.
+  const needsReview=logs.filter(l=>l.autoClocked);
+  if(needsReview.length){
+    showReviewGate(needsReview);
+    return;
+  }
+
   // Determine if this is a preliminary (period not yet complete)
   const isPrelim=to>new Date();
   const periodStart=toDateStr(from);const periodEnd=toDateStr(to);
@@ -1825,6 +1836,24 @@ async function openExportConfirm(){
   }
 
   await checkDupsAndProceed();
+}
+
+// ── Review gate modal (auto-clocked punches must be resolved before submit) ──
+function showReviewGate(list){
+  const el=document.getElementById('review-gate-list');
+  if(el){
+    el.innerHTML=list.map(l=>`<div style="padding:5px 0;border-bottom:0.5px solid var(--bdr);">
+        <strong>${l.name}</strong>
+        <span style="color:var(--txt2);font-size:11px;display:block;">Clocked in ${fmtDt(l.in)} · auto-out at 12h</span>
+      </div>`).join('');
+  }
+  document.getElementById('review-gate-bg').style.display='flex';
+}
+function closeReviewGate(){document.getElementById('review-gate-bg').style.display='none';}
+function reviewGateGoNow(){
+  closeReviewGate();
+  const err=document.getElementById('s-export-err');if(err)err.textContent='';
+  goToSupReport('review'); // jumps Time log into the needs-review filter (v35.7)
 }
 
 function showEstModal(openPunches){
@@ -2402,7 +2431,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.7',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v36.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

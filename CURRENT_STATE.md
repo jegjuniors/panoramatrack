@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v35.7
+**Current Version:** v36.0
 **Last Updated:** May 29, 2026
 
 ---
@@ -48,6 +48,7 @@ No separate supervisors table.
 - **Session persistence across app close/reopen** — supervisors and master admin stay logged in for up to 8 hours (refreshes on activity); stored in `localStorage` so it survives tab close and returning to the app
 - **Supervisor permission gating** — a supervisor cannot change another supervisor's kiosk PIN or login password (admin only); they can still change their own and manage regular employees' PINs. UI-level guard (Reset PIN button hidden + PIN field locked + password field hidden when editing another supervisor), with a matching guard in `saveEmployee` against DOM tampering
 - **Clickable Live tiles (supervisor panel)** — the three Live stat tiles now jump to the Time log with the right view: Head Count → Today + "still clocked in only"; Yesterday's Head Count → Yesterday; Needs Review → "needs review only" showing ALL outstanding flagged records (period-independent, matches the tile count). Backed by a new filter dropdown on the supervisor Time log (`s-filter-flags`: All records / Still clocked in only / Needs review only)
+- **Review gate on supervisor submit** — a supervisor cannot submit a report (preliminary OR final) while any punch in the selected range is still auto-clocked. A blocking modal lists the affected employees + clock-in times; "Review these now" jumps the Time log into the needs-review filter to fix them. The gate clears automatically as each auto-clock is edited to a real clock-out. Master admin export is intentionally NOT gated (admin override)
 
 ---
 
@@ -55,7 +56,15 @@ No separate supervisors table.
 
 **Last session date:** May 29, 2026
 **Tasks completed this session:**
-- **v35.7 (this session):** Two contained feature additions ahead of the Monday reporting period.
+- **v36.0 (this session — part 1 of v36):** Review gate on supervisor report submission.
+  - A supervisor can no longer submit a report (preliminary OR final) while any punch in the selected date range + jobsites is still auto-clocked (`auto_clocked = true`). The gate runs at the very start of the export flow, before the duplicate-check and estimated-clock-out steps.
+  - On a blocked attempt, a new modal (`#review-gate-bg`) lists the affected employees and their clock-in times. "Review these now" closes the export and calls `goToSupReport('review')`, dropping the Time log into the needs-review filter so they can fix each one. "Cancel" backs out.
+  - Because punches are re-fetched on every export attempt and editing an auto-clock flips `auto_clocked → false`, the gate clears itself as each one is resolved — no new data model.
+  - **Master admin export is intentionally not gated** — admin can submit regardless (override).
+  - `index.html`: added `#review-gate-bg` modal (after the dup modal); version badge → v36.0.
+  - `app.js`: gate block added in `openExportConfirm` after the punch fetch; new `showReviewGate()` / `closeReviewGate()` / `reviewGateGoNow()`; backup payload version → v36.0.
+  - **Still pending for v36 (part 2):** time rounding — see Next Session Agenda below. Design is settled (symmetric nearest-interval, per punch, display/export-only; auto-clocked + estimated left exact; Alberta 7/8 rule confirmed). Interval (15 vs 6 vs 5 min) to be finalized before build.
+- **v35.7:** Two contained feature additions ahead of the Monday reporting period.
   - **Supervisor permissions:** supervisors can no longer change *other* supervisors' kiosk PIN or login password — admin only. They can still change their own and manage regular employees.
     - `index.html`: added `id="emp-sup-pass-field"` to the password field wrapper; added `#emp-restrict-note` lock message under the PIN field.
     - `app.js`: `refreshSupEmps` hides Reset PIN for other supervisors; `openEmpModal` locks the PIN field + hides the password field + shows the note when a supervisor edits another supervisor (`ctx==='sup'`); `saveEmployee` preserves the existing PIN/password in that case (DOM-tamper guard).
@@ -101,19 +110,20 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ---
 
-## ⏭ Next Session Agenda — Time Rounding + Export (do together, before Monday)
+## ⏭ Next Session Agenda — Time Rounding (part 2 of v36, before Monday)
 
-These two belong in one session because rounded times need to flow into the export. Design questions to settle at the start:
+Review gate shipped in v36.0. Remaining v36 work is the time rounding (and surfacing it in the export).
 
-**Time rounding** (net-new — not in codebase or roadmap yet; highest-stakes change since it affects pay):
-- Rounding rule? Options: nearest quarter-hour (7-minute rule), nearest tenth of an hour (6 min), or clock-in rounds up / clock-out rounds down with a grace window.
-- Per-punch (round in and out separately) or applied to the daily/period total?
-- Display/export-only (raw punches stay intact in the DB, rounding is a transform — recommended) vs. storing rounded values?
+**Time rounding** — design settled in discussion:
+- **Method:** symmetric nearest-interval, per punch, using the 7/8 breakpoint (0–7 round back, 8–14 round forward). Inherently neutral — compliant with Alberta Employment Standards (15-min/7-min rule explicitly permitted there).
+- **Interval:** single `ROUND_MIN` constant so 15 / 6 / 5 is a one-line switch. **Interval to be finalized before build** (leaning 15-min per Alberta confirmation, but not locked).
+- **Scope:** display/export-only — raw punches stay intact in the DB, rounding is a render-time transform. Fully reversible.
+- **Where it shows up:** supervisor log, master report, export preview, and PDF (In/Out columns show rounded times so the Hours column is transparent).
+- **Edge cases:** auto-clocked (12h) + estimated clock-outs left exact (already synthetic). "Needs review" flag + still-clocked-in logic must key off RAW times, not rounded, so rounding never shifts which punches get flagged.
 
-**Export** (PDF already works — preliminary + final, with activity codes):
-- What needs to change — a new format (CSV for payroll/accounting), a layout change, or just surfacing the rounded times in the existing PDF?
+**Export:** decide whether anything beyond surfacing rounded times in the existing PDF is needed (e.g. a CSV for payroll).
 
-Relevant code to reread: `getPeriodByOffset`, `fetchExportLogs`, `updateExportPreview`, `openExportConfirm`, `generatePDF`.
+Relevant code to reread: `getPeriodByOffset`, `fetchExportLogs`, `updateExportPreview`, `openExportConfirm`, `generatePDF`, `consolidate` (inside generatePDF).
 
 ---
 
@@ -140,6 +150,7 @@ Relevant code to reread: `getPeriodByOffset`, `fetchExportLogs`, `updateExportPr
 | Session persistence | `tryRestoreSession()` / `SESSION_PERSIST_MS` / `pt_session` (localStorage) |
 | Supervisor permission gating | `refreshSupEmps()` / `openEmpModal(id,ctx)` / `saveEmployee()` — `restricted` flag; `#emp-sup-pass-field`, `#emp-restrict-note` in index.html |
 | Live tile navigation | `goToSupReport(which)` → `setSupPeriod` + `s-filter-flags` + `refreshSupLog` |
+| Submit review gate | `openExportConfirm()` (gate block) → `showReviewGate()` / `closeReviewGate()` / `reviewGateGoNow()`; `#review-gate-bg` in index.html. Master path (`openMasterExportConfirm`) is NOT gated |
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
 | Version display | `index.html` line ~153 and `app.js` backup payload |
 
@@ -153,4 +164,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: May 29, 2026 — v35.7_
+_Last updated: May 29, 2026 — v36.0_
