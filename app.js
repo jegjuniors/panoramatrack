@@ -846,6 +846,7 @@ function initLogDates(){
 
 function setSupPeriod(mode){
   _supPeriodMode=mode;
+  const _ff=document.getElementById('s-filter-flags');if(_ff)_ff.value='';
   // highlight active button
   ['today','yesterday','current','last','prev2'].forEach(m=>{
     const btn=document.getElementById('spbtn-'+m);
@@ -920,39 +921,51 @@ function setSupPeriod(mode){
 /* ─── Supervisor: Log (per-employee accordion) ─── */
 async function refreshSupLog(){
   await checkAutoServer();if(!activeSup)return;
-  const fromV=document.getElementById('s-log-from').value;
-  const toV=document.getElementById('s-log-to').value;
-  let from=null,to=null;
-  if(fromV){const[fy,fm,fd]=fromV.split('-').map(Number);from=new Date(fy,fm-1,fd,0,0,0,0);}
-  if(toV){const[ty,tm,td]=toV.split('-').map(Number);to=new Date(ty,tm-1,td,23,59,59,999);}
-
   const sites=activeSup.jobsites||[];
-
-  // Two-step query: find employees with any punch at supervisor's sites, then get ALL their punches
-  let siteQuery=sb.from('punches').select('employee_id').in('jobsite',sites);
-  if(from)siteQuery=siteQuery.gte('clock_in',from.toISOString());
-  if(to)siteQuery=siteQuery.lte('clock_in',to.toISOString());
-  const {data:siteData,error:siteErr}=await siteQuery;
-  if(siteErr){showCustomAlert('Error','Could not load log: '+siteErr.message);return}
-
-  const empIds=[...new Set((siteData||[]).map(r=>r.employee_id).filter(Boolean))];
+  const filter=document.getElementById('s-filter-flags')?.value||'';
   let logs=[];
-  if(empIds.length){
-    // Also include open in-memory punches at supervisor's sites
-    const openAtSite=timeLog.filter(l=>sites.includes(l.jobsite)&&!l.dbId&&l.empId);
-    openAtSite.forEach(l=>{if(!empIds.includes(l.empId))empIds.push(l.empId);});
 
-    // Fetch ALL punches for these employees in the date range (any site)
-    let allQuery=sb.from('punches').select('*').in('employee_id',empIds).order('clock_in',{ascending:false});
-    if(from)allQuery=allQuery.gte('clock_in',from.toISOString());
-    if(to)allQuery=allQuery.lte('clock_in',to.toISOString());
-    const {data,error}=await allQuery;
+  if(filter==='review'){
+    // Needs review only: ALL outstanding auto-clocked & uncorrected punches at supervisor's sites (period-independent, matches the Live tile count)
+    const {data,error}=await sb.from('punches').select('*')
+      .in('jobsite',sites).eq('auto_clocked',true).eq('edited_after_auto',false)
+      .order('clock_in',{ascending:false});
     if(error){showCustomAlert('Error','Could not load log: '+error.message);return}
     logs=(data||[]).map(dbRowToEntry);
-    // Merge open in-memory punches for these employees not yet in DB
-    timeLog.filter(l=>empIds.includes(l.empId)&&!l.dbId).forEach(l=>{
-      if(!from||l.in>=from)if(!to||l.in<=to)logs.unshift(l);
-    });
+    const lbl=document.getElementById('s-period-label');if(lbl)lbl.textContent='All outstanding review items';
+  } else {
+    const fromV=document.getElementById('s-log-from').value;
+    const toV=document.getElementById('s-log-to').value;
+    let from=null,to=null;
+    if(fromV){const[fy,fm,fd]=fromV.split('-').map(Number);from=new Date(fy,fm-1,fd,0,0,0,0);}
+    if(toV){const[ty,tm,td]=toV.split('-').map(Number);to=new Date(ty,tm-1,td,23,59,59,999);}
+
+    // Two-step query: find employees with any punch at supervisor's sites, then get ALL their punches
+    let siteQuery=sb.from('punches').select('employee_id').in('jobsite',sites);
+    if(from)siteQuery=siteQuery.gte('clock_in',from.toISOString());
+    if(to)siteQuery=siteQuery.lte('clock_in',to.toISOString());
+    const {data:siteData,error:siteErr}=await siteQuery;
+    if(siteErr){showCustomAlert('Error','Could not load log: '+siteErr.message);return}
+
+    const empIds=[...new Set((siteData||[]).map(r=>r.employee_id).filter(Boolean))];
+    if(empIds.length){
+      // Also include open in-memory punches at supervisor's sites
+      const openAtSite=timeLog.filter(l=>sites.includes(l.jobsite)&&!l.dbId&&l.empId);
+      openAtSite.forEach(l=>{if(!empIds.includes(l.empId))empIds.push(l.empId);});
+
+      // Fetch ALL punches for these employees in the date range (any site)
+      let allQuery=sb.from('punches').select('*').in('employee_id',empIds).order('clock_in',{ascending:false});
+      if(from)allQuery=allQuery.gte('clock_in',from.toISOString());
+      if(to)allQuery=allQuery.lte('clock_in',to.toISOString());
+      const {data,error}=await allQuery;
+      if(error){showCustomAlert('Error','Could not load log: '+error.message);return}
+      logs=(data||[]).map(dbRowToEntry);
+      // Merge open in-memory punches for these employees not yet in DB
+      timeLog.filter(l=>empIds.includes(l.empId)&&!l.dbId).forEach(l=>{
+        if(!from||l.in>=from)if(!to||l.in<=to)logs.unshift(l);
+      });
+    }
+    if(filter==='stillin')logs=logs.filter(l=>!l.out);
   }
 
   // Update export preview with same date range
@@ -1011,6 +1024,24 @@ async function refreshSupLog(){
   }).join('');
 }
 
+/* ─── Navigate from Live tiles to the Time log with the right view ─── */
+function goToSupReport(which){
+  switchSupTab('log');
+  const ff=document.getElementById('s-filter-flags');
+  if(which==='headcount'){
+    setSupPeriod('today');
+    if(ff)ff.value='stillin';
+    refreshSupLog();
+  } else if(which==='yesterday'){
+    setSupPeriod('yesterday');
+    if(ff)ff.value='';
+    refreshSupLog();
+  } else if(which==='review'){
+    if(ff)ff.value='review';
+    refreshSupLog();
+  }
+}
+
 function toggleEmpCard(id){
   const body=document.getElementById(id);
   const chev=document.getElementById(id+'-chevron');
@@ -1022,16 +1053,19 @@ function toggleEmpCard(id){
 /* ─── Supervisor: Employees ─── */
 function refreshSupEmps(){
   const tbody=document.getElementById('s-emp-table');
-  tbody.innerHTML=employees.map(e=>`<tr>
+  const myId=activeSup&&activeSup.id;
+  tbody.innerHTML=employees.map(e=>{
+    const isOtherSup=e.dept==='Supervisor'&&e.id!==myId;
+    return `<tr>
     <td>${e.name}</td>
     <td><code style="font-size:12px;">${e.pin}</code></td>
     <td>${e.dept}</td>
     <td><span class="badge ${e.active?'b-in':'b-out'}">${e.active?'Active':'Inactive'}</span></td>
     <td style="white-space:nowrap;">
       <button class="btn-sm" onclick="openEmpModal(${e.id},'sup')" style="margin-right:4px;">Edit</button>
-      <button class="btn-sm" onclick="openPinResetModal(${e.id})">Reset PIN</button>
+      ${isOtherSup?'':`<button class="btn-sm" onclick="openPinResetModal(${e.id})">Reset PIN</button>`}
     </td>
-  </tr>`).join('');
+  </tr>`}).join('');
 }
 
 /* ─── PIN Reset modal ─── */
@@ -1619,6 +1653,20 @@ function openEmpModal(id,ctx){
     buildSupJobsiteChecks(assigned);
   }
   document.getElementById('emp-err').textContent='';
+  // Permission gating: a supervisor editing ANOTHER supervisor cannot change PIN or password (admin only)
+  const pinInp=document.getElementById('emp-pin-inp');
+  const passField=document.getElementById('emp-sup-pass-field');
+  const restrictNote=document.getElementById('emp-restrict-note');
+  const restricted=ctx==='sup'&&emp&&emp.dept==='Supervisor'&&emp.id!==(activeSup&&activeSup.id);
+  if(restricted){
+    pinInp.readOnly=true;pinInp.disabled=true;pinInp.style.opacity='0.55';
+    if(passField)passField.style.display='none';
+    if(restrictNote)restrictNote.style.display='block';
+  } else {
+    pinInp.readOnly=false;pinInp.disabled=false;pinInp.style.opacity='';
+    if(passField)passField.style.display='';
+    if(restrictNote)restrictNote.style.display='none';
+  }
   document.getElementById('emp-modal-bg').style.display='flex';
   setTimeout(()=>document.getElementById('emp-name-inp').focus(),80);
 }
@@ -1647,9 +1695,12 @@ function closeEmpModal(){document.getElementById('emp-modal-bg').style.display='
 
 async function saveEmployee(){
   const name=document.getElementById('emp-name-inp').value.trim();
-  const pin=document.getElementById('emp-pin-inp').value.trim();
   const dept=document.getElementById('emp-dept-inp').value;
   const err=document.getElementById('emp-err');
+  // Permission gating: supervisor editing another supervisor cannot change PIN/password
+  const target=editingEmpId?employees.find(e=>e.id===editingEmpId):null;
+  const restricted=empModalContext==='sup'&&target&&target.dept==='Supervisor'&&target.id!==(activeSup&&activeSup.id);
+  const pin=restricted?target.pin:document.getElementById('emp-pin-inp').value.trim();
   if(!name||!pin||!dept){err.textContent='All fields are required.';return}
   if(!/^\d{4,6}$/.test(pin)){err.textContent='PIN must be 4–6 digits.';return}
   const dup=employees.find(e=>e.pin===pin&&e.id!==editingEmpId);
@@ -1658,7 +1709,7 @@ async function saveEmployee(){
   // Supervisor-specific fields
   let supPass=null, supJobsites=[];
   if(dept==='Supervisor'){
-    supPass=document.getElementById('emp-sup-pass').value.trim();
+    supPass=restricted?(target.supervisorPassword||''):document.getElementById('emp-sup-pass').value.trim();
     if(!supPass){err.textContent='Supervisor password is required.';return}
     supJobsites=Array.from(document.querySelectorAll('#emp-sup-jobsites input:checked')).map(c=>c.value);
   }
@@ -2351,7 +2402,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.6',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v35.7',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
