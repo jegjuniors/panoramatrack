@@ -1,7 +1,7 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v36.1
-**Last Updated:** May 29, 2026
+**Current Version:** v36.2
+**Last Updated:** June 1, 2026
 
 ---
 
@@ -21,7 +21,7 @@
 
 **Tables:** `employees`, `jobsites`, `departments`, `activities`, `punches`, `submissions`, `pt_settings`
 
-`pt_settings` (added v36.1) is a single config row (`id = 1`) holding app-wide pay rules: `rounding_enabled`, `rounding_minutes`, `sched_end_enabled`, `sched_end_time`, `sched_end_window`. Loaded on boot into `APP_SETTINGS`; edited in the master admin Settings tab. Rules are display/export-only — punch rows are never modified.
+`pt_settings` (added v36.1, extended v36.2) is a single config row (`id = 1`) holding app-wide pay rules: `rounding_enabled`, `rounding_minutes`, `sched_end_enabled`, `sched_end_time`, `sched_end_window`, `lunch_enabled`, `lunch_minutes`, `lunch_threshold_hours`. Loaded on boot into `APP_SETTINGS`; edited in the master admin Settings tab. Rules are display/export-only — punch rows are never modified.
 
 Supervisors are employees with `dept = 'Supervisor'`. Supervisor password stored in `supervisor_password` column. Supervisor jobsite assignments stored in `supervisor_jobsites` (text array).
 No separate supervisors table.
@@ -51,18 +51,27 @@ No separate supervisors table.
 - **Supervisor permission gating** — a supervisor cannot change another supervisor's kiosk PIN or login password (admin only); they can still change their own and manage regular employees' PINs. UI-level guard (Reset PIN button hidden + PIN field locked + password field hidden when editing another supervisor), with a matching guard in `saveEmployee` against DOM tampering
 - **Clickable Live tiles (supervisor panel)** — the three Live stat tiles now jump to the Time log with the right view: Head Count → Today + "still clocked in only"; Yesterday's Head Count → Yesterday; Needs Review → "needs review only" showing ALL outstanding flagged records (period-independent, matches the tile count). Backed by a new filter dropdown on the supervisor Time log (`s-filter-flags`: All records / Still clocked in only / Needs review only)
 - **Review gate on supervisor submit** — a supervisor cannot submit a report (preliminary OR final) while any punch in the selected range is still auto-clocked. A blocking modal lists the affected employees + clock-in times; "Review these now" jumps the Time log into the needs-review filter to fix them. The gate clears automatically as each auto-clock is edited to a real clock-out. Master admin export is intentionally NOT gated (admin override)
-- **Configurable pay rules (master admin Settings tab, v36.1)** — two admin-toggleable rules, both Supabase-backed (shared across devices) and display/export-only (raw punches untouched):
+- **Configurable pay rules (master admin Settings tab, v36.1 + v36.2)** — three admin-toggleable rules, all Supabase-backed (shared across devices) and display/export-only (raw punches untouched):
   - **Punch-time rounding** — rounds each clock-in/out to nearest 15 / 6 / 5 min (neutral nearest-mark / 7-8 rule). Default 15 min, off by default.
   - **Paid break-in-lieu credit** — clock-outs within a window (default 15 min) before a scheduled end (default 3:30 PM) are paid to the scheduled end; later punch-outs are never clipped. Off by default.
-  - Applied credit-then-round. Auto-clocked and estimated punches are always left exact. On-screen review tables show RAW times with PAID hours; PDF/CSV exports show ADJUSTED times + paid hours. NOTE: the 30-min unpaid lunch deduction is NOT part of v36.1 — that's v36.2 — so a 7:00–3:30 day currently reads 8.5h, not 8.0h.
+  - **Unpaid lunch deduction (v36.2)** — subtracts an unpaid lunch (default 30 min) from any shift longer than a threshold (default 5h, deduction applies to shifts *over* the threshold). Off by default. Applied as the final step after credit-then-round. With it enabled, a 7:00–3:30 day now reads **8.0h** (8.5h elapsed − 0.5h lunch). Auto-clocked and estimated punches are left exact, same as the other two rules.
+  - Order: credit → round → lunch. Auto-clocked and estimated punches are always left exact. On-screen review tables show RAW times with PAID hours; PDF/CSV exports show ADJUSTED times + paid hours.
 
 ---
 
 ## 🚧 What Was Last Being Worked On
 
-**Last session date:** May 29, 2026
+**Last session date:** June 1, 2026
 **Tasks completed this session:**
-- **v36.1 (this session — part 2 of v36):** Configurable pay rules — admin-controlled rounding + paid break-in-lieu credit.
+- **v36.2 (this session — part 3 of v36):** Automatic unpaid lunch deduction.
+  - **DB:** three new columns on `pt_settings` (SQL run by Julio): `lunch_enabled` (bool, default false), `lunch_minutes` (int, default 30), `lunch_threshold_hours` (numeric, default 5).
+  - **Engine** (`app.js`): lunch deduction added as the final step in `paidHours` — after credit + round, if lunch is enabled and the punch isn't auto-clocked/estimated and the adjusted elapsed hours are *greater than* the threshold, subtract `lunchMinutes/60` (floored at 0). `APP_SETTINGS` gained `lunchEnabled / lunchMinutes / lunchThresholdHours` defaults; `applySettingsRow` maps the three new columns.
+  - **No per-site edits needed:** because every hours total already routes through `paidHours`, the deduction flows automatically to supervisor log, master report, export preview, CSV, and PDF. Displayed in/out times are unchanged (option-B display choice) — only the Hrs number changes.
+  - **UI:** new "Unpaid lunch deduction" block in the master admin Settings tab (`set-lunch-enabled` toggle, `set-lunch-minutes`, `set-lunch-threshold` inputs); `refreshSettingsPanel` populates them, `saveSettings` reads + upserts them.
+  - Verified math (node harness): 7:00–3:30 (8.5h) → 8.0h; exactly 5h → no deduction (over-threshold, not at); 5.5h → 5.0h; 4h short shift untouched; auto-clocked 12h and estimated 9h left exact; disabled → no change.
+  - Threshold uses *over* (`>`) not *at-or-over* — a shift of exactly 5h is not docked. Decided with Julio.
+  - Version → v36.2 (`index.html` badge, `app.js` backup payload).
+- **v36.1 (prior session — part 2 of v36):** Configurable pay rules — admin-controlled rounding + paid break-in-lieu credit.
   - **DB:** new `pt_settings` table (single row id=1) — namespaced to avoid collision with an unrelated `settings` table already in the project (JEG's Designs). SQL run by Julio. Holds `rounding_enabled / rounding_minutes / sched_end_enabled / sched_end_time / sched_end_window`.
   - **Engine** (`app.js`, near the time helpers): `applySettingsRow`, `roundTime` (local-clock nearest-interval, timezone-safe), `applySchedEnd` (credit up to scheduled end, no clipping), `adjustedTimes` (credit-then-round; skips auto-clocked + estimated), `paidHours`. `APP_SETTINGS` global with safe defaults; loaded in `bootApp` (defaults persist if row/table missing).
   - **Wired `paidHours` / `adjustedTimes` into every hours site:** supervisor log total + per-punch (raw times kept on screen), master report preview + table (raw times on screen), supervisor export preview total, master CSV export (adjusted times + paid hrs), PDF `consolidate` + rows + total (adjusted times + paid hrs). Auto-clock detection, live "elapsed" timer, and estimate-modal preview deliberately stay on RAW time.
@@ -71,7 +80,7 @@ No separate supervisors table.
   - **Display choice (option B):** on-screen review tables show real punch times with paid hours in the Hrs column; edit modal still edits the true punch. PDF/CSV show adjusted times so the deliverable reconciles.
   - **Known gap by design:** no lunch deduction yet → a normal 7:00–3:30 day reads 8.5h. The 30-min unpaid lunch that brings it to 8.0h is v36.2.
   - Version → v36.1 (`index.html` badge, `app.js` backup payload).
-- **v36.0 (earlier this session — part 1 of v36):** Review gate on supervisor report submission.
+- **v36.0 (prior session — part 1 of v36):** Review gate on supervisor report submission.
   - A supervisor can no longer submit a report (preliminary OR final) while any punch in the selected date range + jobsites is still auto-clocked (`auto_clocked = true`). The gate runs at the very start of the export flow, before the duplicate-check and estimated-clock-out steps.
   - On a blocked attempt, a new modal (`#review-gate-bg`) lists the affected employees and their clock-in times. "Review these now" closes the export and calls `goToSupReport('review')`, dropping the Time log into the needs-review filter so they can fix each one. "Cancel" backs out.
   - Because punches are re-fetched on every export attempt and editing an auto-clock flips `auto_clocked → false`, the gate clears itself as each one is resolved — no new data model.
@@ -125,21 +134,20 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ---
 
-## ⏭ Next Session Agenda — v36.2: Lunch handling
+## ⏭ Next Session Agenda — v36.3: Per-shift lunch waive
 
-The pay rules (v36.1) are in. The remaining v36 work is lunch, in two parts. Design questions still OPEN — settle at the start.
+Automatic lunch deduction (v36.2) is in. Remaining lunch work is the worked-through-lunch case: an employee who skips lunch and leaves early should NOT be docked the 30 min. Design direction agreed with Julio; details to settle at the start of v36.3.
 
-**1. Automatic lunch deduction (net-new pay logic):**
-- Subtract an unpaid lunch (default 30 min) when a shift exceeds a threshold. Alberta requires a 30-min break after 5 consecutive hours.
-- Decide: exact threshold (e.g. shift > 5h), deduction length, and whether it's admin-configurable in the Settings tab (likely yes, alongside the other rules).
-- This is what makes a normal 7:00–3:30 day read **8.0h** instead of the current 8.5h. Order with existing rules: deduction applies to worked time; sched-end credit + rounding already settled as credit-then-round — slot lunch deduction in and re-verify the 8.0h target.
+**Direction (agreed):**
+- Capture the lunch/no-lunch choice **at clock-out**, alongside the activity selection — the employee is the one who knows whether they actually took lunch; the supervisor usually doesn't.
+- **NOT pure self-serve.** Treat "worked through lunch" as a **request, not an auto-apply** — otherwise there's a standing daily incentive to tick "no lunch" for 30 min of free pay across 50–100 people, which erodes the cost-savings story and contradicts the discretionary "we allow when they ask" practice. The employee's selection flags the punch as a pending waive that surfaces in the supervisor log (like the existing needs-review flag); the supervisor confirms or rejects before it affects paid hours.
 
-**2. Per-shift lunch-waive toggle (worked-through-lunch case):**
-- Employee works through lunch, leaves ~30 min early (2:45), should NOT be docked the 30 min.
-- Needs a new boolean column on `punches` (e.g. `lunch_waived`) — it's a per-day decision, not a permanent trait. **DB migration required** (Julio runs it).
-- OPEN: who sets it and where? ("we typically allow when they ask" → discretionary, not self-serve). Options: supervisor sets it on the punch; or employee requests at clock-out, flagged for supervisor review. Per-employee default too, or purely per-shift?
+**Build notes:**
+- New boolean column on `punches` — e.g. `lunch_waived` (the confirmed/applied state). Likely a second flag for the pending/requested state (e.g. `lunch_waive_requested`) so request ≠ approval. It's a per-day decision, not a permanent trait. **DB migration required (Julio runs it).**
+- When a punch's waive is approved, `paidHours` skips the lunch deduction for that punch only.
+- OPEN to settle: exact column design (one flag vs. request+approve pair); where the supervisor approves (edit modal checkbox vs. a dedicated review action); whether the clock-out prompt only appears for shifts long enough to be docked.
 
-Relevant code: `paidHours` / `adjustedTimes` (slot the lunch math here), `APP_SETTINGS` + Settings tab (add lunch config), `dbRowToEntry` + `clockOut` + edit modal (for `lunch_waived`).
+Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map the new column[s]), `clockOut` + clock-out UI (capture the request), supervisor log + edit modal (surface + approve), Settings tab unaffected.
 
 ---
 
@@ -167,7 +175,7 @@ Relevant code: `paidHours` / `adjustedTimes` (slot the lunch math here), `APP_SE
 | Supervisor permission gating | `refreshSupEmps()` / `openEmpModal(id,ctx)` / `saveEmployee()` — `restricted` flag; `#emp-sup-pass-field`, `#emp-restrict-note` in index.html |
 | Live tile navigation | `goToSupReport(which)` → `setSupPeriod` + `s-filter-flags` + `refreshSupLog` |
 | Submit review gate | `openExportConfirm()` (gate block) → `showReviewGate()` / `closeReviewGate()` / `reviewGateGoNow()`; `#review-gate-bg` in index.html. Master path (`openMasterExportConfirm`) is NOT gated |
-| Pay rules engine | `APP_SETTINGS` (global) / `applySettingsRow()` / `roundTime()` / `applySchedEnd()` / `adjustedTimes()` / `paidHours()` — near the time helpers (`fmtDt` area) |
+| Pay rules engine | `APP_SETTINGS` (global) / `applySettingsRow()` / `roundTime()` / `applySchedEnd()` / `adjustedTimes()` / `paidHours()` (lunch deduction lives here, v36.2) — near the time helpers (`fmtDt` area) |
 | Pay rules settings UI | `refreshSettingsPanel()` / `saveSettings()`; `mtab-settings` + `mpanel-settings` in index.html; `pt_settings` table in Supabase |
 | Hours display sites (use paidHours) | `refreshSupLog`, `refreshMasterLog`, `updateExportPreview`, `doMasterExport` (CSV), `generatePDF` `consolidate` |
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
@@ -183,4 +191,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: May 29, 2026 — v36.1_
+_Last updated: June 1, 2026 — v36.2_

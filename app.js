@@ -23,9 +23,10 @@ let JOBSITE_DATA={};  // name → {address, gc, jobNumber, corfixUrl}
 let supervisors=[]; // derived at runtime from employees where dept='Supervisor'
 let DEPARTMENTS=[]; // loaded from DB
 let employees=[];
-let APP_SETTINGS={  // pay rules — loaded from Supabase `pt_settings` row on boot (v36.1)
+let APP_SETTINGS={  // pay rules — loaded from Supabase `pt_settings` row on boot (v36.1, lunch added v36.2)
   roundingEnabled:false, roundingMinutes:15,
-  schedEndEnabled:false, schedEndTime:'15:30', schedEndWindow:15
+  schedEndEnabled:false, schedEndTime:'15:30', schedEndWindow:15,
+  lunchEnabled:false, lunchMinutes:30, lunchThresholdHours:5
 };
 let timeLog=[];      // active punches only cached in memory for speed
 let currentPin='';
@@ -96,7 +97,10 @@ function applySettingsRow(r){
     roundingMinutes:r.rounding_minutes||15,
     schedEndEnabled:!!r.sched_end_enabled,
     schedEndTime:r.sched_end_time||'15:30',
-    schedEndWindow:(r.sched_end_window!=null?r.sched_end_window:15)
+    schedEndWindow:(r.sched_end_window!=null?r.sched_end_window:15),
+    lunchEnabled:!!r.lunch_enabled,
+    lunchMinutes:(r.lunch_minutes!=null?r.lunch_minutes:30),
+    lunchThresholdHours:(r.lunch_threshold_hours!=null?r.lunch_threshold_hours:5)
   };
 }
 // Round a Date to the nearest interval using local clock minutes (7/8 breakpoint
@@ -131,7 +135,16 @@ function adjustedTimes(entry){
 function paidHours(entry){
   if(!entry.out)return null;
   const a=adjustedTimes(entry);
-  return Math.max(0,(a.out-a.in)/3600000);
+  let hrs=Math.max(0,(a.out-a.in)/3600000);
+  // Unpaid lunch deduction (v36.2) — final step, after credit+round.
+  // Skips synthetic punches (auto-clocked / estimated) like the other rules.
+  // Display/export-only; raw punch is never modified. Threshold is checked
+  // against the adjusted elapsed hours so it reflects what's actually paid.
+  if(APP_SETTINGS.lunchEnabled && !entry.autoClocked && !entry.estimatedOut
+     && hrs>APP_SETTINGS.lunchThresholdHours){
+    hrs=Math.max(0,hrs-(APP_SETTINGS.lunchMinutes||0)/60);
+  }
+  return hrs;
 }
 
 function updateClock(){
@@ -1116,6 +1129,9 @@ function refreshSettingsPanel(){
   document.getElementById('set-sched-enabled').checked=APP_SETTINGS.schedEndEnabled;
   document.getElementById('set-sched-time').value=APP_SETTINGS.schedEndTime||'15:30';
   document.getElementById('set-sched-window').value=APP_SETTINGS.schedEndWindow||15;
+  document.getElementById('set-lunch-enabled').checked=APP_SETTINGS.lunchEnabled;
+  document.getElementById('set-lunch-minutes').value=String(APP_SETTINGS.lunchMinutes||30);
+  document.getElementById('set-lunch-threshold').value=String(APP_SETTINGS.lunchThresholdHours||5);
   document.getElementById('set-save-msg').textContent='';
 }
 async function saveSettings(){
@@ -1124,6 +1140,10 @@ async function saveSettings(){
   const schedTime=document.getElementById('set-sched-time').value||'15:30';
   let schedWindow=parseInt(document.getElementById('set-sched-window').value,10);
   if(isNaN(schedWindow)||schedWindow<1)schedWindow=15;
+  let lunchMinutes=parseInt(document.getElementById('set-lunch-minutes').value,10);
+  if(isNaN(lunchMinutes)||lunchMinutes<0)lunchMinutes=30;
+  let lunchThreshold=parseFloat(document.getElementById('set-lunch-threshold').value);
+  if(isNaN(lunchThreshold)||lunchThreshold<0)lunchThreshold=5;
   const row={
     id:1,
     rounding_enabled:document.getElementById('set-rounding-enabled').checked,
@@ -1131,6 +1151,9 @@ async function saveSettings(){
     sched_end_enabled:document.getElementById('set-sched-enabled').checked,
     sched_end_time:schedTime,
     sched_end_window:schedWindow,
+    lunch_enabled:document.getElementById('set-lunch-enabled').checked,
+    lunch_minutes:lunchMinutes,
+    lunch_threshold_hours:lunchThreshold,
     updated_at:new Date().toISOString()
   };
   msg.style.color='var(--txt2)';msg.textContent='Saving…';
@@ -2525,7 +2548,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v36.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v36.2',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
