@@ -33,6 +33,8 @@ let currentPin='';
 let pendingClockOut=null;
 let selectedActs=new Set();
 let editingIdx=null; // index into timeLog array
+let addingPunch=false;   // true while the shared edit modal is in manual-add mode (v37.0)
+let addPunchCtx='master';// which log opened the add modal ('sup' | 'master') so we refresh the right one
 let editActs=new Set();
 let editingSupId=null;
 let editingEmpId=null;
@@ -243,7 +245,8 @@ function dbRowToEntry(r){
     out:r.clock_out?new Date(r.clock_out):null,
     activity:r.activities?r.activities:[],
     autoClocked:r.auto_clocked||false,
-    editedAfterAuto:r.edited_after_auto||false
+    editedAfterAuto:r.edited_after_auto||false,
+    manualEntry:r.manual_entry||false
   };
 }
 
@@ -1062,7 +1065,8 @@ async function refreshSupLog(){
       const idx=timeLog.indexOf(l);
       const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
       const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
-      const actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
+      let actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
+      if(l.manualEntry)actBadges=`<span class="badge" style="background:#f0a830;color:#3a2600;margin-right:2px;">✎ Manual</span>`+actBadges;
       const isAssignedSite=(activeSup.jobsites||[]).includes(l.jobsite);
       const siteColor=isAssignedSite?'b-blue':'b-amber'; // amber = unassigned/temp site
       return `<tr class="${l.autoClocked?'row-auto':''}">
@@ -1604,7 +1608,8 @@ async function refreshMasterLog(){
     const idx=timeLog.indexOf(l);
     const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
     const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
-    const actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
+    let actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
+    if(l.manualEntry)actBadges=`<span class="badge" style="background:#f0a830;color:#3a2600;margin-right:2px;">✎ Manual</span>`+actBadges;
     const si=JOBSITES.indexOf(l.jobsite);const color=si>=0?getSiteColor(si):'#555';
     return `<tr class="${l.autoClocked?'row-auto':''}">
       <td>${l.name}${l.autoClocked?' ⚠️':''}</td>
@@ -1671,12 +1676,41 @@ async function openEditModal(ref){
   }
   if(!entry)return;
   _editEntry=entry;
+  // Shared modal: ensure edit-mode UI (the add path toggles these the other way) — v37.0
+  addingPunch=false;
+  document.getElementById('edit-modal-title').textContent='Edit punch record';
+  document.getElementById('edit-emp-wrap').style.display='';
+  document.getElementById('add-emp-wrap').style.display='none';
+  document.getElementById('edit-delete-wrap').style.display='';
+  document.getElementById('edit-save-btn').textContent='Save changes';
   editActs=new Set(entry.activity||[]);
   document.getElementById('edit-emp-name').value=entry.name;
   document.getElementById('edit-in').value=toLocal(entry.in);
   document.getElementById('edit-out').value=entry.out?toLocal(entry.out):'';
   const jSel=document.getElementById('edit-jobsite');
   jSel.innerHTML=JOBSITES.map(j=>`<option${entry.jobsite===j?' selected':''}>${j}</option>`).join('');
+  buildEditActGrid();
+  document.getElementById('edit-err').textContent='';
+  document.getElementById('edit-modal-bg').style.display='flex';
+}
+// Manual punch entry (v37.0) — reuses the edit modal in add mode.
+// For an employee who forgot to clock in/out entirely. ctx = 'sup' | 'master'.
+function openAddPunchModal(ctx){
+  addingPunch=true;
+  addPunchCtx=(ctx==='sup')?'sup':'master';
+  _editEntry=null;editingIdx=null;
+  editActs=new Set();
+  document.getElementById('edit-modal-title').textContent='Add manual punch';
+  document.getElementById('edit-emp-wrap').style.display='none';
+  document.getElementById('add-emp-wrap').style.display='';
+  document.getElementById('edit-delete-wrap').style.display='none';
+  document.getElementById('edit-save-btn').textContent='Add punch';
+  // Employee dropdown — full active roster, alphabetical
+  const roster=employees.filter(e=>e.active).slice().sort((a,b)=>a.name.localeCompare(b.name));
+  document.getElementById('add-emp-select').innerHTML='<option value="">— select employee —</option>'+roster.map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
+  document.getElementById('edit-in').value='';
+  document.getElementById('edit-out').value='';
+  document.getElementById('edit-jobsite').innerHTML=JOBSITES.map(j=>`<option>${j}</option>`).join('');
   buildEditActGrid();
   document.getElementById('edit-err').textContent='';
   document.getElementById('edit-modal-bg').style.display='flex';
@@ -1690,7 +1724,7 @@ function toggleEditAct(a){
 }
 function closeEditModal(){
   document.getElementById('edit-modal-bg').style.display='none';
-  editingIdx=null;_editEntry=null;
+  editingIdx=null;_editEntry=null;addingPunch=false;
 }
 
 function confirmDeletePunch(){
@@ -1722,6 +1756,32 @@ async function deletePunch(e){
 }
 async function saveEdit(){
   const err=document.getElementById('edit-err');
+  // ── Manual add mode (v37.0): insert a brand-new punch ──
+  if(addingPunch){
+    const empId=document.getElementById('add-emp-select').value;
+    if(!empId){err.textContent='Select an employee.';return}
+    const emp=employees.find(x=>String(x.id)===String(empId));
+    if(!emp){err.textContent='Employee not found — reopen and try again.';return}
+    const aInV=document.getElementById('edit-in').value;const aOutV=document.getElementById('edit-out').value;
+    if(!aInV){err.textContent='Clock in time is required.';return}
+    const aIn=new Date(aInV);const aOut=aOutV?new Date(aOutV):null;
+    if(aOut&&aOut<=aIn){err.textContent='Clock out must be after clock in.';return}
+    const aSite=document.getElementById('edit-jobsite').value;
+    const aActs=[...editActs];
+    const payload={
+      employee_id:emp.id,employee_name:emp.name,department:emp.dept,
+      jobsite:aSite,clock_in:aIn.toISOString(),
+      clock_out:aOut?aOut.toISOString():null,
+      activities:aActs,auto_clocked:false,manual_entry:true
+    };
+    const {error}=await sb.from('punches').insert(payload);
+    if(error){err.textContent='DB error: '+error.message;return}
+    const ctx=addPunchCtx;
+    closeEditModal();
+    showNotif('✓','Punch added',emp.name+' — '+fmtDt(aIn),'#2f7d31',2600);
+    if(ctx==='sup')refreshSupLog();else refreshMasterLog();
+    return;
+  }
   const inV=document.getElementById('edit-in').value;const outV=document.getElementById('edit-out').value;
   if(!inV){err.textContent='Clock in time is required.';return}
   const newIn=new Date(inV);const newOut=outV?new Date(outV):null;
@@ -2548,7 +2608,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v36.2',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v37.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
