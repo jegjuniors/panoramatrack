@@ -1239,10 +1239,40 @@ async function savePinReset(){
 }
 
 /* ─── Master tabs ─── */
+const MASTER_TAB_GROUP={
+  overview:'overview',
+  jobsites:'manage', employees:'manage', departments:'manage', activities:'manage',
+  submissions:'reporting', log:'reporting',
+  settings:'settings'
+};
+const MASTER_GROUP_DEFAULT={manage:'employees', reporting:'log'};
+
+// Top-level group tab handler (v38.0): jumps to the group's default child tab.
+function switchMasterGroup(group){
+  switchMasterTab(MASTER_GROUP_DEFAULT[group]||group);
+}
+
 function switchMasterTab(tab){
+  // Show only the selected panel (panel ids unchanged from the flat-nav version).
   ['overview','jobsites','employees','departments','activities','submissions','log','settings'].forEach(t=>{
-    document.getElementById('mpanel-'+t).style.display=t===tab?'block':'none';
-    document.getElementById('mtab-'+t).classList.toggle('active',t===tab);
+    const p=document.getElementById('mpanel-'+t);
+    if(p)p.style.display=t===tab?'block':'none';
+  });
+  // Resolve which top-level group this tab belongs to (v38.0 grouped nav).
+  const group=MASTER_TAB_GROUP[tab]||tab;
+  // Top-level active state: highlight the parent group.
+  ['overview','manage','reporting','settings'].forEach(g=>{
+    const btn=document.getElementById('mtab-'+g);
+    if(btn)btn.classList.toggle('active',g===group);
+  });
+  // Sub-nav rows: only the active group's row is shown.
+  ['manage','reporting'].forEach(g=>{
+    const row=document.getElementById('msub-'+g);
+    if(row)row.style.display=g===group?'flex':'none';
+  });
+  // Sub-nav button active state.
+  document.querySelectorAll('.msub-btn').forEach(b=>{
+    b.classList.toggle('active',b.dataset.tab===tab);
   });
   if(tab==='overview')refreshMasterOverview();
   if(tab==='jobsites'){refreshJobsitePanel();refreshNewJobsiteSupChecks();}
@@ -2630,7 +2660,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v37.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

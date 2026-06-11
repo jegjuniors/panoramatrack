@@ -107,6 +107,11 @@ tr.row-auto td{background:rgba(192,57,43,.12)}
 .nav-bar{display:flex;gap:4px;margin-bottom:16px;border-bottom:0.5px solid var(--bdr);padding-bottom:12px;overflow-x:auto}
 .nav-btn{background:none;border:none;font-size:12px;padding:5px 11px;border-radius:var(--radius);cursor:pointer;color:var(--txt2);font-weight:500;white-space:nowrap;font-family:inherit}
 .nav-btn.active{background:#1a3018;color:#6dd86d;font-weight:600;border-bottom:2px solid #3fa83f}
+/* Master admin sub-navigation (v38.0) */
+.subnav-bar{display:flex;gap:4px;flex-wrap:wrap;align-items:center;background:var(--bg2);border:0.5px solid var(--bdr);border-radius:var(--radius);padding:6px 8px;margin:-6px 0 16px;}
+.subnav-btn{background:none;border:none;font-size:11px;padding:4px 10px;border-radius:var(--radius);cursor:pointer;color:var(--txt2);font-weight:500;white-space:nowrap;font-family:inherit;}
+.subnav-btn:hover{color:var(--txt);}
+.subnav-btn.active{background:var(--blue-l);color:var(--blue-d);font-weight:600;}
 input[type=text],input[type=password],input[type=datetime-local],input[type=date],select{
   width:100%;padding:8px 10px;border:0.5px solid var(--bdr2);border-radius:var(--radius);font-size:13px;background:#1a1a1a;color:var(--txt);font-family:inherit;outline:none}
 input:focus,select:focus{border-color:var(--green)}

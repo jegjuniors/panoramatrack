@@ -1,7 +1,7 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v37.1
-**Last Updated:** June 1, 2026
+**Current Version:** v38.0
+**Last Updated:** June 11, 2026
 
 ---
 
@@ -64,8 +64,16 @@ No separate supervisors table.
 
 ## 🚧 What Was Last Being Worked On
 
-**Last session date:** June 1, 2026
+**Last session date:** June 11, 2026
 **Tasks completed this session:**
+- **v38.0 (this session — admin nav reorg):** Grouped the master admin tab bar from 8 flat tabs into 4 top-level tabs to stop the horizontal scroll/cramping (admins use it on both phone and desktop). New structure: **Overview · Manage · Reporting · Settings**.
+  - **Manage** group → Jobsites · Employees · Departments · Activities (opens on **Employees**). **Reporting** group → Submissions · Report (opens on **Report**). Overview and Settings stay single (no sub-row).
+  - Tapping a group tab reveals a contextual sub-nav row beneath the main nav (only the active group's row shows); the parent tab shows active whenever any child is active. Pure navigation reorg — all 8 underlying panels (`mpanel-*`) are untouched.
+  - **`index.html`:** replaced the flat `.nav-bar` (8 `mtab-*` buttons) with 4 top buttons (`mtab-overview/manage/reporting/settings`) + two `.subnav-bar` rows (`#msub-manage`, `#msub-reporting`) of `.subnav-btn.msub-btn` children carrying a `data-tab`. Version badge → v38.0.
+  - **`app.js`:** new `MASTER_TAB_GROUP` / `MASTER_GROUP_DEFAULT` maps + `switchMasterGroup(group)` (jumps to the group's default child). `switchMasterTab` rewritten to also set the parent-group active state, show/hide the correct sub-row, and highlight the active `.msub-btn` — existing panel-show + refresh calls unchanged, so all prior callers (`switchMasterTab('log')` / `('overview')`, Overview stat-card → `('employees')`) still work. Backup payload version → v38.0.
+  - **`styles.css`:** new `.subnav-bar` (banded contextual strip) + `.subnav-btn`; active state uses `var(--blue-l)` / `var(--blue-d)` — a matched light-bg/dark-text pair in BOTH themes, so no per-theme override needed (avoids the amber-style contrast inversion).
+  - Verified: app.js syntax clean (node --check); no other code referenced the old per-tab `mtab-*` ids.
+  - Significant change (3-file nav restructure) → whole-number bump, agreed with Julio. This claims **v38.0**, so the per-shift lunch waive arc moves to **v39.0**.
 - **v37.1 (this session — critical bug fix):** Auto-clock was overwriting real clock-outs.
   - **Symptom:** since ~Jun 8–9, employees clocked out normally (saw the green confirmation, write succeeded) but the punch later showed `auto_clocked = true` with an out-time of exactly clock-in + 12h. Jun 9 hit 6/10 auto-clocked. Confirmed real (Julio saw his own punch-out succeed, then revert).
   - **Root cause:** the app is now on personal phones (NOT shared kiosks — every employee runs the PWA). Each device loads ALL open punches company-wide at boot and runs `checkAutoServer` every 30s over that in-memory list, which is never refreshed after boot. The auto-clock UPDATE had no `clock_out is null` guard, so any device still running past an employee's 12h mark would overwrite that employee's already-recorded clock-out with a 12h auto-clock. With ~50–100 phones each holding everyone's open punches, the overwrite surface was huge. NOT caused by v37.0's code (auto-clock logic was untouched) — a latent flaw whose trigger rate spiked around Jun 8–9.
@@ -157,7 +165,7 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ## ⏭ Next Session Agenda — Per-shift lunch waive
 
-(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump, likely v38.0, when we start.)
+(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump, likely v39.0 (v38.0 was taken by the admin nav reorg), when we start.)
 
 Automatic lunch deduction (v36.2) is in. Remaining lunch work is the worked-through-lunch case: an employee who skips lunch and leaves early should NOT be docked the 30 min. Design direction agreed with Julio; details to settle at the start.
 
@@ -200,6 +208,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | Submit review gate | `openExportConfirm()` (gate block) → `showReviewGate()` / `closeReviewGate()` / `reviewGateGoNow()`; `#review-gate-bg` in index.html. Master path (`openMasterExportConfirm`) is NOT gated |
 | Edit punch (existing) | `openEditModal(ref)` / `saveEdit()` / `confirmDeletePunch()` / `deletePunch()`; `#edit-modal-bg` in index.html |
 | Manual add punch (v37.0) | `openAddPunchModal(ctx)` + add branch at top of `saveEdit()`; shared edit modal in add mode (`addingPunch` / `addPunchCtx` globals); "+ Add punch" buttons in `#spanel-log` & `#mpanel-log`; `manual_entry` column; amber "✎ Manual" badge in `refreshSupLog`/`refreshMasterLog` |
+| Master grouped nav (v38.0) | `switchMasterGroup(group)` / `switchMasterTab(tab)` (rewritten) / `MASTER_TAB_GROUP` + `MASTER_GROUP_DEFAULT`; top tabs `#mtab-overview/manage/reporting/settings`, sub-rows `#msub-manage` / `#msub-reporting` holding `.subnav-btn.msub-btn[data-tab]` in index.html; `.subnav-bar` / `.subnav-btn` in styles.css |
 | Pay rules engine | `APP_SETTINGS` (global) / `applySettingsRow()` / `roundTime()` / `applySchedEnd()` / `adjustedTimes()` / `paidHours()` (lunch deduction lives here, v36.2) — near the time helpers (`fmtDt` area) |
 | Pay rules settings UI | `refreshSettingsPanel()` / `saveSettings()`; `mtab-settings` + `mpanel-settings` in index.html; `pt_settings` table in Supabase |
 | Hours display sites (use paidHours) | `refreshSupLog`, `refreshMasterLog`, `updateExportPreview`, `doMasterExport` (CSV), `generatePDF` `consolidate` |
@@ -216,4 +225,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 11, 2026 — v37.1_
+_Last updated: June 11, 2026 — v38.0_
