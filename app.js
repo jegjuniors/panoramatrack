@@ -256,13 +256,35 @@ async function checkAutoServer(){
   const stale=timeLog.filter(e=>!e.out&&(now-e.in)/3600000>=AUTO_H);
   for(const e of stale){
     const autoOut=new Date(e.in.getTime()+AUTO_H*3600000);
-    e.out=autoOut;e.autoClocked=true;e.activity=['Auto-clocked'];
-    if(e.dbId){
-      await sb.from('punches').update({
-        clock_out:autoOut.toISOString(),
-        activities:['Auto-clocked'],
-        auto_clocked:true
-      }).eq('id',e.dbId);
+    if(!e.dbId){
+      // No DB row to reconcile against — mark locally so it stops re-triggering.
+      e.out=autoOut;e.autoClocked=true;e.activity=['Auto-clocked'];
+      continue;
+    }
+    // Guarded auto-clock (v37.1): only writes when the punch is STILL open in the DB
+    // (`clock_out is null`). A device holding a stale "open" copy therefore can NEVER
+    // overwrite a real clock-out that was already recorded on another device.
+    const {data,error}=await sb.from('punches').update({
+      clock_out:autoOut.toISOString(),
+      activities:['Auto-clocked'],
+      auto_clocked:true
+    }).eq('id',e.dbId).is('clock_out',null).select();
+    if(error){continue;} // transient — leave open and retry next cycle
+    if(data&&data.length){
+      // We genuinely auto-clocked an open punch.
+      e.out=autoOut;e.autoClocked=true;e.activity=['Auto-clocked'];
+    }else{
+      // 0 rows updated → it was already clocked out elsewhere. Heal stale local state.
+      const {data:fresh}=await sb.from('punches').select('clock_out,activities,auto_clocked').eq('id',e.dbId).maybeSingle();
+      if(fresh&&fresh.clock_out){
+        e.out=new Date(fresh.clock_out);
+        if(Array.isArray(fresh.activities))e.activity=fresh.activities;
+        e.autoClocked=!!fresh.auto_clocked;
+      }else if(!fresh){
+        // Row was deleted — drop the stale entry so it stops being tracked.
+        const idx=timeLog.indexOf(e);
+        if(idx>=0)timeLog.splice(idx,1);
+      }
     }
   }
 }
@@ -2608,7 +2630,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v37.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v37.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

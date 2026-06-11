@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v37.0
+**Current Version:** v37.1
 **Last Updated:** June 1, 2026
 
 ---
@@ -66,7 +66,15 @@ No separate supervisors table.
 
 **Last session date:** June 1, 2026
 **Tasks completed this session:**
-- **v37.0 (this session):** Manual punch entry — create a complete punch for someone who forgot to clock in/out.
+- **v37.1 (this session — critical bug fix):** Auto-clock was overwriting real clock-outs.
+  - **Symptom:** since ~Jun 8–9, employees clocked out normally (saw the green confirmation, write succeeded) but the punch later showed `auto_clocked = true` with an out-time of exactly clock-in + 12h. Jun 9 hit 6/10 auto-clocked. Confirmed real (Julio saw his own punch-out succeed, then revert).
+  - **Root cause:** the app is now on personal phones (NOT shared kiosks — every employee runs the PWA). Each device loads ALL open punches company-wide at boot and runs `checkAutoServer` every 30s over that in-memory list, which is never refreshed after boot. The auto-clock UPDATE had no `clock_out is null` guard, so any device still running past an employee's 12h mark would overwrite that employee's already-recorded clock-out with a 12h auto-clock. With ~50–100 phones each holding everyone's open punches, the overwrite surface was huge. NOT caused by v37.0's code (auto-clock logic was untouched) — a latent flaw whose trigger rate spiked around Jun 8–9.
+  - **Fix (`app.js`, `checkAutoServer`):** the auto-clock UPDATE is now guarded with `.is('clock_out', null).select()` — it only writes if the punch is still open in the DB, so a stale device can NEVER overwrite a real clock-out. When the guarded write affects 0 rows (already closed elsewhere), it heals the stale in-memory entry from the DB (or drops it if the row was deleted). In-memory state is only marked auto-clocked when the write actually succeeds.
+  - **Server-side guard (SQL, run by Julio — essential here):** because personal phones can't be force-refreshed, old cached app versions would keep overwriting until each phone updates. A `before update` trigger on `punches` blocks any update that sets `auto_clocked = true` when `clock_out` is already non-null (returns OLD), preserving the real clock-out regardless of client version. Supervisor edits set `auto_clocked = false`, so corrections are unaffected.
+  - **Data cleanup:** free Supabase tier = no backups, so ~11 clock-outs overwritten Jun 8–10 are unrecoverable from backup and are being fixed manually (edit each to the real end time; supervisors distinguish true forgot-to-clock-out from overwritten ones).
+  - Verified (node harness): genuinely-open punch still auto-clocks; already-clocked-out punch is preserved (not overwritten); already-auto-clocked is a no-op.
+  - Version → v37.1 (`index.html` badge, `app.js` backup payload).
+- **v37.0 (prior session):** Manual punch entry — create a complete punch for someone who forgot to clock in/out.
   - **DB:** new column on `punches` (SQL run by Julio): `manual_entry boolean default false`.
   - **`index.html`:** edit modal made dual-mode — added title id (`edit-modal-title`), an add-only employee `<select>` (`add-emp-select` in `add-emp-wrap`, hidden in edit mode), ids on the save button (`edit-save-btn`) and delete row (`edit-delete-wrap`). New "+ Add punch" button in both the supervisor log card and master log filters card.
   - **`app.js`:** `addingPunch` / `addPunchCtx` globals; `openAddPunchModal(ctx)` drives the shared modal in add mode (full active roster sorted by name, blank times, hides delete row, relabels save "Add punch"); `saveEdit` gained an insert branch for add mode (validates employee + clock-in + out-after-in, inserts with `manual_entry:true`, refreshes whichever log opened it); `openEditModal` now resets the modal back to edit-mode UI (shared modal); `closeEditModal` clears the add flag; `dbRowToEntry` maps `manualEntry`; both log renders prepend an amber "✎ Manual" badge when `manualEntry` is true.
@@ -130,7 +138,9 @@ No separate supervisors table.
 
 ## 🐛 Known Bugs / Open Issues
 
-- [ ] None currently logged — add any you discover here
+- [x] **RESOLVED v37.1** — Auto-clock overwriting real clock-outs (see v37.1 task log). Fixed client-side (guarded update) + server-side (trigger). After deploy, employees' PWAs update on their own schedule; the DB trigger protects data in the meantime.
+- [ ] **OPEN — Supabase RLS disabled (security).** Supabase flagged `punches` (and likely other tables) as publicly readable/writable because Row-Level Security is off — anyone with the project URL could read/edit/delete data. NOT the cause of the auto-clock bug (ruled out). Do NOT click "Resolve issue" / enable RLS without policies first — with the anon key and no policies it will take the whole app offline. Needs a deliberate pass: enable RLS + add policies (or move writes behind a server function) and rotate keys. Parked until the dust settles on v37.1.
+- [ ] Manual cleanup of ~11 clock-outs overwritten Jun 8–10 (no backups on free tier — reconstruct from supervisor/employee knowledge via the edit modal).
 
 ---
 
@@ -170,7 +180,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 |---|---|
 | Clock-in flow | `clockIn()` |
 | Clock-out flow | `clockOut()` |
-| Auto-clock logic | `checkAutoClockOut()` / `AUTO_H=12` |
+| Auto-clock logic | `checkAutoServer()` / `AUTO_H=12`; runs every 30s (`setInterval` ~line 163). v37.1: write guarded with `.is('clock_out',null)` so it can't overwrite a real clock-out; also a DB `before update` trigger on `punches` blocks auto_clock writes onto already-closed punches |
 | PDF generation | `generatePDF()` |
 | Pay period calc | `getPayPeriod()` / `getPeriodByOffset()` |
 | Submission tracking | `refreshSubmissionsPanel()` |
@@ -206,4 +216,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 1, 2026 — v37.0_
+_Last updated: June 11, 2026 — v37.1_
