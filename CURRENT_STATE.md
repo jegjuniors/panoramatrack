@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v38.0
+**Current Version:** v38.1
 **Last Updated:** June 11, 2026
 
 ---
@@ -66,6 +66,12 @@ No separate supervisors table.
 
 **Last session date:** June 11, 2026
 **Tasks completed this session:**
+- **v38.1 (this session — hotfix to v38.0 nav reorg):** The v38.0 edit had broken `index.html` structurally — master admin panel loaded blank and the supervisor screen was showing the master panel.
+  - **Root cause (index.html only — `app.js`/`styles.css` were fine):** the v38.0 nav edit overwrote the supervisor dashboard *body* with the master dashboard body and deleted the `<div id="screen-master">` wrapper. Net effect: (1) the supervisor nav (`stab-live/log/employees`) and all three supervisor panels (`spanel-live`, `spanel-log`, `spanel-employees`) were gone; (2) the `</div>` closing `screen-sup` was gone; (3) `screen-master` + its "Master Administrator" header no longer existed. So `screen-sup` literally contained the master nav/panels (→ supervisor login showed the master panel), and `showScreen('screen-master')` threw on a null element (→ master never loaded).
+  - **Fix:** restored the supervisor nav + `spanel-live`/`spanel-log`/`spanel-employees` verbatim (unchanged since v37.1), re-closed `screen-sup`, and re-opened a proper `screen-master` wrapper with its header around the (kept-as-is) v38.0 grouped nav and all `mpanel-*`. No JS change needed — the v38.0 `switchMasterTab` is fully null-guarded and all supervisor functions were intact; only the backup-payload version string was bumped.
+  - Verified: all 6 `screen-*` containers present and open at the same DOM depth (screen-master is a sibling of screen-sup, not nested); grouped nav (`mtab-overview/manage/reporting/settings`) + both sub-rows (`#msub-manage`/`#msub-reporting`) intact; no duplicate ids; `app.js` syntax clean (node --check).
+  - Files changed: `index.html` (structure + version badge), `app.js` (backup payload version only). `styles.css` unchanged.
+  - Version → v38.1.
 - **v38.0 (this session — admin nav reorg):** Grouped the master admin tab bar from 8 flat tabs into 4 top-level tabs to stop the horizontal scroll/cramping (admins use it on both phone and desktop). New structure: **Overview · Manage · Reporting · Settings**.
   - **Manage** group → Jobsites · Employees · Departments · Activities (opens on **Employees**). **Reporting** group → Submissions · Report (opens on **Report**). Overview and Settings stay single (no sub-row).
   - Tapping a group tab reveals a contextual sub-nav row beneath the main nav (only the active group's row shows); the parent tab shows active whenever any child is active. Pure navigation reorg — all 8 underlying panels (`mpanel-*`) are untouched.
@@ -225,4 +231,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 11, 2026 — v38.0_
+_Last updated: June 11, 2026 — v38.1_
