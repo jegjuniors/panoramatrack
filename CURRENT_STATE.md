@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v38.2
+**Current Version:** v38.3
 **Last Updated:** June 16, 2026
 
 ---
@@ -66,7 +66,7 @@ No separate supervisors table.
 
 **Last session date:** June 16, 2026
 **Tasks completed this session:**
-- **v38.2 (hotfix):** Fixed master admin "Generate & export report" always showing "No records" modal even when records were visible on screen. Root cause: `openMasterExportConfirm()` called `getMasterLogFiltered()` (an async function) synchronously — it received a Promise, not an array, so `logs.length` was always undefined/falsy. Fix: replaced the async call with `_masterLogs || []`, the cached result already populated by `refreshMasterLog()` when the log renders. One-line change in `app.js`; version badge bumped in both files. `index.html` and `styles.css` otherwise unchanged.
+- **v38.3 — Master admin PDF export + export bug fix:** Added PDF export to the master admin report, and fixed the async bug that was causing the export to always show "No records". After confirming all 4 checkboxes and tapping "Continue →", a format picker appears in-modal with "Export PDF" and "Export CSV" buttons. PDF matches the supervisor format — one time card per page, grouped by jobsite then alphabetically by employee; same columns, colours, auto-clock footnotes and signature line. Header band reads "MASTER ADMIN EXPORT". New functions: `masterConfirmStep2()`, `generateMasterPDF()`. Updated: `openMasterExportConfirm()` (uses `_masterLogs` cache, drives step-2 flow), `closeConfirmModal()` (resets picker on close). `index.html`: added `#master-format-picker` div inside confirm modal.
 
 
 **Tasks completed this session:**
@@ -235,4 +235,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 16, 2026 — v38.2_
+_Last updated: June 16, 2026 — v38.3_

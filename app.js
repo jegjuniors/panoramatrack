@@ -1684,9 +1684,23 @@ function openMasterExportConfirm(){
   // Reuse the same confirmation modal — reset checkboxes
   ['chk1','chk2','chk3','chk4'].forEach(id=>{document.getElementById(id).checked=false});
   document.getElementById('confirm-err').textContent='';
-  // Override the submit button to call doMasterExport
-  document.getElementById('export-confirm-submit').onclick=doMasterExport;
+  // Hide format picker, show and reset submit button
+  document.getElementById('master-format-picker').style.display='none';
+  const submitBtn=document.getElementById('export-confirm-submit');
+  submitBtn.style.display='';
+  submitBtn.textContent='Continue \u2192';
+  submitBtn.style.background='var(--green)';
+  // Step 1: validate checkboxes, then reveal format picker
+  submitBtn.onclick=masterConfirmStep2;
   document.getElementById('export-confirm-modal').style.display='flex';
+}
+function masterConfirmStep2(){
+  const all=['chk1','chk2','chk3','chk4'].every(id=>document.getElementById(id).checked);
+  if(!all){document.getElementById('confirm-err').textContent='Please confirm all items above before submitting.';return}
+  document.getElementById('confirm-err').textContent='';
+  // Hide submit button, show format picker
+  document.getElementById('export-confirm-submit').style.display='none';
+  document.getElementById('master-format-picker').style.display='block';
 }
 function doMasterExport(){
   const all=['chk1','chk2','chk3','chk4'].every(id=>document.getElementById(id).checked);
@@ -1708,8 +1722,226 @@ function doMasterExport(){
   closeConfirmModal();
   showNotif('✓','Report exported',`${logs.length} records downloaded`,'#1D9E75',3000);
 }
+function generateMasterPDF(){
+  const {jsPDF}=window.jspdf;
+  const logs=_masterLogs||masterExportRange.logs||[];
+  if(!logs.length){showCustomAlert('No data','No punch records to export.');return}
 
-/* ─── Edit punch modal ─── */
+  // ── Helpers ──
+  const fmtTime=d=>d instanceof Date?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'—';
+  const fromV=document.getElementById('m-log-from').value;
+  const toV=document.getElementById('m-log-to').value;
+  const periodFrom=fromV?new Date(fromV+'T00:00:00').toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'}):'';
+  const periodTo=toV?new Date(toV+'T00:00:00').toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'}):'';
+
+  // ── Activity code lookup ──
+  const actCodeMap={};
+  (ALL_ACTIVITIES||ACTIVITIES||[]).forEach(a=>{if(a.code)actCodeMap[a.name]=a.code;});
+  function formatTaskCode(actName){const code=actCodeMap[actName];return code?`${code} (${actName})`:actName;}
+
+  // ── Group by jobsite, then by employee within each jobsite ──
+  const siteOrder=[];
+  const siteMap={};
+  logs.forEach(l=>{
+    const site=l.jobsite||'—';
+    if(!siteMap[site]){siteMap[site]={};siteOrder.push(site);}
+    const empId=l.empId||l.name;
+    if(!siteMap[site][empId])siteMap[site][empId]={name:l.name,dept:l.dept,punches:[]};
+    siteMap[site][empId].punches.push(l);
+  });
+  siteOrder.sort();
+
+  // ── Consolidate: group by date+jobsite, variable-height rows ──
+  function consolidate(punches){
+    const dayMap={};
+    punches.forEach(p=>{
+      const at=adjustedTimes(p);
+      const aIn=at.in,aOut=at.out;
+      const dayKey=p.in.toDateString()+'|'+(p.jobsite||'');
+      if(!dayMap[dayKey])dayMap[dayKey]={date:aIn,clockIn:aIn,clockOut:aOut,hrs:0,acts:new Set(),jobsite:p.jobsite||'—',hasAuto:false,hasEstimated:false};
+      const d=dayMap[dayKey];
+      if(aIn<d.clockIn)d.clockIn=aIn;
+      if(aOut&&(!d.clockOut||aOut>d.clockOut))d.clockOut=aOut;
+      const ph=paidHours(p);if(ph!=null)d.hrs+=ph;
+      (p.activity||[]).forEach(a=>{if(a!=='Auto-clocked')d.acts.add(a);});
+      if(p.autoClocked)d.hasAuto=true;
+      if(p.estimatedOut)d.hasEstimated=true;
+    });
+    return Object.values(dayMap).sort((a,b)=>a.date-b.date||a.jobsite.localeCompare(b.jobsite));
+  }
+
+  const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'letter'});
+  const PW=215.9,PH=279.4;
+  const ML=14,MR=14,MT=14;
+  const CW=PW-ML-MR;
+
+  // ── Brand colours ──
+  const GREEN=[45,122,45];
+  const AMBER_COL=[214,123,17];
+  const TAN=[251,213,147];
+  const TAN_DARK=[200,140,60];
+  const BLACK=[30,30,30];
+  const WHITE=[255,255,255];
+  const LGRAY=[245,245,245];
+  const AMBER_BG=[255,243,220];
+  const RED_TEXT=[163,45,45];
+  const SITE_HDR=[230,240,230];
+
+  const COL={date:38,site:28,in:24,out:24,hrs:16,task:0};
+  COL.task=CW-COL.date-COL.site-COL.in-COL.out-COL.hrs;
+  const COL_WIDTHS=[COL.date,COL.site,COL.in,COL.out,COL.hrs,COL.task];
+  const colLabels=['DATE','JOBSITE','CLOCK IN','CLOCK OUT','HOURS','TASK CODE'];
+  const ROW_H=6.5;
+  const lineH=4;
+
+  let pageIdx=0;
+
+  siteOrder.forEach(site=>{
+    const empMap=siteMap[site];
+    const empIds=Object.keys(empMap).sort((a,b)=>empMap[a].name.localeCompare(empMap[b].name));
+
+    empIds.forEach(empId=>{
+      if(pageIdx>0)doc.addPage();
+      pageIdx++;
+      const emp=empMap[empId];
+      const rows=consolidate(emp.punches);
+      let y=MT;
+
+      // ── HEADER BAND ──
+      doc.setFillColor(...GREEN);
+      doc.rect(ML,y,CW,12,'F');
+      doc.setTextColor(...WHITE);
+      doc.setFont('helvetica','bold');
+      doc.setFontSize(12);
+      doc.text('Panorama Building Systems \u2014 PanoramaTrack',ML+3,y+5);
+      doc.setFont('helvetica','normal');
+      doc.setFontSize(8.5);
+      doc.text(`Pay period: ${periodFrom} \u2013 ${periodTo}`,ML+3,y+10);
+      doc.setFont('helvetica','bold');doc.setFontSize(7);doc.setTextColor(...WHITE);
+      doc.text('MASTER ADMIN EXPORT',ML+CW-3,y+6.5,{align:'right'});
+      y+=14;
+
+      // ── TIME CARD title ──
+      doc.setTextColor(...BLACK);
+      doc.setFont('helvetica','bold');
+      doc.setFontSize(14);
+      doc.text('TIME CARD',PW/2,y+6,{align:'center'});
+      y+=11;
+
+      // ── Employee info block ──
+      doc.setFontSize(8.5);
+      doc.setFont('helvetica','bold');doc.text('NAME:',ML,y+3.5);
+      doc.setFont('helvetica','normal');doc.text(emp.name,ML+16,y+3.5);
+      doc.setFont('helvetica','bold');doc.text('JOBSITE:',ML+CW*0.52,y+3.5);
+      doc.setFont('helvetica','normal');doc.text(site,ML+CW*0.52+18,y+3.5);
+      y+=6;
+      doc.setFont('helvetica','bold');doc.text('DEPARTMENT:',ML,y+3.5);
+      doc.setFont('helvetica','normal');doc.text(emp.dept||'—',ML+27,y+3.5);
+      y+=8;
+
+      // ── Divider ──
+      doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.4);
+      doc.line(ML,y,ML+CW,y);y+=3;
+
+      // ── Table header ──
+      doc.setFillColor(...TAN);doc.rect(ML,y,CW,ROW_H,'F');
+      doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
+      let cx=ML;COL_WIDTHS.forEach(w=>{cx+=w;if(cx<ML+CW)doc.line(cx,y,cx,y+ROW_H);});
+      doc.rect(ML,y,CW,ROW_H);
+      doc.setFont('helvetica','bold');doc.setFontSize(7.5);doc.setTextColor(...BLACK);
+      let lx=ML;COL_WIDTHS.forEach((w,i)=>{doc.text(colLabels[i],lx+w/2,y+ROW_H-1.8,{align:'center'});lx+=w;});
+      y+=ROW_H;
+
+      // ── Table rows ──
+      doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+      let totalHrs=0;
+
+      rows.forEach((r,ri)=>{
+        const taskLines=r.hasAuto?['Auto-clocked']:([...r.acts].map(a=>formatTaskCode(a)));
+        if(!taskLines.length)taskLines.push('—');
+        const rH=Math.max(ROW_H,taskLines.length*lineH+2);
+
+        if(y+rH>PH-50){
+          doc.addPage();y=MT;
+          doc.setFillColor(...GREEN);doc.rect(ML,y,CW,7,'F');
+          doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...WHITE);
+          doc.text(`${emp.name} (${site}) \u2014 continued`,ML+3,y+5);
+          y+=9;
+          doc.setFillColor(...TAN);doc.rect(ML,y,CW,ROW_H,'F');
+          doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
+          let cx2=ML;COL_WIDTHS.forEach(w=>{cx2+=w;if(cx2<ML+CW)doc.line(cx2,y,cx2,y+ROW_H);});
+          doc.rect(ML,y,CW,ROW_H);
+          doc.setFont('helvetica','bold');doc.setFontSize(7.5);doc.setTextColor(...BLACK);
+          let lx2=ML;COL_WIDTHS.forEach((w,i)=>{doc.text(colLabels[i],lx2+w/2,y+ROW_H-1.8,{align:'center'});lx2+=w;});
+          y+=ROW_H;
+          doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+        }
+
+        const rowBg=ri%2===0?WHITE:LGRAY;
+        const bgColor=r.hasEstimated?AMBER_BG:rowBg;
+        doc.setFillColor(...bgColor);doc.rect(ML,y,CW,rH,'F');
+        doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
+        let rx=ML;COL_WIDTHS.forEach(w=>{rx+=w;if(rx<ML+CW)doc.line(rx,y,rx,y+rH);});
+        doc.rect(ML,y,CW,rH);
+
+        const dateStr=r.date.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'});
+        const inStr=fmtTime(r.clockIn);
+        const outStr=r.clockOut?(fmtTime(r.clockOut)+(r.hasEstimated?' (est.)':'')):'—';
+        const hrsStr=r.hrs>0?r.hrs.toFixed(2):'—';
+        totalHrs+=r.hrs;
+
+        const textY=y+4;
+        doc.setTextColor(...(r.hasAuto?RED_TEXT:BLACK));
+        let tx=ML;
+        doc.text((r.hasAuto?'! ':'')+dateStr,tx+2,textY);tx+=COL.date;
+        doc.setTextColor(...BLACK);
+        doc.text(r.jobsite,tx+COL.site/2,textY,{align:'center'});tx+=COL.site;
+        doc.text(inStr,tx+COL.in/2,textY,{align:'center'});tx+=COL.in;
+        doc.setFont('helvetica',r.hasEstimated?'italic':'normal');
+        doc.text(outStr,tx+COL.out/2,textY,{align:'center'});tx+=COL.out;
+        doc.setFont('helvetica','bold');
+        doc.text(hrsStr,tx+COL.hrs-2,textY,{align:'right'});tx+=COL.hrs;
+        doc.setFont('helvetica','normal');
+        taskLines.forEach((line,li)=>{doc.text(line,tx+2,textY+li*lineH);});
+        y+=rH;
+      });
+
+      // ── TOTAL row ──
+      const TOT_H=7;
+      doc.setFillColor(...TAN);doc.rect(ML,y,CW,TOT_H,'F');
+      doc.setDrawColor(...TAN_DARK);doc.rect(ML,y,CW,TOT_H);
+      const hrsX=ML+COL.date+COL.site+COL.in+COL.out;
+      doc.line(hrsX,y,hrsX,y+TOT_H);
+      doc.setFont('helvetica','bold');doc.setFontSize(8.5);doc.setTextColor(...BLACK);
+      doc.text('TOTAL',ML+2,y+TOT_H-2);
+      doc.text(totalHrs.toFixed(2),hrsX+COL.hrs-2,y+TOT_H-2,{align:'right'});
+      y+=TOT_H+5;
+
+      // ── Footnotes ──
+      if(rows.some(r=>r.hasAuto)){
+        doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(...RED_TEXT);
+        doc.text('! Records marked ! were auto-clocked out at 12 hours and may require review.',ML,y);
+        y+=4.5;doc.setTextColor(...BLACK);
+      }
+
+      // ── Signature line ──
+      const sigY=Math.max(y+10,PH-MT-25);
+      doc.setFont('helvetica','normal');doc.setFontSize(8);
+      doc.setDrawColor(...BLACK);doc.setLineWidth(0.3);
+      doc.line(ML,sigY,ML+70,sigY);
+      doc.text('Master admin approval',ML,sigY+4);
+      doc.line(ML+CW-50,sigY,ML+CW,sigY);
+      doc.text('Date',ML+CW-50,sigY+4);
+    });
+  });
+
+  // ── Save ──
+  const now=new Date();
+  doc.save(`PanoramaTrack_MasterReport_${toDateStr(now)}.pdf`);
+  closeConfirmModal();
+  const totalCards=siteOrder.reduce((s,site)=>s+Object.keys(siteMap[site]).length,0);
+  showNotif('✓','PDF generated',`${totalCards} time card${totalCards!==1?'s':''} downloaded`,'#1D9E75',3500);
+}
 // _editEntry holds the current entry being edited (may come from DB query, not timeLog array)
 let _editEntry=null;
 async function openEditModal(ref){
@@ -2211,7 +2443,15 @@ function openChecklist(){
   }
   document.getElementById('export-confirm-modal').style.display='flex';
 }
-function closeConfirmModal(){document.getElementById('export-confirm-modal').style.display='none'}
+function closeConfirmModal(){
+  document.getElementById('export-confirm-modal').style.display='none';
+  // Reset format picker in case master admin opened it
+  document.getElementById('master-format-picker').style.display='none';
+  const submitBtn=document.getElementById('export-confirm-submit');
+  submitBtn.style.display='';
+  submitBtn.textContent='Submit \u0026 export PDF';
+  submitBtn.onclick=doExport;
+}
 async function doExport(){
   const isPrelim=exportRange.isPrelim;
   const requiredChks=isPrelim?['chk1','chk2','chk3','chk4','chk5']:['chk1','chk2','chk3','chk4'];
@@ -2660,7 +2900,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.2',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.3',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
