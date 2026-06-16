@@ -1,7 +1,7 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v38.1
-**Last Updated:** June 11, 2026
+**Current Version:** v38.2
+**Last Updated:** June 16, 2026
 
 ---
 
@@ -64,7 +64,11 @@ No separate supervisors table.
 
 ## 🚧 What Was Last Being Worked On
 
-**Last session date:** June 11, 2026
+**Last session date:** June 16, 2026
+**Tasks completed this session:**
+- **v38.2 (hotfix):** Fixed master admin "Generate & export report" always showing "No records" modal even when records were visible on screen. Root cause: `openMasterExportConfirm()` called `getMasterLogFiltered()` (an async function) synchronously — it received a Promise, not an array, so `logs.length` was always undefined/falsy. Fix: replaced the async call with `_masterLogs || []`, the cached result already populated by `refreshMasterLog()` when the log renders. One-line change in `app.js`; version badge bumped in both files. `index.html` and `styles.css` otherwise unchanged.
+
+
 **Tasks completed this session:**
 - **v38.1 (this session — hotfix to v38.0 nav reorg):** The v38.0 edit had broken `index.html` structurally — master admin panel loaded blank and the supervisor screen was showing the master panel.
   - **Root cause (index.html only — `app.js`/`styles.css` were fine):** the v38.0 nav edit overwrote the supervisor dashboard *body* with the master dashboard body and deleted the `<div id="screen-master">` wrapper. Net effect: (1) the supervisor nav (`stab-live/log/employees`) and all three supervisor panels (`spanel-live`, `spanel-log`, `spanel-employees`) were gone; (2) the `</div>` closing `screen-sup` was gone; (3) `screen-master` + its "Master Administrator" header no longer existed. So `screen-sup` literally contained the master nav/panels (→ supervisor login showed the master panel), and `showScreen('screen-master')` threw on a null element (→ master never loaded).
@@ -231,4 +235,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 11, 2026 — v38.1_
+_Last updated: June 16, 2026 — v38.2_
