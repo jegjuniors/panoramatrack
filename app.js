@@ -695,6 +695,8 @@ function showActivityScreen(emp){
   document.getElementById('activity-error').textContent='';
   renderActList();
   showScreen('screen-activity');
+  window.scrollTo(0,0); // this screen always starts at the top of the list
+  requestAnimationFrame(updateActScroll);
 }
 
 function renderActList(){
@@ -719,6 +721,44 @@ function toggleAct(name,id){
     item.classList.toggle('checked',checked);
   }
 }
+
+// Custom page-scroll affordance for the activity screen (v39.1) — driven by
+// real window-scroll math rather than native scrollbar/CSS, since native
+// scrollbars are unreliable on mobile/PWA. Guarded on the screen being
+// active so it's a no-op (cheap check, no layout read) on every other screen.
+function updateActScroll(){
+  const screen=document.getElementById('screen-activity');
+  if(!screen||!screen.classList.contains('active'))return;
+  const rail=document.querySelector('.act-scroll-rail');
+  const thumb=document.getElementById('act-scroll-thumb');
+  const arrowTop=document.getElementById('act-arrow-top');
+  const arrowBottom=document.getElementById('act-arrow-bottom');
+  if(!rail||!thumb)return;
+  const scrollY=window.scrollY||document.documentElement.scrollTop;
+  const scrollHeight=document.documentElement.scrollHeight;
+  const viewport=window.innerHeight;
+  const scrollable=scrollHeight>viewport+2;
+  const railHeight=rail.clientHeight;
+  if(scrollable&&railHeight>0){
+    const maxScroll=scrollHeight-viewport;
+    const thumbHeight=Math.max(24,railHeight*(viewport/scrollHeight));
+    thumb.style.height=thumbHeight+'px';
+    thumb.style.top=((railHeight-thumbHeight)*(scrollY/maxScroll))+'px';
+    thumb.style.display='block';
+  }else{
+    thumb.style.display='none';
+  }
+  const showTop=scrollable&&scrollY>4;
+  const showBottom=scrollable&&scrollY<scrollHeight-viewport-4;
+  if(arrowTop)arrowTop.classList.toggle('show',showTop);
+  if(arrowBottom)arrowBottom.classList.toggle('show',showBottom);
+}
+function scrollActivityBy(dir){
+  window.scrollBy({top:dir*Math.round(window.innerHeight*0.6),behavior:'smooth'});
+}
+window.addEventListener('scroll',updateActScroll,{passive:true});
+window.addEventListener('resize',updateActScroll,{passive:true});
+
 async function confirmClockOut(){
   if(selectedActs.size===0){document.getElementById('activity-error').textContent='Please select at least one activity.';return}
   const now=new Date();
@@ -2844,7 +2884,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v39.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v39.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

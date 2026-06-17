@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v39.0
+**Current Version:** v39.1
 **Last Updated:** June 17, 2026
 
 ---
@@ -65,6 +65,15 @@ No separate supervisors table.
 ## 🚧 What Was Last Being Worked On
 
 **Last session date:** June 17, 2026
+**Tasks completed this session:**
+- **v39.1 — Custom scroll rail + tappable arrows on the activity screen:** The v39.0 full-screen checklist removed the dropdown, but Julio still wasn't getting a "this can scroll" feeling from the plain page scroll — confirmed the root cause: this screen relies on native page/PWA scrolling (no inner fixed-height box, `#app` just grows with content), and native scrollbars are essentially invisible on mobile/installed-PWA regardless of CSS styling, which is why the earlier v38.4 themed-scrollbar attempt never showed up for him either. Rather than fight native scrollbar APIs again, this builds a fully custom, self-drawn scroll-position indicator plus large tappable arrows — both driven by real `window.scrollY`/`scrollHeight`/`innerHeight` math, so they render identically everywhere instead of depending on what the OS/browser chooses to show. Per Julio's choices: arrows are tappable (auto-scroll on press, not just visual hints), and this is scoped to the clock-out activity screen only, not applied app-wide.
+  - **Added:** `#act-scroll-overlay` — a `position:fixed` overlay (constrained to `#app`'s `max-width:520px` column, same centering trick as `.act-confirm-bar`) holding: `.act-scroll-rail` (a thin track + `#act-scroll-thumb`, resized/repositioned via JS to reflect actual scroll fraction — not a native scrollbar), and two 48px circular buttons (`#act-arrow-top` ▲ / `#act-arrow-bottom` ▼) that fade in only when there's content to scroll to in that direction.
+  - **New JS:** `updateActScroll()` — reads `window.scrollY`, `document.documentElement.scrollHeight`, and `window.innerHeight`, sizes/positions the thumb proportionally within the rail, and toggles the `.show` class on each arrow. Guarded on `#screen-activity` actually being the active screen (cheap check up front, so it's a no-op everywhere else) and attached to `window`'s `scroll`/`resize` events. `scrollActivityBy(dir)` — what the arrows call — scrolls the page by ~60% of viewport height (`window.scrollBy({behavior:'smooth'})`), repeatable per tap.
+  - **Also fixed in passing:** `showActivityScreen()` now resets `window.scrollTo(0,0)` on entry. This app's screens all share one underlying page scroll (`.screen{display:none}` just toggles which screen occupies it), so without this the activity screen could open already scrolled from whatever position a previous screen left behind — needed for the new rail/arrows to read correct state on entry, not a general app-wide scroll-reset (out of scope per "this screen only").
+  - Files changed: `index.html` (new scroll-overlay markup + version badge), `styles.css` (new `.act-scroll-*` rules), `app.js` (`updateActScroll()` + `scrollActivityBy()` + scroll-reset in `showActivityScreen()` + backup payload version).
+
+
+**Last session date:** June 17, 2026 (earlier in the same day)
 **Tasks completed this session:**
 - **v39.0 — Activity selection redesigned as a full-screen checklist (replaces the v36–v38 dropdown):** The collapsed dropdown approach (v36 original, v38.4 scrollbar+fade, v38.5 chevrons) never solved the core discoverability problem — a tiny arrow or thin scrollbar just isn't a strong enough signal on a phone someone's tapping through quickly mid-shift. Since the clock-out activity screen is already dedicated solely to this one task, the dropdown was removed entirely and replaced with the full activity checklist shown directly as the screen's main content — every activity visible in an ordinary scrolling list, no popup, no scroll-hint mechanics needed (a normal full-page scroll is something everyone already understands). Per Julio's call: the "selected activities" tag-pill summary was dropped (checkmarks in the list itself already show what's picked), and the Confirm/Cancel buttons are now pinned to the bottom of the screen in a fixed bar so they're always reachable without scrolling back down through a long activity list.
   - **Removed:** the entire v36–v38.5 dropdown mechanism — `act-dropdown-wrap/btn/list-wrap/list`, the scroll fade (`act-fade-top/bottom`), the chevrons (`act-chevron-top/bottom`), the tag pills (`act-tags`/`act-tag`), and their JS (`renderActDropdown`, `renderActTags`, `removeActTag`, `updateActDropdownLabel`, `toggleDropAct`, `toggleActDropdown`, `updateActFades`, the outside-click-to-close listener, the scroll listener).
@@ -230,6 +239,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | Export confirm flow | `openExportConfirm()` |
 | Activity code lookup | `actCodeMap` / `formatTaskCode()` |
 | Activity full-screen checklist (v39.0, replaces v36–v38 dropdown) | `showActivityScreen()` / `renderActList()` / `toggleAct(name,id)`; `#act-list` (checklist container), `.act-list-item` rows, `#activity-error`; fixed bottom bar `.act-confirm-bar`/`.act-confirm-bar-inner` holding Confirm/Cancel — all in `#screen-activity` in index.html; `.act-list*`/`.act-confirm-bar*` in styles.css |
+| Activity screen custom scroll rail + tappable arrows (v39.1) | `updateActScroll()` / `scrollActivityBy(dir)`; `#act-scroll-overlay` (`.act-scroll-rail`/`#act-scroll-thumb`, `#act-arrow-top`/`#act-arrow-bottom`) in index.html; `.act-scroll-*` in styles.css |
 | Supabase client | Top of `app.js` — `SUPABASE_URL` / `SUPABASE_KEY` |
 | Theme toggle | `applyTheme()` / `setTheme()` / `pt-theme` (localStorage) |
 | Backup | `runBackup()` |
@@ -259,4 +269,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 17, 2026 — v39.0_
+_Last updated: June 17, 2026 — v39.1_

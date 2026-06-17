@@ -168,6 +168,17 @@ select{cursor:pointer}
 .act-list-item.checked{background:#1a3018;color:#6dd86d}
 .act-confirm-bar{position:fixed;left:0;right:0;bottom:0;z-index:80;max-width:520px;margin:0 auto;background:var(--bg);border-top:0.5px solid var(--bdr);box-shadow:0 -4px 16px rgba(0,0,0,.25)}
 .act-confirm-bar-inner{max-width:380px;margin:0 auto;padding:10px 1rem calc(10px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:6px}
+/* ── Custom page-scroll affordance for the activity screen (v39.1) — native
+   scrollbars/CSS hints aren't reliably visible on mobile/PWA, so this is a
+   self-drawn rail + tappable arrows driven entirely by JS scroll math ── */
+.act-scroll-overlay{position:fixed;left:0;right:0;top:0;bottom:0;max-width:520px;margin:0 auto;pointer-events:none;z-index:85}
+.act-scroll-rail{position:absolute;right:6px;width:5px;top:calc(90px + env(safe-area-inset-top));bottom:150px}
+.act-scroll-track{position:absolute;top:0;bottom:0;left:0;right:0;background:var(--bdr2);border-radius:3px;opacity:.4}
+.act-scroll-thumb{position:absolute;left:0;right:0;width:5px;background:var(--green);border-radius:3px;opacity:.9}
+.act-scroll-arrow{position:absolute;left:50%;transform:translateX(-50%);width:48px;height:48px;border-radius:50%;background:var(--bg2);border:0.5px solid var(--bdr2);box-shadow:0 2px 12px rgba(0,0,0,.35);color:var(--txt);font-size:19px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-family:inherit;opacity:0;pointer-events:none;transition:opacity .15s}
+.act-scroll-arrow.show{opacity:.95;pointer-events:auto}
+.act-scroll-arrow-top{top:calc(14px + env(safe-area-inset-top))}
+.act-scroll-arrow-bottom{bottom:148px}
 .kiosk-action-btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:14px;border:0.5px solid var(--bdr);border-radius:var(--radius);font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .12s;margin-bottom:8px}
 .kiosk-action-btn:hover{filter:brightness(1.05)}
 /* ── A2HS banner ── */
