@@ -177,6 +177,10 @@ select{cursor:pointer}
 .act-dropdown-fade-top{top:0;background:linear-gradient(to bottom, var(--bg2), rgba(0,0,0,0))}
 .act-dropdown-fade-bottom{bottom:0;background:linear-gradient(to top, var(--bg2), rgba(0,0,0,0))}
 .act-dropdown-fade.show{opacity:1}
+.act-dropdown-chevron{position:absolute;left:50%;transform:translateX(-50%);font-size:11px;line-height:1;color:var(--txt3);opacity:0;transition:opacity .15s;pointer-events:none}
+.act-dropdown-chevron-top{top:3px}
+.act-dropdown-chevron-bottom{bottom:3px}
+.act-dropdown-chevron.show{opacity:.85}
 .act-dropdown-item{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;font-size:13px;color:var(--txt);border-bottom:0.5px solid var(--bdr)}
 .act-dropdown-item:last-child{border-bottom:none}
 .act-dropdown-item:hover{background:var(--bg3)}

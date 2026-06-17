@@ -765,16 +765,22 @@ function toggleActDropdown(){
   if(open)updateActFades();
 }
 
-// Activity dropdown scroll fade — shows a top/bottom fade only when there's
-// more content to scroll to in that direction (v38.4)
+// Activity dropdown scroll fade — shows a top/bottom fade (and chevron hint)
+// only when there's more content to scroll to in that direction (v38.4, chevrons added v38.5)
 function updateActFades(){
   const list=document.getElementById('act-dropdown-list');
   const fadeTop=document.getElementById('act-fade-top');
   const fadeBottom=document.getElementById('act-fade-bottom');
+  const chevTop=document.getElementById('act-chevron-top');
+  const chevBottom=document.getElementById('act-chevron-bottom');
   if(!list||!fadeTop||!fadeBottom)return;
   const scrollable=list.scrollHeight>list.clientHeight+1;
-  fadeTop.classList.toggle('show',scrollable&&list.scrollTop>2);
-  fadeBottom.classList.toggle('show',scrollable&&list.scrollTop<list.scrollHeight-list.clientHeight-2);
+  const showTop=scrollable&&list.scrollTop>2;
+  const showBottom=scrollable&&list.scrollTop<list.scrollHeight-list.clientHeight-2;
+  fadeTop.classList.toggle('show',showTop);
+  fadeBottom.classList.toggle('show',showBottom);
+  if(chevTop)chevTop.classList.toggle('show',showTop);
+  if(chevBottom)chevBottom.classList.toggle('show',showBottom);
 }
 document.getElementById('act-dropdown-list').addEventListener('scroll',updateActFades,{passive:true});
 
@@ -2915,7 +2921,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.4',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.5',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

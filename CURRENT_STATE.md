@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v38.4
+**Current Version:** v38.5
 **Last Updated:** June 17, 2026
 
 ---
@@ -66,12 +66,16 @@ No separate supervisors table.
 
 **Last session date:** June 17, 2026
 **Tasks completed this session:**
+- **v38.5 — Chevron hints added to activity dropdown scroll affordance:** Follow-up to v38.4. The scrollbar styling alone wasn't a reliable visual cue on mobile (iOS Safari ignores `::-webkit-scrollbar` styling entirely, and native scrollbars typically only render while actively touched/dragged), so a small chevron (▴ / ▾) was added at the top/bottom edge of the dropdown as a clearer, more legible "more below" signal. Driven by the same scroll-position logic as the fade, not a separate check — when there's nothing to scroll to in a direction, neither the fade nor the chevron shows.
+  - **Structure:** two new sibling divs inside `#act-dropdown-list-wrap` — `#act-chevron-top` (▴) and `#act-chevron-bottom` (▾) — sitting alongside the existing fade divs.
+  - **JS:** `updateActFades()` extended to toggle `.show` on the two chevrons using the same `showTop`/`showBottom` booleans already computed for the fades; no new event listeners needed.
+  - Files changed: `index.html` (two new chevron divs + version badge), `styles.css` (new `.act-dropdown-chevron*` rules), `app.js` (`updateActFades()` extended + backup payload version).
 - **v38.4 — Activity dropdown scroll affordance:** The clock-out activity list (`#act-dropdown-list`) only shows a handful of items before needing a scroll, but had no visible scrollbar or hint that more activities existed below — easy to miss on a phone. Added a themed, always-visible thin scrollbar (cross-browser: `scrollbar-width`/`scrollbar-color` for Firefox, `::-webkit-scrollbar*` for Chrome/Safari) plus a top/bottom fade overlay that only appears when there's actually more to scroll in that direction (computed from `scrollHeight`/`scrollTop`/`clientHeight`, not just shown statically). Purely a UX/visual fix — no change to activity data, selection logic, or how punches are saved.
   - **Structure change:** the dropdown list is now wrapped in a new `#act-dropdown-list-wrap` div, which holds the border/background/shadow/rounding and clips its contents (`overflow:hidden`); the inner `#act-dropdown-list` is just the scrolling area; two new sibling divs (`#act-fade-top` / `#act-fade-bottom`) sit on top as the fade overlays, toggled via a `.show` class.
   - **New function:** `updateActFades()` — checks if the list is actually scrollable and how far scrolled, toggles the two fade overlays accordingly. Called on render (`renderActDropdown()`), on open (`toggleActDropdown()`), and on every scroll event (listener attached once to `#act-dropdown-list`).
   - **Renamed references:** all existing show/hide logic that used to target `#act-dropdown-list` directly (`showActivityScreen()`, `toggleDropAct()`, `toggleActDropdown()`, the outside-click listener, `confirmClockOut()`) now targets `#act-dropdown-list-wrap` instead — the inner list element keeps its old ID and is otherwise untouched.
   - Files changed: `index.html` (dropdown markup + version badge), `styles.css` (new wrap/scrollbar/fade rules), `app.js` (new `updateActFades()` + wrapper-ID updates + backup payload version).
-  - Note: `styles.css` was not re-uploaded this session — edited from the project copy. Worth re-uploading current `styles.css` next session to keep it in sync with uploads going forward.
+  - Note: `styles.css` was not re-uploaded in that session — edited from the project copy, later confirmed identical to Julio's actual current file when re-uploaded.
 
 
 **Tasks completed this session:**
@@ -215,7 +219,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | DB init / boot | `bootApp()` |
 | Export confirm flow | `openExportConfirm()` |
 | Activity code lookup | `actCodeMap` / `formatTaskCode()` |
-| Activity dropdown scroll fade (v38.4) | `updateActFades()`; `#act-dropdown-list-wrap` (wraps list + fades), `#act-fade-top`/`#act-fade-bottom` in index.html; `.act-dropdown-list-wrap`/`.act-dropdown-fade*` in styles.css |
+| Activity dropdown scroll fade (v38.4, chevrons v38.5) | `updateActFades()`; `#act-dropdown-list-wrap` (wraps list + fades + chevrons), `#act-fade-top`/`#act-fade-bottom`/`#act-chevron-top`/`#act-chevron-bottom` in index.html; `.act-dropdown-list-wrap`/`.act-dropdown-fade*`/`.act-dropdown-chevron*` in styles.css |
 | Supabase client | Top of `app.js` — `SUPABASE_URL` / `SUPABASE_KEY` |
 | Theme toggle | `applyTheme()` / `setTheme()` / `pt-theme` (localStorage) |
 | Backup | `runBackup()` |
@@ -245,4 +249,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 17, 2026 — v38.4_
+_Last updated: June 17, 2026 — v38.5_
