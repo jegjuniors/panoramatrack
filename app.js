@@ -688,115 +688,38 @@ async function submitPin(){
   }
 }
 
-/* ─── Activity screen ─── */
+/* ─── Activity screen (v39.0 — full-screen checklist, replaces v36–v38 dropdown) ─── */
 function showActivityScreen(emp){
   document.getElementById('activity-emp-name').textContent=emp.name;
   selectedActs=new Set();
   document.getElementById('activity-error').textContent='';
-  // Close dropdown if open
-  document.getElementById('act-dropdown-list-wrap').style.display='none';
-  document.getElementById('act-dropdown-arrow').textContent='▾';
-  // Build dropdown list from active activities only
-  renderActDropdown();
-  renderActTags();
+  renderActList();
   showScreen('screen-activity');
 }
 
-function renderActDropdown(){
-  const list=document.getElementById('act-dropdown-list');
+function renderActList(){
+  const list=document.getElementById('act-list');
   list.innerHTML=ACTIVITIES.map(a=>`
-    <div class="act-dropdown-item${selectedActs.has(a.name)?' checked':''}" id="adrop_${a.id}" onclick="toggleDropAct('${a.name.replace(/'/g,"\'")}',${a.id})">
-      <input type="checkbox" ${selectedActs.has(a.name)?'checked':''} onclick="event.stopPropagation()" onchange="toggleDropAct('${a.name.replace(/'/g,"\'")}',${a.id})" style="pointer-events:none;"/>
+    <div class="act-list-item${selectedActs.has(a.name)?' checked':''}" id="aitem_${a.id}" onclick="toggleAct('${a.name.replace(/'/g,"\'")}',${a.id})">
+      <input type="checkbox" ${selectedActs.has(a.name)?'checked':''} onclick="event.stopPropagation()" onchange="toggleAct('${a.name.replace(/'/g,"\'")}',${a.id})" style="pointer-events:none;"/>
       <span>${a.name}</span>
     </div>`).join('');
-  updateActDropdownLabel();
-  updateActFades();
 }
 
-function renderActTags(){
-  const tags=document.getElementById('act-tags');
-  if(!selectedActs.size){tags.innerHTML='';return}
-  tags.innerHTML=[...selectedActs].map(name=>`
-    <span class="act-tag">${name}
-      <button onclick="removeActTag('${name.replace(/'/g,"\'")}')">×</button>
-    </span>`).join('');
-}
-
-function updateActDropdownLabel(){
-  const lbl=document.getElementById('act-dropdown-label');
-  const count=selectedActs.size;
-  lbl.textContent=count===0?'Select activities…':`${count} activit${count===1?'y':'ies'} selected`;
-  lbl.style.color=count>0?'var(--txt)':'var(--txt3)';
-}
-
-function toggleDropAct(name,id){
+function toggleAct(name,id){
   if(selectedActs.has(name))selectedActs.delete(name);
   else selectedActs.add(name);
   document.getElementById('activity-error').textContent='';
-  // Update just this item in place — avoids full re-render which collapses the dropdown
-  const item=document.getElementById('adrop_'+id);
+  // Update just this item in place — avoids a full re-render on every tap
+  const item=document.getElementById('aitem_'+id);
   if(item){
     const chk=item.querySelector('input[type=checkbox]');
     const checked=selectedActs.has(name);
     if(chk)chk.checked=checked;
     item.classList.toggle('checked',checked);
   }
-  updateActDropdownLabel();
-  renderActTags();
-  // Ensure dropdown stays open
-  const wrap=document.getElementById('act-dropdown-list-wrap');
-  if(wrap)wrap.style.display='block';
-  const arrow=document.getElementById('act-dropdown-arrow');
-  if(arrow)arrow.textContent='▴';
 }
-
-function removeActTag(name){
-  selectedActs.delete(name);
-  renderActDropdown();
-  renderActTags();
-}
-
-function toggleActDropdown(){
-  const wrap=document.getElementById('act-dropdown-list-wrap');
-  const arrow=document.getElementById('act-dropdown-arrow');
-  const open=wrap.style.display==='none';
-  wrap.style.display=open?'block':'none';
-  arrow.textContent=open?'▴':'▾';
-  if(open)updateActFades();
-}
-
-// Activity dropdown scroll fade — shows a top/bottom fade (and chevron hint)
-// only when there's more content to scroll to in that direction (v38.4, chevrons added v38.5)
-function updateActFades(){
-  const list=document.getElementById('act-dropdown-list');
-  const fadeTop=document.getElementById('act-fade-top');
-  const fadeBottom=document.getElementById('act-fade-bottom');
-  const chevTop=document.getElementById('act-chevron-top');
-  const chevBottom=document.getElementById('act-chevron-bottom');
-  if(!list||!fadeTop||!fadeBottom)return;
-  const scrollable=list.scrollHeight>list.clientHeight+1;
-  const showTop=scrollable&&list.scrollTop>2;
-  const showBottom=scrollable&&list.scrollTop<list.scrollHeight-list.clientHeight-2;
-  fadeTop.classList.toggle('show',showTop);
-  fadeBottom.classList.toggle('show',showBottom);
-  if(chevTop)chevTop.classList.toggle('show',showTop);
-  if(chevBottom)chevBottom.classList.toggle('show',showBottom);
-}
-document.getElementById('act-dropdown-list').addEventListener('scroll',updateActFades,{passive:true});
-
-// Close dropdown when tapping outside
-document.addEventListener('click',function(e){
-  const wrap=document.querySelector('.act-dropdown-wrap');
-  if(wrap&&!wrap.contains(e.target)){
-    const listWrap=document.getElementById('act-dropdown-list-wrap');
-    const arrow=document.getElementById('act-dropdown-arrow');
-    if(listWrap)listWrap.style.display='none';
-    if(arrow)arrow.textContent='▾';
-  }
-},{passive:true});
 async function confirmClockOut(){
-  // Close dropdown if open
-  document.getElementById('act-dropdown-list-wrap').style.display='none';
   if(selectedActs.size===0){document.getElementById('activity-error').textContent='Please select at least one activity.';return}
   const now=new Date();
   const entry=pendingClockOut.entry;
@@ -2921,7 +2844,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.5',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v39.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

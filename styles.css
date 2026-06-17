@@ -40,9 +40,7 @@
 [data-theme="light"] select option{background:#f4f6f4;color:#111811;}
 [data-theme="light"] .nav-btn.active{background:#d4edda;color:#1f5c1f;border-bottom-color:#2d7a2d;}
 [data-theme="light"] .act-btn.sel{background:#d4edda;border-color:#2d7a2d;color:#1f5c1f;}
-[data-theme="light"] .act-dropdown-item.checked{background:#d4edda;color:#1f5c1f;}
-[data-theme="light"] .act-tag{background:#d4edda;color:#1f5c1f;border-color:#2d7a2d;}
-[data-theme="light"] .act-tag button{color:#1f5c1f;}
+[data-theme="light"] .act-list-item.checked{background:#d4edda;color:#1f5c1f;}
 [data-theme="light"] .chk-pill.checked{background:#d4edda;border-color:#2d7a2d;color:#1f5c1f;}
 [data-theme="light"] .b-in{background:#d4edda;color:#1f5c1f;}
 [data-theme="light"] .b-out{background:#dce2dc;color:#3a5a3a;}
@@ -62,9 +60,7 @@
   [data-theme="auto"] select option{background:#f4f6f4;color:#111811;}
   [data-theme="auto"] .nav-btn.active{background:#d4edda;color:#1f5c1f;border-bottom-color:#2d7a2d;}
   [data-theme="auto"] .act-btn.sel{background:#d4edda;border-color:#2d7a2d;color:#1f5c1f;}
-  [data-theme="auto"] .act-dropdown-item.checked{background:#d4edda;color:#1f5c1f;}
-  [data-theme="auto"] .act-tag{background:#d4edda;color:#1f5c1f;border-color:#2d7a2d;}
-  [data-theme="auto"] .act-tag button{color:#1f5c1f;}
+  [data-theme="auto"] .act-list-item.checked{background:#d4edda;color:#1f5c1f;}
   [data-theme="auto"] .chk-pill.checked{background:#d4edda;border-color:#2d7a2d;color:#1f5c1f;}
   [data-theme="auto"] .b-in{background:#d4edda;color:#1f5c1f;}
   [data-theme="auto"] .b-out{background:#dce2dc;color:#3a5a3a;}
@@ -163,32 +159,15 @@ select{cursor:pointer}
 .chk-pill{display:flex;align-items:center;gap:7px;padding:7px 10px;background:var(--bg3);border:1px solid var(--bdr2);border-radius:var(--radius);cursor:pointer;font-size:12px;font-weight:500;color:var(--txt);transition:all .1s;user-select:none}
 .chk-pill input[type=checkbox]{width:14px;height:14px;accent-color:var(--green);flex-shrink:0;cursor:pointer}
 .chk-pill.checked{background:#1a3018;border-color:#3fa83f;color:#6dd86d}
-/* ── Activity multi-select dropdown ── */
-.act-dropdown-wrap{position:relative;width:100%}
-.act-dropdown-btn{width:100%;padding:10px 12px;background:var(--bg3);border:0.5px solid var(--bdr2);border-radius:var(--radius);font-size:14px;color:var(--txt);text-align:left;cursor:pointer;font-family:inherit;display:flex;justify-content:space-between;align-items:center}
-.act-dropdown-btn:focus{outline:none;border-color:var(--green)}
-.act-dropdown-list-wrap{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:50;background:var(--bg2);border:0.5px solid var(--bdr2);border-radius:var(--radius);box-shadow:0 4px 16px rgba(0,0,0,.35);overflow:hidden}
-.act-dropdown-list{max-height:260px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--bdr2) transparent}
-.act-dropdown-list::-webkit-scrollbar{width:6px}
-.act-dropdown-list::-webkit-scrollbar-track{background:transparent}
-.act-dropdown-list::-webkit-scrollbar-thumb{background:var(--bdr2);border-radius:3px}
-.act-dropdown-list::-webkit-scrollbar-thumb:hover{background:var(--txt3)}
-.act-dropdown-fade{position:absolute;left:0;right:0;height:22px;pointer-events:none;opacity:0;transition:opacity .15s}
-.act-dropdown-fade-top{top:0;background:linear-gradient(to bottom, var(--bg2), rgba(0,0,0,0))}
-.act-dropdown-fade-bottom{bottom:0;background:linear-gradient(to top, var(--bg2), rgba(0,0,0,0))}
-.act-dropdown-fade.show{opacity:1}
-.act-dropdown-chevron{position:absolute;left:50%;transform:translateX(-50%);font-size:11px;line-height:1;color:var(--txt3);opacity:0;transition:opacity .15s;pointer-events:none}
-.act-dropdown-chevron-top{top:3px}
-.act-dropdown-chevron-bottom{bottom:3px}
-.act-dropdown-chevron.show{opacity:.85}
-.act-dropdown-item{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;font-size:13px;color:var(--txt);border-bottom:0.5px solid var(--bdr)}
-.act-dropdown-item:last-child{border-bottom:none}
-.act-dropdown-item:hover{background:var(--bg3)}
-.act-dropdown-item input[type=checkbox]{width:16px;height:16px;accent-color:var(--green);flex-shrink:0;cursor:pointer}
-.act-dropdown-item.checked{background:#1a3018;color:#6dd86d}
-.act-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;min-height:0}
-.act-tag{display:inline-flex;align-items:center;gap:5px;background:#1a3018;color:#6dd86d;border:0.5px solid #3fa83f;border-radius:20px;padding:4px 10px;font-size:12px;font-weight:500}
-.act-tag button{background:none;border:none;color:#6dd86d;cursor:pointer;font-size:14px;line-height:1;padding:0;font-family:inherit}
+/* ── Activity full-screen checklist (v39.0 — replaces v36–v38 dropdown) ── */
+.act-list{border:0.5px solid var(--bdr2);border-radius:var(--radius);overflow:hidden;background:var(--bg2)}
+.act-list-item{display:flex;align-items:center;gap:10px;padding:13px 14px;cursor:pointer;font-size:14px;color:var(--txt);border-bottom:0.5px solid var(--bdr)}
+.act-list-item:last-child{border-bottom:none}
+.act-list-item:hover{background:var(--bg3)}
+.act-list-item input[type=checkbox]{width:18px;height:18px;accent-color:var(--green);flex-shrink:0;cursor:pointer}
+.act-list-item.checked{background:#1a3018;color:#6dd86d}
+.act-confirm-bar{position:fixed;left:0;right:0;bottom:0;z-index:80;max-width:520px;margin:0 auto;background:var(--bg);border-top:0.5px solid var(--bdr);box-shadow:0 -4px 16px rgba(0,0,0,.25)}
+.act-confirm-bar-inner{max-width:380px;margin:0 auto;padding:10px 1rem calc(10px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:6px}
 .kiosk-action-btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:14px;border:0.5px solid var(--bdr);border-radius:var(--radius);font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .12s;margin-bottom:8px}
 .kiosk-action-btn:hover{filter:brightness(1.05)}
 /* ── A2HS banner ── */

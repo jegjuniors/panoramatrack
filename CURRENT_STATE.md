@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v38.5
+**Current Version:** v39.0
 **Last Updated:** June 17, 2026
 
 ---
@@ -65,6 +65,16 @@ No separate supervisors table.
 ## 🚧 What Was Last Being Worked On
 
 **Last session date:** June 17, 2026
+**Tasks completed this session:**
+- **v39.0 — Activity selection redesigned as a full-screen checklist (replaces the v36–v38 dropdown):** The collapsed dropdown approach (v36 original, v38.4 scrollbar+fade, v38.5 chevrons) never solved the core discoverability problem — a tiny arrow or thin scrollbar just isn't a strong enough signal on a phone someone's tapping through quickly mid-shift. Since the clock-out activity screen is already dedicated solely to this one task, the dropdown was removed entirely and replaced with the full activity checklist shown directly as the screen's main content — every activity visible in an ordinary scrolling list, no popup, no scroll-hint mechanics needed (a normal full-page scroll is something everyone already understands). Per Julio's call: the "selected activities" tag-pill summary was dropped (checkmarks in the list itself already show what's picked), and the Confirm/Cancel buttons are now pinned to the bottom of the screen in a fixed bar so they're always reachable without scrolling back down through a long activity list.
+  - **Removed:** the entire v36–v38.5 dropdown mechanism — `act-dropdown-wrap/btn/list-wrap/list`, the scroll fade (`act-fade-top/bottom`), the chevrons (`act-chevron-top/bottom`), the tag pills (`act-tags`/`act-tag`), and their JS (`renderActDropdown`, `renderActTags`, `removeActTag`, `updateActDropdownLabel`, `toggleDropAct`, `toggleActDropdown`, `updateActFades`, the outside-click-to-close listener, the scroll listener).
+  - **Added:** `#act-list` — a plain checklist container rendered directly in the page flow (`renderActList()`), using `.act-list-item` rows (renamed from `.act-dropdown-item`, slightly larger touch targets — 18px checkboxes, 13px row padding — since it's now the primary screen content rather than a cramped popup). Tapping a row toggles it via the new `toggleAct(name,id)` (renamed from `toggleDropAct`, simplified since there's no dropdown-open state to preserve).
+  - **Added:** `.act-confirm-bar` / `.act-confirm-bar-inner` — a `position:fixed` bar pinned to the bottom of the viewport (constrained to the app's `max-width:520px` column so it doesn't span the full window on desktop test views), holding the Confirm/Cancel buttons with safe-area padding for iOS home-indicator clearance. It's nested inside `#screen-activity`, so it automatically hides along with the rest of the screen when another screen is shown (no extra JS toggle needed) — relies on the fact `#app` has no `transform`/`filter`/`contain` that would otherwise trap `position:fixed` descendants. `#screen-activity` got matching `padding-bottom:140px` so the scrollable checklist content doesn't end up hidden behind the fixed bar.
+  - **Roadmap impact:** this took the v39.0 slot that had been earmarked for the per-shift lunch-waive feature — that feature is now planned for **v40.0** (see updated section below).
+  - Files changed: `index.html` (activity screen markup + version badge), `styles.css` (replaced dropdown/tag rules with checklist/confirm-bar rules, including light/auto theme overrides), `app.js` (rewrote the activity-screen functions + backup payload version).
+
+
+**Last session date:** June 17, 2026 (earlier in the same day)
 **Tasks completed this session:**
 - **v38.5 — Chevron hints added to activity dropdown scroll affordance:** Follow-up to v38.4. The scrollbar styling alone wasn't a reliable visual cue on mobile (iOS Safari ignores `::-webkit-scrollbar` styling entirely, and native scrollbars typically only render while actively touched/dragged), so a small chevron (▴ / ▾) was added at the top/bottom edge of the dropdown as a clearer, more legible "more below" signal. Driven by the same scroll-position logic as the fade, not a separate check — when there's nothing to scroll to in a direction, neither the fade nor the chevron shows.
   - **Structure:** two new sibling divs inside `#act-dropdown-list-wrap` — `#act-chevron-top` (▴) and `#act-chevron-bottom` (▾) — sitting alongside the existing fade divs.
@@ -188,7 +198,7 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ## ⏭ Next Session Agenda — Per-shift lunch waive
 
-(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump, likely v39.0 (v38.0 was taken by the admin nav reorg), when we start.)
+(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump. v38.0 went to the admin nav reorg and v39.0 went to the activity-checklist redesign, so this is now slated for **v40.0** when we start.)
 
 Automatic lunch deduction (v36.2) is in. Remaining lunch work is the worked-through-lunch case: an employee who skips lunch and leaves early should NOT be docked the 30 min. Design direction agreed with Julio; details to settle at the start.
 
@@ -219,7 +229,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | DB init / boot | `bootApp()` |
 | Export confirm flow | `openExportConfirm()` |
 | Activity code lookup | `actCodeMap` / `formatTaskCode()` |
-| Activity dropdown scroll fade (v38.4, chevrons v38.5) | `updateActFades()`; `#act-dropdown-list-wrap` (wraps list + fades + chevrons), `#act-fade-top`/`#act-fade-bottom`/`#act-chevron-top`/`#act-chevron-bottom` in index.html; `.act-dropdown-list-wrap`/`.act-dropdown-fade*`/`.act-dropdown-chevron*` in styles.css |
+| Activity full-screen checklist (v39.0, replaces v36–v38 dropdown) | `showActivityScreen()` / `renderActList()` / `toggleAct(name,id)`; `#act-list` (checklist container), `.act-list-item` rows, `#activity-error`; fixed bottom bar `.act-confirm-bar`/`.act-confirm-bar-inner` holding Confirm/Cancel — all in `#screen-activity` in index.html; `.act-list*`/`.act-confirm-bar*` in styles.css |
 | Supabase client | Top of `app.js` — `SUPABASE_URL` / `SUPABASE_KEY` |
 | Theme toggle | `applyTheme()` / `setTheme()` / `pt-theme` (localStorage) |
 | Backup | `runBackup()` |
@@ -249,4 +259,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 17, 2026 — v38.5_
+_Last updated: June 17, 2026 — v39.0_
