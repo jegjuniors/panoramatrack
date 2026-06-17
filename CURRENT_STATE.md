@@ -1,7 +1,7 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v38.3
-**Last Updated:** June 16, 2026
+**Current Version:** v38.4
+**Last Updated:** June 17, 2026
 
 ---
 
@@ -64,7 +64,16 @@ No separate supervisors table.
 
 ## 🚧 What Was Last Being Worked On
 
-**Last session date:** June 16, 2026
+**Last session date:** June 17, 2026
+**Tasks completed this session:**
+- **v38.4 — Activity dropdown scroll affordance:** The clock-out activity list (`#act-dropdown-list`) only shows a handful of items before needing a scroll, but had no visible scrollbar or hint that more activities existed below — easy to miss on a phone. Added a themed, always-visible thin scrollbar (cross-browser: `scrollbar-width`/`scrollbar-color` for Firefox, `::-webkit-scrollbar*` for Chrome/Safari) plus a top/bottom fade overlay that only appears when there's actually more to scroll in that direction (computed from `scrollHeight`/`scrollTop`/`clientHeight`, not just shown statically). Purely a UX/visual fix — no change to activity data, selection logic, or how punches are saved.
+  - **Structure change:** the dropdown list is now wrapped in a new `#act-dropdown-list-wrap` div, which holds the border/background/shadow/rounding and clips its contents (`overflow:hidden`); the inner `#act-dropdown-list` is just the scrolling area; two new sibling divs (`#act-fade-top` / `#act-fade-bottom`) sit on top as the fade overlays, toggled via a `.show` class.
+  - **New function:** `updateActFades()` — checks if the list is actually scrollable and how far scrolled, toggles the two fade overlays accordingly. Called on render (`renderActDropdown()`), on open (`toggleActDropdown()`), and on every scroll event (listener attached once to `#act-dropdown-list`).
+  - **Renamed references:** all existing show/hide logic that used to target `#act-dropdown-list` directly (`showActivityScreen()`, `toggleDropAct()`, `toggleActDropdown()`, the outside-click listener, `confirmClockOut()`) now targets `#act-dropdown-list-wrap` instead — the inner list element keeps its old ID and is otherwise untouched.
+  - Files changed: `index.html` (dropdown markup + version badge), `styles.css` (new wrap/scrollbar/fade rules), `app.js` (new `updateActFades()` + wrapper-ID updates + backup payload version).
+  - Note: `styles.css` was not re-uploaded this session — edited from the project copy. Worth re-uploading current `styles.css` next session to keep it in sync with uploads going forward.
+
+
 **Tasks completed this session:**
 - **v38.3 — Master admin PDF export + export bug fix:** Added PDF export to the master admin report, and fixed the async bug that was causing the export to always show "No records". After confirming all 4 checkboxes and tapping "Continue →", a format picker appears in-modal with "Export PDF" and "Export CSV" buttons. PDF matches the supervisor format — one time card per page, grouped by jobsite then alphabetically by employee; same columns, colours, auto-clock footnotes and signature line. Header band reads "MASTER ADMIN EXPORT". New functions: `masterConfirmStep2()`, `generateMasterPDF()`. Updated: `openMasterExportConfirm()` (uses `_masterLogs` cache, drives step-2 flow), `closeConfirmModal()` (resets picker on close). `index.html`: added `#master-format-picker` div inside confirm modal.
 
@@ -206,6 +215,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | DB init / boot | `bootApp()` |
 | Export confirm flow | `openExportConfirm()` |
 | Activity code lookup | `actCodeMap` / `formatTaskCode()` |
+| Activity dropdown scroll fade (v38.4) | `updateActFades()`; `#act-dropdown-list-wrap` (wraps list + fades), `#act-fade-top`/`#act-fade-bottom` in index.html; `.act-dropdown-list-wrap`/`.act-dropdown-fade*` in styles.css |
 | Supabase client | Top of `app.js` — `SUPABASE_URL` / `SUPABASE_KEY` |
 | Theme toggle | `applyTheme()` / `setTheme()` / `pt-theme` (localStorage) |
 | Backup | `runBackup()` |
@@ -235,4 +245,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 16, 2026 — v38.3_
+_Last updated: June 17, 2026 — v38.4_

@@ -694,7 +694,7 @@ function showActivityScreen(emp){
   selectedActs=new Set();
   document.getElementById('activity-error').textContent='';
   // Close dropdown if open
-  document.getElementById('act-dropdown-list').style.display='none';
+  document.getElementById('act-dropdown-list-wrap').style.display='none';
   document.getElementById('act-dropdown-arrow').textContent='▾';
   // Build dropdown list from active activities only
   renderActDropdown();
@@ -710,6 +710,7 @@ function renderActDropdown(){
       <span>${a.name}</span>
     </div>`).join('');
   updateActDropdownLabel();
+  updateActFades();
 }
 
 function renderActTags(){
@@ -743,8 +744,8 @@ function toggleDropAct(name,id){
   updateActDropdownLabel();
   renderActTags();
   // Ensure dropdown stays open
-  const list=document.getElementById('act-dropdown-list');
-  if(list)list.style.display='block';
+  const wrap=document.getElementById('act-dropdown-list-wrap');
+  if(wrap)wrap.style.display='block';
   const arrow=document.getElementById('act-dropdown-arrow');
   if(arrow)arrow.textContent='▴';
 }
@@ -756,26 +757,40 @@ function removeActTag(name){
 }
 
 function toggleActDropdown(){
-  const list=document.getElementById('act-dropdown-list');
+  const wrap=document.getElementById('act-dropdown-list-wrap');
   const arrow=document.getElementById('act-dropdown-arrow');
-  const open=list.style.display==='none';
-  list.style.display=open?'block':'none';
+  const open=wrap.style.display==='none';
+  wrap.style.display=open?'block':'none';
   arrow.textContent=open?'▴':'▾';
+  if(open)updateActFades();
 }
+
+// Activity dropdown scroll fade — shows a top/bottom fade only when there's
+// more content to scroll to in that direction (v38.4)
+function updateActFades(){
+  const list=document.getElementById('act-dropdown-list');
+  const fadeTop=document.getElementById('act-fade-top');
+  const fadeBottom=document.getElementById('act-fade-bottom');
+  if(!list||!fadeTop||!fadeBottom)return;
+  const scrollable=list.scrollHeight>list.clientHeight+1;
+  fadeTop.classList.toggle('show',scrollable&&list.scrollTop>2);
+  fadeBottom.classList.toggle('show',scrollable&&list.scrollTop<list.scrollHeight-list.clientHeight-2);
+}
+document.getElementById('act-dropdown-list').addEventListener('scroll',updateActFades,{passive:true});
 
 // Close dropdown when tapping outside
 document.addEventListener('click',function(e){
   const wrap=document.querySelector('.act-dropdown-wrap');
   if(wrap&&!wrap.contains(e.target)){
-    const list=document.getElementById('act-dropdown-list');
+    const listWrap=document.getElementById('act-dropdown-list-wrap');
     const arrow=document.getElementById('act-dropdown-arrow');
-    if(list)list.style.display='none';
+    if(listWrap)listWrap.style.display='none';
     if(arrow)arrow.textContent='▾';
   }
 },{passive:true});
 async function confirmClockOut(){
   // Close dropdown if open
-  document.getElementById('act-dropdown-list').style.display='none';
+  document.getElementById('act-dropdown-list-wrap').style.display='none';
   if(selectedActs.size===0){document.getElementById('activity-error').textContent='Please select at least one activity.';return}
   const now=new Date();
   const entry=pendingClockOut.entry;
@@ -2900,7 +2915,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.3',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v38.4',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
