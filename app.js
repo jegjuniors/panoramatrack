@@ -1686,25 +1686,160 @@ function masterConfirmStep2(){
   document.getElementById('export-confirm-submit').style.display='none';
   document.getElementById('master-format-picker').style.display='block';
 }
-function doMasterExport(){
+/* ─── Master: Excel Pack export (v40.0) ───
+   Replaces the old CSV export. Builds one .xlsx per worker, matching the GM's
+   payroll template (loaded from the embedded blank template), bundled into a .zip.
+
+   Template cell map (per worker sheet):
+     B2  = employee code        (no DB field yet → left blank, wired for future)
+     B3  = employee name
+     H3  = pay-period start date
+     Week 1 job headers: B5 / E5 / H5   (up to 3 jobsites)
+     Week 2 job headers: B24 / E24 / H24
+     Day grid — 2 rows per day (Sun→Sat), for up to 2 activities:
+       Week 1 rows: Sun 8-9, Mon 10-11, Tue 12-13, Wed 14-15, Thu 16-17, Fri 18-19, Sat 20-21
+       Week 2 rows: Sun 27-28, Mon 29-30, Tue 31-32, Wed 33-34, Thu 35-36, Fri 37-38, Sat 39-40
+     Job column-groups → (Code col, Hrs col): Job1 C/D, Job2 F/G, Job3 I/J  (Extra cols blank)
+   Rules: hours split ½/½ when a day+jobsite has 2 activity codes; full hours on row 1
+   when 1 code. Pre-built K-column/Total formulas are left untouched. OT ignored.
+   The template's stray D43/G43 values (Julio leftovers) are reset to formulas.        */
+
+function _xlB64ToU8(b64){
+  const bin=atob(b64);const u=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;
+}
+function _xlSanitize(s){return String(s||'').replace(/[\/\\:*?"<>|]/g,'-').replace(/\s+/g,' ').trim();}
+function _xlNumericCode(actName,codeMap){
+  const raw=codeMap[actName];if(!raw)return null;
+  const digits=String(raw).replace(/\D/g,'');if(!digits)return null;
+  const n=Number(digits);return Number.isFinite(n)?n:digits;
+}
+function _xlRound2(n){return Math.round((n+Number.EPSILON)*100)/100;}
+
+async function doMasterExcelZip(){
   const all=['chk1','chk2','chk3','chk4'].every(id=>document.getElementById(id).checked);
   if(!all){document.getElementById('confirm-err').textContent='Please confirm all items above before submitting.';return}
-  const logs=_masterLogs||masterExportRange.logs||[];
-  const header=['Employee','Department','Jobsite','Clock In','Clock Out','Hours','Activities','Auto-Clocked'];
-  const rows=logs.map(l=>{
-    const at=adjustedTimes(l);
-    const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'';
-    return [l.name,l.dept,l.jobsite,fmtDt(at.in),at.out?fmtDt(at.out):'Still in',hrs,(l.activity||[]).join('; '),l.autoClocked?'YES':'NO'].map(v=>`"${v}"`).join(',');
+  if(typeof ExcelJS==='undefined'||typeof JSZip==='undefined'||!window.PAYROLL_TEMPLATE_B64){
+    showCustomAlert('Export unavailable','The Excel/zip libraries or the payroll template did not load. Check your connection and reload the app.');return;
+  }
+  const logs=(_masterLogs||masterExportRange.logs||[]).filter(l=>l.out&&paidHours(l)!=null);
+  if(!logs.length){showCustomAlert('No data','No completed punches to export. (Records still clocked in are skipped.)');return;}
+
+  // ── Pay-period bounds (drive week split + filenames) ──
+  const fromV=document.getElementById('m-log-from').value;
+  const toV=document.getElementById('m-log-to').value;
+  const periodStart=fromV?new Date(fromV+'T00:00:00'):new Date(Math.min(...logs.map(l=>l.in.getTime())));
+  const periodEndStr=toV||toDateStr(new Date(Math.max(...logs.map(l=>l.in.getTime()))));
+  const startMidnight=new Date(periodStart.getFullYear(),periodStart.getMonth(),periodStart.getDate()).getTime();
+  const h3Str=periodStart.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'});
+
+  // ── Activity name → numeric code map ──
+  const codeMap={};(ALL_ACTIVITIES||ACTIVITIES||[]).forEach(a=>{if(a.code)codeMap[a.name]=a.code;});
+
+  // ── Group by employee → week → jobsite → date ──
+  const sorted=[...logs].sort((a,b)=>a.in-b.in);
+  const emps={};const overflowWarn=[];const multiCodeWarn=[];const outsideWarn=[];
+  sorted.forEach(l=>{
+    const dayMidnight=new Date(l.in.getFullYear(),l.in.getMonth(),l.in.getDate()).getTime();
+    const dayDiff=Math.floor((dayMidnight-startMidnight)/86400000);
+    const week=dayDiff<7?0:1;
+    if(dayDiff<0||dayDiff>13){outsideWarn.push(l.name);return;} // outside the 14-day grid
+    const ph=paidHours(l);if(!ph||ph<=0)return;
+    const site=l.jobsite||'(No site)';
+    const e=emps[l.empId]||(emps[l.empId]={name:l.name,weeks:[{order:[],sites:{}},{order:[],sites:{}}]});
+    const W=e.weeks[week];
+    if(!W.sites[site]){W.sites[site]={};W.order.push(site);}
+    const dk=toDateStr(l.in);
+    const cell=W.sites[site][dk]||(W.sites[site][dk]={dow:l.in.getDay(),hours:0,codes:[]});
+    cell.hours+=ph;
+    (l.activity||[]).forEach(name=>{const c=_xlNumericCode(name,codeMap);if(c!=null&&!cell.codes.includes(c))cell.codes.push(c);});
   });
-  const csv=[header.join(','),...rows].join('\n');
-  const blob=new Blob([csv],{type:'text/csv'});
+
+  const empList=Object.values(emps);
+  if(!empList.length){showCustomAlert('No data','No completed punches to export.');return;}
+
+  // ── Build each worker's file(s) ──
+  const tplBytes=window.PAYROLL_TEMPLATE_B64;
+  const slotCols=[{c:'C',h:'D'},{c:'F',h:'G'},{c:'I',h:'J'}];          // Job1, Job2, Job3
+  const headWk1=['B5','E5','H5'];const headWk2=['B24','E24','H24'];
+  const weekBase=[8,27];                                                // top of each week's day grid
+
+  function placeDay(ws,weekIdx,slotIdx,cell){
+    const base=weekBase[weekIdx];
+    const r1=base+2*cell.dow;const r2=r1+1;
+    const col=slotCols[slotIdx];
+    const hrs=_xlRound2(cell.hours);
+    const codes=cell.codes;
+    if(codes.length<=1){
+      if(codes.length===1)ws.getCell(col.c+r1).value=codes[0];
+      ws.getCell(col.h+r1).value=hrs;
+    }else if(codes.length===2){
+      ws.getCell(col.c+r1).value=codes[0];ws.getCell(col.h+r1).value=_xlRound2(hrs/2);
+      ws.getCell(col.c+r2).value=codes[1];ws.getCell(col.h+r2).value=_xlRound2(hrs/2);
+    }else{ // 3+ codes same jobsite/day (rare, parked for GM) — first in row 1, rest joined in row 2
+      ws.getCell(col.c+r1).value=codes[0];ws.getCell(col.h+r1).value=_xlRound2(hrs/2);
+      ws.getCell(col.c+r2).value=codes.slice(1).join('/');ws.getCell(col.h+r2).value=_xlRound2(hrs/2);
+      multiCodeWarn.push(ws._ptEmpName||'');
+    }
+  }
+
+  const zip=new JSZip();let fileCount=0;
+  showNotif('⏳','Building Excel pack','Generating timesheets…','#2563eb',60000);
+
+  for(const emp of empList){
+    const maxJobs=Math.max(emp.weeks[0].order.length,emp.weeks[1].order.length);
+    const chunks=Math.max(1,Math.ceil(maxJobs/3));
+    if(maxJobs>3)overflowWarn.push(emp.name);
+    for(let c=0;c<chunks;c++){
+      const wb=new ExcelJS.Workbook();
+      await wb.xlsx.load(_xlB64ToU8(tplBytes).buffer);
+      const ws=wb.worksheets[0];ws._ptEmpName=emp.name;
+      // Header
+      ws.getCell('B3').value=emp.name;
+      ws.getCell('H3').value=h3Str;
+      // ws.getCell('B2').value = <employee code>  // no DB field yet
+      // Fix stray leftover values → formulas (so ST total is correct on every sheet)
+      ws.getCell('D43').value={formula:'D22+D41'};
+      ws.getCell('G43').value={formula:'G22+G41'};
+      // Per-week: up to 3 jobsites in this chunk
+      [0,1].forEach(weekIdx=>{
+        const W=emp.weeks[weekIdx];
+        const sites=W.order.slice(c*3,c*3+3);
+        const heads=weekIdx===0?headWk1:headWk2;
+        sites.forEach((site,slotIdx)=>{
+          const jd=JOBSITE_DATA[site];
+          ws.getCell(heads[slotIdx]).value=(jd&&jd.jobNumber)?jd.jobNumber:site; // abbrev Job# field, fallback to name
+          Object.values(W.sites[site]).forEach(cell=>placeDay(ws,weekIdx,slotIdx,cell));
+        });
+      });
+      const buf=await wb.xlsx.writeBuffer();
+      const suffix=chunks>1?` (${c+1})`:'';
+      const fname=`${_xlSanitize(emp.name)} - ${periodEndStr}${suffix}.xlsx`;
+      zip.file(fname,buf);fileCount++;
+    }
+  }
+
+  // ── Zip filename = active filter (jobsite and/or employee) + period end ──
+  const siteF=document.getElementById('m-filter-site').value;
+  const empF=document.getElementById('m-filter-emp').value;
+  const empFName=empF?(employees.find(e=>e.id===empF)?.name||''):'';
+  let filterName;
+  if(siteF&&empFName)filterName=`${siteF} - ${empFName}`;
+  else if(siteF)filterName=siteF;
+  else if(empFName)filterName=empFName;
+  else filterName='All Records';
+  const zipName=`${_xlSanitize(filterName)} - ${periodEndStr}.zip`;
+
+  const blob=await zip.generateAsync({type:'blob'});
   const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  const now=new Date();
-  a.href=url;a.download=`PanoramaTrack_MasterReport_${toDateStr(now)}.csv`;
-  a.click();URL.revokeObjectURL(url);
+  const a=document.createElement('a');a.href=url;a.download=zipName;a.click();URL.revokeObjectURL(url);
   closeConfirmModal();
-  showNotif('✓','Report exported',`${logs.length} records downloaded`,'#1D9E75',3000);
+
+  let msg=`${fileCount} timesheet${fileCount!==1?'s':''} zipped`;
+  if(overflowWarn.length)msg+=` · ${[...new Set(overflowWarn)].length} had 4+ sites (extra sheet added)`;
+  showNotif('✓','Excel pack exported',msg,'#1D9E75',4500);
+  if(outsideWarn.length)console.warn('Excel export: punches outside the 14-day grid were skipped for:',[...new Set(outsideWarn)]);
+  if(multiCodeWarn.length)console.warn('Excel export: 3+ activity codes at one jobsite/day (parked GM case) for:',[...new Set(multiCodeWarn.filter(Boolean))]);
 }
 function generateMasterPDF(){
   const {jsPDF}=window.jspdf;
@@ -2884,7 +3019,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v39.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v40.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

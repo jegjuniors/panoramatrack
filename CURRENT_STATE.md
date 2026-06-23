@@ -1,7 +1,7 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v39.1
-**Last Updated:** June 17, 2026
+**Current Version:** v40.0
+**Last Updated:** June 23, 2026
 
 ---
 
@@ -12,6 +12,7 @@
 | `index.html` | All UI markup, modals, screens |
 | `app.js` | All logic, Supabase calls, state |
 | `styles.css` | All styling |
+| `payroll-template.js` | **(v40.0)** Embedded base64 blank payroll Excel template, loaded by the Excel-pack export. Auto-generated — do not hand-edit. |
 | `CURRENT_STATE.md` | This file — project state tracker |
 | `PanoramaTrack_Future_Features.md` | Roadmap / future ideas |
 
@@ -66,6 +67,15 @@ No separate supervisors table.
 
 **Last session date:** June 17, 2026
 **Tasks completed this session:**
+- **v40.0 — Excel Pack export (one .xlsx per worker, zipped) — replaces the master CSV export:** A second master-admin export format that produces the GM's payroll timesheet, pre-filled, instead of the old flat CSV. The GM's downstream process is one Excel sheet per worker per pay period, so this generates one `.xlsx` per worker (matching the uploaded `Payroll_output_Sheet` template exactly — borders, legend, accounting block, `Brad Rogers`, and all pre-built K-column/Total formulas preserved) and bundles them into a single `.zip` for download. Built with **ExcelJS** (jsPDF can't write formatted Excel; SheetJS-free can't write styling) + **JSZip**, fully client-side. Approach: the blank template is embedded as base64 (`payroll-template.js`); for each worker the app reloads a fresh copy, drops values into mapped cells, and writes it back — so the GM's formatting/formulas survive untouched.
+  - **Design (all confirmed with Julio before build):** scope = whatever the master log is filtered to (site/employee/date); one sheet per employee per pay period; up to 3 jobsites per week-block, up to 6 across the two weeks (week 2 can differ); each day = 2 rows for up to 2 activities with **hours split ½/½** when 2 codes (full hours on row 1 when 1 code); Job# header = the jobsite's manually-entered abbreviated name+code (`jobsites.job_number`), fallback to the site name; OT ignored; accounting summary left blank (head office).
+  - **Filenames:** zip = `[Filter] - [PayPeriodEnd].zip` where Filter is the active jobsite and/or employee filter (`Site - Employee`, or just one, or `All Records` when unfiltered); each inner file = `Employee Name - [PayPeriodEnd].xlsx`. Period end = the master log "to" date; H3 (pay-period date) = the "from" date.
+  - **Cell map (per sheet):** B3 name · H3 period start · B5/E5/H5 (wk1) & B24/E24/H24 (wk2) job headers · day grid rows 8–21 (wk1) / 27–40 (wk2), Sun→Sat, 2 rows each · Code/Hrs columns C/D (job1), F/G (job2), I/J (job3). Stray Julio leftovers in the "blank" template (`D43=71.5`, `G43=0` — values, not formulas) are reset at write time to `=D22+D41` / `=G22+G41` so the ST total is correct on every sheet.
+  - **Overflow:** an employee with 4+ jobsites in a week gets a second file (` (2)` suffix), jobs chunked 3-per-sheet — no data dropped. Export-time notif reports how many workers hit this.
+  - **Edge cases handled:** 3+ activity codes at the *same* jobsite on the *same* day (the parked GM question) → first code on row 1, the rest slash-joined on row 2, hours ½/½; logged to console. Still-clocked-in punches are skipped (no hours yet). Punches outside the 14-day grid are skipped + logged.
+  - **⚠️ Known caveats flagged to Julio (not yet resolved):** (1) **Employee code (B2) is blank** — the `employees` table has no code field (`JG001`-style); B2 is wired but left empty until a code field is added or head office fills it. (2) **OT cells** — the template's OT total formulas sum the *second* row of each day; since ½-split now puts hours on row 2, the OT cells will read non-zero on any 2-activity day. Left untouched per "ignore OT"; can be neutralized to 0 on request. (3) The template was **converted .xls→.xlsx** (required — ExcelJS can't read legacy .xls); eyeball the first real export against the GM's original. (4) H3 holds the period *start date* and overwrites the "Pay Period" placeholder text, per Julio's instruction.
+  - **Files changed:** `index.html` (ExcelJS+JSZip+template `<script>` tags, CSV button → Excel-pack button, version badge), `app.js` (removed `doMasterExport` CSV fn; added `doMasterExcelZip()` + helpers `_xlB64ToU8`/`_xlSanitize`/`_xlNumericCode`/`_xlRound2`; backup payload version), **new** `payroll-template.js` (embedded base64 blank template).
+
 - **v39.1 — Custom scroll rail + tappable arrows on the activity screen:** The v39.0 full-screen checklist removed the dropdown, but Julio still wasn't getting a "this can scroll" feeling from the plain page scroll — confirmed the root cause: this screen relies on native page/PWA scrolling (no inner fixed-height box, `#app` just grows with content), and native scrollbars are essentially invisible on mobile/installed-PWA regardless of CSS styling, which is why the earlier v38.4 themed-scrollbar attempt never showed up for him either. Rather than fight native scrollbar APIs again, this builds a fully custom, self-drawn scroll-position indicator plus large tappable arrows — both driven by real `window.scrollY`/`scrollHeight`/`innerHeight` math, so they render identically everywhere instead of depending on what the OS/browser chooses to show. Per Julio's choices: arrows are tappable (auto-scroll on press, not just visual hints), and this is scoped to the clock-out activity screen only, not applied app-wide.
   - **Added:** `#act-scroll-overlay` — a `position:fixed` overlay (constrained to `#app`'s `max-width:520px` column, same centering trick as `.act-confirm-bar`) holding: `.act-scroll-rail` (a thin track + `#act-scroll-thumb`, resized/repositioned via JS to reflect actual scroll fraction — not a native scrollbar), and two 48px circular buttons (`#act-arrow-top` ▲ / `#act-arrow-bottom` ▼) that fade in only when there's content to scroll to in that direction.
   - **New JS:** `updateActScroll()` — reads `window.scrollY`, `document.documentElement.scrollHeight`, and `window.innerHeight`, sizes/positions the thumb proportionally within the rail, and toggles the `.show` class on each arrow. Guarded on `#screen-activity` actually being the active screen (cheap check up front, so it's a no-op everywhere else) and attached to `window`'s `scroll`/`resize` events. `scrollActivityBy(dir)` — what the arrows call — scrolls the page by ~60% of viewport height (`window.scrollBy({behavior:'smooth'})`), repeatable per tap.
@@ -207,7 +217,7 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ## ⏭ Next Session Agenda — Per-shift lunch waive
 
-(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump. v38.0 went to the admin nav reorg and v39.0 went to the activity-checklist redesign, so this is now slated for **v40.0** when we start.)
+(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump. v38.0 went to the admin nav reorg, v39.0 to the activity-checklist redesign, and **v40.0 to the Excel Pack export**, so this is now slated for **v41.0** when we start.)
 
 Automatic lunch deduction (v36.2) is in. Remaining lunch work is the worked-through-lunch case: an employee who skips lunch and leaves early should NOT be docked the 30 min. Design direction agreed with Julio; details to settle at the start.
 
@@ -255,7 +265,8 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | Master grouped nav (v38.0) | `switchMasterGroup(group)` / `switchMasterTab(tab)` (rewritten) / `MASTER_TAB_GROUP` + `MASTER_GROUP_DEFAULT`; top tabs `#mtab-overview/manage/reporting/settings`, sub-rows `#msub-manage` / `#msub-reporting` holding `.subnav-btn.msub-btn[data-tab]` in index.html; `.subnav-bar` / `.subnav-btn` in styles.css |
 | Pay rules engine | `APP_SETTINGS` (global) / `applySettingsRow()` / `roundTime()` / `applySchedEnd()` / `adjustedTimes()` / `paidHours()` (lunch deduction lives here, v36.2) — near the time helpers (`fmtDt` area) |
 | Pay rules settings UI | `refreshSettingsPanel()` / `saveSettings()`; `mtab-settings` + `mpanel-settings` in index.html; `pt_settings` table in Supabase |
-| Hours display sites (use paidHours) | `refreshSupLog`, `refreshMasterLog`, `updateExportPreview`, `doMasterExport` (CSV), `generatePDF` `consolidate` |
+| Hours display sites (use paidHours) | `refreshSupLog`, `refreshMasterLog`, `updateExportPreview`, `doMasterExcelZip` (Excel pack), `generatePDF` `consolidate` |
+| Excel Pack export (v40.0) | `doMasterExcelZip()` + helpers `_xlB64ToU8` / `_xlSanitize` / `_xlNumericCode` / `_xlRound2`; embedded template in `payroll-template.js` (`window.PAYROLL_TEMPLATE_B64`); ExcelJS+JSZip `<script>` tags + `📦 Excel Pack` button (`#master-format-picker`) in index.html. Replaces the old `doMasterExport` CSV fn. |
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
 | Version display | `index.html` line ~153 and `app.js` backup payload |
 
@@ -269,4 +280,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 17, 2026 — v39.1_
+_Last updated: June 23, 2026 — v40.0_
