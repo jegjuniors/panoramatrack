@@ -847,7 +847,7 @@ function switchSupTab(tab){
     document.getElementById('stab-'+t).classList.toggle('active',t===tab);
   });
   if(tab==='live')refreshSupLive();
-  if(tab==='log'){initLogDates();refreshSupLog();updateExportPreview();}
+  if(tab==='log'){initLogDates();}
   if(tab==='employees')refreshSupEmps();
 }
 
@@ -1000,7 +1000,9 @@ function setSupPeriod(mode){
 }
 
 /* ─── Supervisor: Log (per-employee accordion) ─── */
+let _supLogSeq=0; // v40.1: race guard — only the most recently-initiated call may render
 async function refreshSupLog(){
+  const _mySeq=++_supLogSeq;
   await checkAutoServer();if(!activeSup)return;
   const sites=activeSup.jobsites||[];
   const filter=document.getElementById('s-filter-flags')?.value||'';
@@ -1048,6 +1050,8 @@ async function refreshSupLog(){
     }
     if(filter==='stillin')logs=logs.filter(l=>!l.out);
   }
+
+  if(_mySeq!==_supLogSeq)return; // a newer call has superseded this one — drop the stale render
 
   // Update export preview with same date range
   updateExportPreview();
@@ -1605,6 +1609,7 @@ function setMasterPeriod(mode){
   refreshMasterLog();
 }
 let _masterLogs=[]; // cached result of last DB query
+let _masterLogSeq=0; // v40.1: race guard — only the most recently-initiated call may render
 async function getMasterLogFiltered(){
   const fromV=document.getElementById('m-log-from').value;
   const toV=document.getElementById('m-log-to').value;
@@ -1625,8 +1630,10 @@ async function getMasterLogFiltered(){
   return (data||[]).map(dbRowToEntry);
 }
 async function refreshMasterLog(){
+  const _mySeq=++_masterLogSeq;
   await checkAutoServer();
   const logs=await getMasterLogFiltered();
+  if(_mySeq!==_masterLogSeq)return; // a newer call has superseded this one — drop the stale render
   _masterLogs=logs;
   // Update preview summary
   const prev=document.getElementById('m-report-preview');
@@ -1659,32 +1666,61 @@ async function refreshMasterLog(){
   }).join('');
 }
 
-/* ─── Master: Export confirm ─── */
+/* ─── Master: Export confirm (v40.1 — checklist removed, replaced with conditional review warning) ───
+   Admin export is intentionally NOT gated (admin override) — this is a heads-up, not a block.
+   Flow: no flagged records → straight to format picker. Flagged records → warning modal first,
+   with "Review now" (jumps to needs-review filter) or "Export anyway" (proceeds to format picker). */
 let masterExportRange={from:null,to:null,siteF:'',empF:''};
+let _masterReviewList=[];
 function openMasterExportConfirm(){
   const logs=_masterLogs||[];
   if(!logs.length){showNotif('!','No records','Adjust filters to include at least one record','#EF9F27',2200);return}
   masterExportRange={logs};
-  // Reuse the same confirmation modal — reset checkboxes
-  ['chk1','chk2','chk3','chk4'].forEach(id=>{document.getElementById(id).checked=false});
-  document.getElementById('confirm-err').textContent='';
-  // Hide format picker, show and reset submit button
-  document.getElementById('master-format-picker').style.display='none';
-  const submitBtn=document.getElementById('export-confirm-submit');
-  submitBtn.style.display='';
-  submitBtn.textContent='Continue \u2192';
-  submitBtn.style.background='var(--green)';
-  // Step 1: validate checkboxes, then reveal format picker
-  submitBtn.onclick=masterConfirmStep2;
-  document.getElementById('export-confirm-modal').style.display='flex';
+  const needsReview=logs.filter(l=>l.autoClocked);
+  if(needsReview.length){
+    showMasterReviewWarning(needsReview);
+  } else {
+    showMasterFormatModal();
+  }
 }
-function masterConfirmStep2(){
-  const all=['chk1','chk2','chk3','chk4'].every(id=>document.getElementById(id).checked);
-  if(!all){document.getElementById('confirm-err').textContent='Please confirm all items above before submitting.';return}
-  document.getElementById('confirm-err').textContent='';
-  // Hide submit button, show format picker
-  document.getElementById('export-confirm-submit').style.display='none';
-  document.getElementById('master-format-picker').style.display='block';
+function showMasterReviewWarning(list){
+  _masterReviewList=list;
+  document.getElementById('master-review-count').textContent=list.length;
+  document.getElementById('master-review-plural').textContent=list.length===1?'':'es';
+  document.getElementById('master-review-list').style.display='none';
+  document.getElementById('master-review-list').innerHTML='';
+  document.getElementById('master-review-toggle').textContent='Show details \u25be';
+  document.getElementById('master-review-modal').style.display='flex';
+}
+function toggleMasterReviewList(){
+  const el=document.getElementById('master-review-list');
+  const btn=document.getElementById('master-review-toggle');
+  const show=el.style.display==='none';
+  if(show&&!el.innerHTML){
+    el.innerHTML=_masterReviewList.map(l=>`<div style="padding:5px 0;border-bottom:0.5px solid var(--bdr);">
+        <strong style="color:var(--txt);">${l.name}</strong>
+        <span style="color:var(--txt2);font-size:11px;display:block;">Clocked in ${fmtDt(l.in)} \u00b7 auto-out at 12h</span>
+      </div>`).join('');
+  }
+  el.style.display=show?'block':'none';
+  btn.textContent=show?'Hide details \u25b4':'Show details \u25be';
+}
+function closeMasterReviewModal(){
+  document.getElementById('master-review-modal').style.display='none';
+}
+function masterReviewGoNow(){
+  closeMasterReviewModal();
+  goToReport({flags:true}); // jumps the master log into the needs-review filter (v35.7 pattern)
+}
+function masterReviewExportAnyway(){
+  closeMasterReviewModal();
+  showMasterFormatModal();
+}
+function showMasterFormatModal(){
+  document.getElementById('master-format-modal').style.display='flex';
+}
+function closeMasterFormatModal(){
+  document.getElementById('master-format-modal').style.display='none';
 }
 /* ─── Master: Excel Pack export (v40.0) ───
    Replaces the old CSV export. Builds one .xlsx per worker, matching the GM's
@@ -1717,8 +1753,6 @@ function _xlNumericCode(actName,codeMap){
 function _xlRound2(n){return Math.round((n+Number.EPSILON)*100)/100;}
 
 async function doMasterExcelZip(){
-  const all=['chk1','chk2','chk3','chk4'].every(id=>document.getElementById(id).checked);
-  if(!all){document.getElementById('confirm-err').textContent='Please confirm all items above before submitting.';return}
   if(typeof ExcelJS==='undefined'||typeof JSZip==='undefined'||!window.PAYROLL_TEMPLATE_B64){
     showCustomAlert('Export unavailable','The Excel/zip libraries or the payroll template did not load. Check your connection and reload the app.');return;
   }
@@ -1833,9 +1867,7 @@ async function doMasterExcelZip(){
   const blob=await zip.generateAsync({type:'blob'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');a.href=url;a.download=zipName;a.click();URL.revokeObjectURL(url);
-  closeConfirmModal();
-
-  let msg=`${fileCount} timesheet${fileCount!==1?'s':''} zipped`;
+  closeMasterFormatModal();
   if(overflowWarn.length)msg+=` · ${[...new Set(overflowWarn)].length} had 4+ sites (extra sheet added)`;
   showNotif('✓','Excel pack exported',msg,'#1D9E75',4500);
   if(outsideWarn.length)console.warn('Excel export: punches outside the 14-day grid were skipped for:',[...new Set(outsideWarn)]);
@@ -2057,7 +2089,7 @@ function generateMasterPDF(){
   // ── Save ──
   const now=new Date();
   doc.save(`PanoramaTrack_MasterReport_${toDateStr(now)}.pdf`);
-  closeConfirmModal();
+  closeMasterFormatModal();
   const totalCards=siteOrder.reduce((s,site)=>s+Object.keys(siteMap[site]).length,0);
   showNotif('✓','PDF generated',`${totalCards} time card${totalCards!==1?'s':''} downloaded`,'#1D9E75',3500);
 }
@@ -2086,6 +2118,9 @@ async function openEditModal(ref){
   document.getElementById('add-emp-wrap').style.display='none';
   document.getElementById('edit-delete-wrap').style.display='';
   document.getElementById('edit-save-btn').textContent='Save changes';
+  document.getElementById('in-quickset-add').style.display='none';
+  document.getElementById('out-quickset-add').style.display='none';
+  document.getElementById('out-quickset-edit').style.display='flex';
   editActs=new Set(entry.activity||[]);
   document.getElementById('edit-emp-name').value=entry.name;
   document.getElementById('edit-in').value=toLocal(entry.in);
@@ -2108,6 +2143,9 @@ function openAddPunchModal(ctx){
   document.getElementById('add-emp-wrap').style.display='';
   document.getElementById('edit-delete-wrap').style.display='none';
   document.getElementById('edit-save-btn').textContent='Add punch';
+  document.getElementById('out-quickset-edit').style.display='none';
+  document.getElementById('in-quickset-add').style.display='flex';
+  document.getElementById('out-quickset-add').style.display='flex';
   // Employee dropdown — full active roster, alphabetical
   const roster=employees.filter(e=>e.active).slice().sort((a,b)=>a.name.localeCompare(b.name));
   document.getElementById('add-emp-select').innerHTML='<option value="">— select employee —</option>'+roster.map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
@@ -2117,6 +2155,23 @@ function openAddPunchModal(ctx){
   buildEditActGrid();
   document.getElementById('edit-err').textContent='';
   document.getElementById('edit-modal-bg').style.display='flex';
+}
+/* ─── Quick-set time buttons (v40.1) ───
+   Add Manual Punch: stamps Today/Yesterday at a fixed time onto either field.
+   Edit Punch (fixing an auto-clock-out): stamps a fixed time onto the SAME DATE
+   as whatever's currently in the Clock-in field — correct for fixing a past
+   auto-clock, not just today's. */
+function quickSetAddTime(fieldId,dayWord,hh,mm){
+  const base=new Date();
+  if(dayWord==='yesterday')base.setDate(base.getDate()-1);
+  base.setHours(hh,mm,0,0);
+  document.getElementById(fieldId).value=toLocal(base);
+}
+function quickSetEditOut(hh,mm){
+  const inV=document.getElementById('edit-in').value;
+  const base=inV?new Date(inV):(_editEntry&&_editEntry.in instanceof Date?new Date(_editEntry.in):new Date());
+  base.setHours(hh,mm,0,0);
+  document.getElementById('edit-out').value=toLocal(base);
 }
 function buildEditActGrid(){
   document.getElementById('edit-act-grid').innerHTML=ACTIVITIES.map(a=>`<button class="act-btn${editActs.has(a.name)?' sel':''}" id="eact_${a.name.replace(/\s/g,'_')}" onclick="toggleEditAct('${a.name}')">${a.name}</button>`).join('');
@@ -2421,7 +2476,7 @@ function showReviewGate(list){
   const el=document.getElementById('review-gate-list');
   if(el){
     el.innerHTML=list.map(l=>`<div style="padding:5px 0;border-bottom:0.5px solid var(--bdr);">
-        <strong>${l.name}</strong>
+        <strong style="color:var(--txt);">${l.name}</strong>
         <span style="color:var(--txt2);font-size:11px;display:block;">Clocked in ${fmtDt(l.in)} · auto-out at 12h</span>
       </div>`).join('');
   }
@@ -2564,8 +2619,6 @@ function openChecklist(){
 }
 function closeConfirmModal(){
   document.getElementById('export-confirm-modal').style.display='none';
-  // Reset format picker in case master admin opened it
-  document.getElementById('master-format-picker').style.display='none';
   const submitBtn=document.getElementById('export-confirm-submit');
   submitBtn.style.display='';
   submitBtn.textContent='Submit \u0026 export PDF';
@@ -3019,7 +3072,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v40.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v40.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
