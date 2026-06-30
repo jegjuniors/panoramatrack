@@ -1884,6 +1884,7 @@ async function refreshMasterLog(){
     if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
     else if(l.lunchWaived===true)actBadges+=`<span class="badge" style="background:#d8f0d8;color:#1f5e1f;margin-left:2px;">🍴 Waived</span>`;
     else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
+    const si=JOBSITES.indexOf(l.jobsite);const color=si>=0?getSiteColor(si):'#555';
     return `<tr class="${l.autoClocked?'row-auto':''}">
       <td>${l.name}${l.autoClocked?' ⚠️':''}</td>
       <td><span style="display:inline-flex;align-items:center;gap:4px;"><span class="site-stripe" style="background:${color}"></span>${l.jobsite||'—'}</span></td>
@@ -3387,7 +3388,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v42.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v42.2',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v42.1
+**Current Version:** v42.2
 **Last Updated:** June 30, 2026
 
 ---
@@ -42,6 +42,7 @@ No separate supervisors table.
 - **`position:fixed` bars** rely on `#app` having no `transform`/`filter`/`contain` (which would trap fixed descendants) — keep it that way.
 - **Native scrollbars are invisible on mobile/PWA** — use the custom JS scroll-rail pattern (see v39.1), not CSS scrollbar styling.
 - **Stale-render races** in async refreshers — guard with a sequence number (e.g. `_supLogSeq`, `_masterLogSeq`).
+- **Row-template variables must survive edits.** The log row builders (`refreshMasterLog`/`refreshSupLog`) declare locals (`color`, `si`, `idx`, `hrs`…) just above the `return` template literal. When inserting badges or columns near there, don't delete those `const` lines — a missing one throws `ReferenceError` *inside* the `.map()` and silently blanks the whole table (bit us in v42.0 → fixed v42.2). After editing a row builder, smoke-test that the log still renders rows.
 
 ---
 
@@ -81,6 +82,10 @@ No separate supervisors table.
 ---
 
 ## 🚧 What Was Last Being Worked On
+
+**Last session date:** June 30, 2026
+**Tasks completed this session:**
+- **v42.2 — Bugfix: admin reporting log rendered nothing (regression from v42.0):** The master reporting log showed no rows for any filter/date range. Cause: the v42.0 edit that added the 🍴 lunch-waive badges to `refreshMasterLog()` accidentally deleted the adjacent line `const si=JOBSITES.indexOf(l.jobsite);const color=si>=0?getSiteColor(si):'#555';`. The row template still referenced `${color}` for the jobsite stripe, so each row threw `ReferenceError: color is not defined` *inside* the `.map()` callback, which aborted the whole `tbody.innerHTML` assignment → empty table. Filters/dropdowns/date logic were never affected; only row rendering. Fix: restored the one deleted line right before the row `return`. `app.js` only.
 
 **Last session date:** June 30, 2026
 **Tasks completed this session:**
@@ -345,4 +350,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 30, 2026 — v42.1_
+_Last updated: June 30, 2026 — v42.2_
