@@ -31,6 +31,15 @@ No separate supervisors table.
 
 ---
 
+## ⚠️ Standing Build Rules / Gotchas (read before every build)
+
+- **Dark-mode text color — NEVER rely on the browser default.** The app defaults to dark mode (`body` background is near-black `#000`), but no global rule colors bare text/headings. Any element whose color isn't set by a class or inline style falls back to browser-default **black → invisible in dark mode.** This has bitten us twice now (v40.1 review-gate names, v41.0 My Timecard heading). **Rule going forward: every new text element — headings, `<strong>`, custom spans, dynamically-injected HTML — must get an explicit theme-aware color (`color:var(--txt)` / `--txt2` / `--txt3`), never a hard-coded hex and never nothing.** A global `h1,h2,h3,h4{color:var(--txt)}` fallback was added in v41.0 to catch bare headings, but injected markup and non-heading elements still need explicit colors. Use the `--txt*` vars (they flip per theme automatically); avoid literal `#000`/`#111`/`black`.
+- **`position:fixed` bars** rely on `#app` having no `transform`/`filter`/`contain` (which would trap fixed descendants) — keep it that way.
+- **Native scrollbars are invisible on mobile/PWA** — use the custom JS scroll-rail pattern (see v39.1), not CSS scrollbar styling.
+- **Stale-render races** in async refreshers — guard with a sequence number (e.g. `_supLogSeq`, `_masterLogSeq`).
+
+---
+
 ## ✅ Features Currently Working
 
 - Employee PIN clock-in / clock-out with jobsite + activity selection
@@ -79,6 +88,8 @@ No separate supervisors table.
   - **Open-punch consistency:** if an employee uses this to add their own missing clock-out, the in-memory `timeLog` cache on that device is updated/closed too, consistent with how the existing supervisor `saveEdit()` keeps memory and DB in sync.
   - **Roadmap impact:** this took the v41.0 slot that had been earmarked for the per-shift lunch-waive feature — that feature is now pushed to **v42.0** (see updated roadmap section below).
   - **Files changed:** `index.html` ("My Timecard" button + `#screen-mytc` + `#mytc-edit-modal-bg` markup; version badge). `app.js` (new `submitTimecardPin()`, `openMyTimecard()`, `closeMyTimecard()`, `renderMyTcList()`, `openMyTcAdd()`, `openMyTcEdit()`, `buildMyTcActGrid()`, `toggleMyTcAct()`, `closeMyTcEditModal()`, `saveMyTcEdit()`; new state vars `myTcEmp`/`myTcPeriod`/`myTcPunches`/`myTcLocked`/`myTcEditingDbId`/`myTcAdding`/`myTcEditActs`; backup payload version). No DB migration needed — reuses the existing `manual_entry` column.
+  - **Post-build fix 1 — blank screen on load:** the new `#mytc-edit-modal-bg` modal was accidentally nested *inside* the still-open existing `#edit-modal-bg` modal, leaving two `<div>`s unclosed and breaking the whole DOM render. Fixed by closing the Edit Punch modal before opening the My Timecard modal (siblings, not nested). `index.html` only.
+  - **Post-build fix 2 — black/unreadable heading in dark mode:** the My Timecard screen `<h2>` (`#mytc-name`) had no color rule and fell back to browser-default black, invisible on the dark background (same class of bug as the v40.1 review-gate names). Fixed by (a) adding a global `h1,h2,h3,h4{color:var(--txt)}` fallback in `styles.css` so no bare heading can hit this again, and (b) setting `color:var(--txt)` inline on `#mytc-name`. Also logged as a **standing build rule** in the new "Standing Build Rules / Gotchas" section near the top of this doc — all future text elements must get an explicit theme-aware color, never browser default. `styles.css` + `index.html`.
 
 
 **Last session date:** June 25, 2026

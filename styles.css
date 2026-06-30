@@ -83,6 +83,9 @@ body{font-family:'SF Pro Text',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-
 .screen{display:none}.screen.active{display:block}
 .label-xs{font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600;color:var(--txt2)}
 .heading{font-size:17px;font-weight:600;color:var(--txt)}
+/* Bare heading fallback — prevents browser-default black text (invisible in
+   dark mode) on any h1–h4 that doesn't get a color from a class. */
+h1,h2,h3,h4{color:var(--txt)}
 .subtext{font-size:13px;color:var(--txt2)}
 .pin-display{font-size:30px;font-weight:500;letter-spacing:14px;color:var(--txt);min-height:44px;text-align:center;padding:6px 0}
 .pin-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;max-width:260px;margin:0 auto}
