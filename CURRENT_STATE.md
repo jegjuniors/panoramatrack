@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v41.0
+**Current Version:** v42.0
 **Last Updated:** June 30, 2026
 
 ---
@@ -24,7 +24,12 @@
 
 `pt_settings` (added v36.1, extended v36.2) is a single config row (`id = 1`) holding app-wide pay rules: `rounding_enabled`, `rounding_minutes`, `sched_end_enabled`, `sched_end_time`, `sched_end_window`, `lunch_enabled`, `lunch_minutes`, `lunch_threshold_hours`. Loaded on boot into `APP_SETTINGS`; edited in the master admin Settings tab. Rules are display/export-only — punch rows are never modified.
 
-`punches` columns of note: `employee_id`, `employee_name`, `department`, `jobsite`, `clock_in`, `clock_out`, `activities` (array), `auto_clocked`, `edited_after_auto`, `manual_entry` (bool, added v37.0 — true for punches created/edited via the supervisor/master manual Add-punch flow OR (v41.0) via employee self-edit in My Timecard; surfaces an amber "✎ Manual" badge in the logs either way — no separate flag distinguishes who made the edit).
+`punches` columns of note: `employee_id`, `employee_name`, `department`, `jobsite`, `clock_in`, `clock_out`, `activities` (array), `auto_clocked`, `edited_after_auto`, `manual_entry` (bool, added v37.0 — true for punches created/edited via the supervisor/master manual Add-punch flow OR (v41.0) via employee self-edit in My Timecard; surfaces an amber "✎ Manual" badge in the logs either way — no separate flag distinguishes who made the edit), `lunch_waive_requested` + `lunch_waived` (v42.0 — per-shift lunch waive, see below).
+
+**Lunch waive columns (v42.0, SQL run by Julio):**
+- `lunch_waive_requested` (bool, `NOT NULL DEFAULT false`) — the employee's "I worked through lunch" tick at clock-out. Always true/false.
+- `lunch_waived` (bool, **nullable, no default**) — the supervisor's decision. Three states by design: `NULL` = pending (no decision yet), `true` = approved (skip the lunch deduction for this punch), `false` = denied (keep the deduction). Code must check `=== true` / `IS NULL` explicitly, never truthiness (null and false are both falsy in JS).
+- A punch is a **pending waive** when `lunch_waive_requested = true AND lunch_waived IS NULL` — that's the condition surfaced by the needs-review filter, the Needs Review tile, and the supervisor export gate. Helper: `isPendingWaive(entry)` in app.js.
 
 Supervisors are employees with `dept = 'Supervisor'`. Supervisor password stored in `supervisor_password` column. Supervisor jobsite assignments stored in `supervisor_jobsites` (text array).
 No separate supervisors table.
@@ -76,6 +81,26 @@ No separate supervisors table.
 ---
 
 ## 🚧 What Was Last Being Worked On
+
+**Last session date:** June 30, 2026
+**Tasks completed this session:**
+- **v42.0 — Per-shift lunch waive (worked-through-lunch request + supervisor approval):** Closes the last piece of the lunch arc. Automatic lunch deduction (v36.2) docks 30 min from any shift over 5h; this lets an employee who genuinely skipped lunch and left early request that the deduction be waived — but as a *request the supervisor approves*, never an auto-apply, so there's no standing daily incentive for 50–100 people to claim free time.
+  - **Design (all confirmed with Julio before build, one question at a time):**
+    1. **Two flags, not one.** `lunch_waive_requested` = the employee's ask; `lunch_waived` = the supervisor's decision. Request ≠ approval.
+    2. **`lunch_waived` is a nullable boolean** (null/true/false = pending/approved/denied) rather than a separate status column — same three states, one column, `paidHours` still checks a plain boolean. Chosen over an enum because the states won't multiply.
+    3. **Capture = always-visible toggle on the clock-out (activity) screen**, no popup, no threshold gating the prompt. Employee ticks "I worked through lunch (no break taken)" → sets `lunch_waive_requested=true`. Threshold is handled downstream: an approved waive on a short shift simply has nothing to subtract.
+    4. **Approval = per-punch approve/deny in the edit modal**, surfaced via the **export gate** (not a standalone review screen). The gate — previously triggered only by unresolved auto-clocks — now also blocks on pending waives, listing both kinds.
+    5. **Bulk "Approve all for [Name]"** inline in the export-gate modal (common case: someone worked through lunch all period). **Denial stays individual** (more scrutiny) — done one-at-a-time via "Review these now" → edit modal.
+    6. **Needs-review filter + Needs Review tile** now catch pending waives in addition to auto-clocks, so "Review these now" lands on a combined list and the tile count matches.
+  - **DB migration (Julio ran before build):** `ALTER TABLE punches ADD COLUMN lunch_waive_requested boolean NOT NULL DEFAULT false;` and `ADD COLUMN lunch_waived boolean;` (nullable, no default). Existing rows: requested=false, waived=null — so none are caught by the gate. No backfill.
+  - **Engine:** `paidHours()` skips the lunch deduction only when `entry.lunchWaived===true` (explicit `===`, not truthiness — null/false both keep the deduction). New `isPendingWaive(entry)` helper (`requested===true && waived==null`) is the single source of truth for the gate, filter, and tile. `dbRowToEntry()` maps both columns (`lunchWaiveRequested`, `lunchWaived`).
+  - **Capture:** new `#lunch-waive-row` toggle card on `#screen-activity` (below the activity list, visually set apart); `lunchWaiveRequested` global + `toggleLunchWaive()`; reset in `showActivityScreen()`; written in `confirmClockOut()` alongside the activities/clock-out update.
+  - **Approval UI:** `#edit-waive-wrap` block in the shared edit modal, shown only when the punch carries a request (`setupEditWaive(entry)`); Approve/Deny buttons (`setEditWaive(bool)` → `_editWaiveDecision`, rendered by `_renderEditWaive()`); persisted in `saveEdit()` only when a decision was made this session (`_editWaiveDecision!==null`). Hidden in Add-Punch mode.
+  - **Surfacing:** status chips (🍴 Waive pending / Waived / Waive denied) added to both supervisor and master log rows; supervisor per-employee summary gained a pending-waive count; supervisor needs-review query (`refreshSupLog` `review` branch) and Needs Review tile (`refreshSupLive`) extended with an `.or(...)` / second count for pending waives.
+  - **Export gate:** `openExportConfirm()` now collects `pendingWaives` alongside `needsReview` and blocks if either is non-empty. `showReviewGate(autoList, waiveList)` rewritten with two labeled sections; waives grouped by employee with an "Approve all" button → `approveAllWaivesFor(empId)` (bulk `lunch_waived=true`, heals memory, then re-runs `openExportConfirm()` so the gate clears or advances). Master export path remains intentionally ungated (badges only).
+  - **Files changed:** `index.html` (lunch-waive toggle on `#screen-activity`; `#edit-waive-wrap` approve/deny block in edit modal; restructured `#review-gate-bg` into auto + waive sections; version badge → v42.0). `app.js` (`dbRowToEntry`, `paidHours`, new `isPendingWaive`/`toggleLunchWaive`/`setupEditWaive`/`_renderEditWaive`/`setEditWaive`/`approveAllWaivesFor`; `showActivityScreen`, `confirmClockOut`, `openEditModal`, `openAddPunchModal`, `saveEdit`, `refreshSupLog`, `refreshSupLive`, `refreshMasterLog`, `openExportConfirm`, `showReviewGate`; `lunchWaiveRequested`/`_editWaiveDecision`/`_reviewGateWaives` state; backup payload → v42.0).
+  - **Note / to verify in testing:** `approveAllWaivesFor()` re-runs `openExportConfirm()` after writing, which re-fetches fresh logs so the gate either clears or advances to the next step. Confirm that flow feels right in practice.
+  - **Scope deliberately left out:** the lunch-waive toggle is on the main clock-out screen only — it is NOT surfaced in the v41.0 "My Timecard" employee self-edit path (would be scope creep; not discussed). If an employee edits a punch in My Timecard, the waive flags are left as they were.
 
 **Last session date:** June 30, 2026
 **Tasks completed this session:**
@@ -250,22 +275,16 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ---
 
-## ⏭ Next Session Agenda — Per-shift lunch waive
+## ⏭ Next Session Agenda
 
-(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump. v38.0 went to the admin nav reorg, v39.0 to the activity-checklist redesign, v40.0 to the Excel Pack export, v40.1 to a contained tweak bundle (admin export warning, two bugfixes, quick-set buttons), and v41.0 to the "My Timecard" employee self-edit feature, so this is now slated for **v42.0** when we start.)
+**Per-shift lunch waive — ✅ SHIPPED in v42.0.** (See the v42.0 entry under "What Was Last Being Worked On" for the full design + build record.) The lunch arc is now complete: auto-deduction (v36.2) + per-shift waive request/approval (v42.0).
 
-Automatic lunch deduction (v36.2) is in. Remaining lunch work is the worked-through-lunch case: an employee who skips lunch and leaves early should NOT be docked the 30 min. Design direction agreed with Julio; details to settle at the start.
+No feature is currently mid-flight. Candidate next items, none committed:
+- **Per-shift lunch waive — possible follow-ups if they come up in use:** surface the waive toggle in the My Timecard self-edit path too (deliberately left out of v42.0); a "deny all" bulk action (deliberately left individual); a waive marker in PDF/CSV/Excel exports (currently the badge is on-screen only — the *effect* on paid hours already flows through exports via `paidHours`, but there's no visible "waived" annotation on the exported timesheet).
+- **NFC tag scanning** — explored as a PIN alternative; Web NFC works on Android Chrome, not iOS Safari. Parked, no decision.
+- **Codebase file-splitting** — plain `<script>`-tag splitting (no bundler); export functions the natural first candidate. Discussed, not actioned.
 
-**Direction (agreed):**
-- Capture the lunch/no-lunch choice **at clock-out**, alongside the activity selection — the employee is the one who knows whether they actually took lunch; the supervisor usually doesn't.
-- **NOT pure self-serve.** Treat "worked through lunch" as a **request, not an auto-apply** — otherwise there's a standing daily incentive to tick "no lunch" for 30 min of free pay across 50–100 people, which erodes the cost-savings story and contradicts the discretionary "we allow when they ask" practice. The employee's selection flags the punch as a pending waive that surfaces in the supervisor log (like the existing needs-review flag); the supervisor confirms or rejects before it affects paid hours.
-
-**Build notes:**
-- New boolean column on `punches` — e.g. `lunch_waived` (the confirmed/applied state). Likely a second flag for the pending/requested state (e.g. `lunch_waive_requested`) so request ≠ approval. It's a per-day decision, not a permanent trait. **DB migration required (Julio runs it).**
-- When a punch's waive is approved, `paidHours` skips the lunch deduction for that punch only.
-- OPEN to settle: exact column design (one flag vs. request+approve pair); where the supervisor approves (edit modal checkbox vs. a dedicated review action); whether the clock-out prompt only appears for shifts long enough to be docked.
-
-Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map the new column[s]), `clockOut` + clock-out UI (capture the request), supervisor log + edit modal (surface + approve), Settings tab unaffected.
+See the Security / Priority short-list below for the standing open items (RLS, kiosk lock screen, PIN hashing).
 
 ---
 
@@ -294,11 +313,14 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | Session persistence | `tryRestoreSession()` / `SESSION_PERSIST_MS` / `pt_session` (localStorage) |
 | Supervisor permission gating | `refreshSupEmps()` / `openEmpModal(id,ctx)` / `saveEmployee()` — `restricted` flag; `#emp-sup-pass-field`, `#emp-restrict-note` in index.html |
 | Live tile navigation | `goToSupReport(which)` → `setSupPeriod` + `s-filter-flags` + `refreshSupLog` |
-| Submit review gate | `openExportConfirm()` (gate block) → `showReviewGate()` / `closeReviewGate()` / `reviewGateGoNow()`; `#review-gate-bg` in index.html. Master path is intentionally not blocking — see "Master export review warning (v40.1)" row below |
+| Submit review gate | `openExportConfirm()` (gate block) → `showReviewGate(autoList,waiveList)` / `closeReviewGate()` / `reviewGateGoNow()`; `#review-gate-bg` (two sections: `#review-gate-auto-section`/`#review-gate-list` + `#review-gate-waive-section`/`#review-gate-waive-list`) in index.html. v42.0: gate now also blocks on pending lunch waives, with bulk `approveAllWaivesFor(empId)`. Master path is intentionally not blocking — see "Master export review warning (v40.1)" row below |
+| Lunch waive — capture (v42.0) | `#lunch-waive-row`/`#lunch-waive-chk` toggle on `#screen-activity` in index.html; `lunchWaiveRequested` global + `toggleLunchWaive()`; reset in `showActivityScreen()`; written in `confirmClockOut()` (`lunch_waive_requested` column) |
+| Lunch waive — approval (v42.0) | edit modal `#edit-waive-wrap` (Approve/Deny → `setEditWaive(bool)` / `_renderEditWaive()` / `setupEditWaive(entry)`, `_editWaiveDecision` global); persisted in `saveEdit()` when `_editWaiveDecision!==null` (`lunch_waived` column); hidden in Add-Punch mode. Bulk approve from the gate: `approveAllWaivesFor(empId)` (`_reviewGateWaives`) |
+| Lunch waive — engine/surfacing (v42.0) | `paidHours()` skips deduction when `lunchWaived===true`; `isPendingWaive(entry)` = `requested===true && waived==null` (single source for gate/filter/tile); `dbRowToEntry()` maps `lunchWaiveRequested`/`lunchWaived`; supervisor `review` filter `.or(...)` + `refreshSupLive` second count include pending waives; 🍴 status chips in `refreshSupLog`/`refreshMasterLog` |
 | Edit punch (existing) | `openEditModal(ref)` / `saveEdit()` / `confirmDeletePunch()` / `deletePunch()`; `#edit-modal-bg` in index.html |
 | Manual add punch (v37.0) | `openAddPunchModal(ctx)` + add branch at top of `saveEdit()`; shared edit modal in add mode (`addingPunch` / `addPunchCtx` globals); "+ Add punch" buttons in `#spanel-log` & `#mpanel-log`; `manual_entry` column; amber "✎ Manual" badge in `refreshSupLog`/`refreshMasterLog` |
 | Master grouped nav (v38.0) | `switchMasterGroup(group)` / `switchMasterTab(tab)` (rewritten) / `MASTER_TAB_GROUP` + `MASTER_GROUP_DEFAULT`; top tabs `#mtab-overview/manage/reporting/settings`, sub-rows `#msub-manage` / `#msub-reporting` holding `.subnav-btn.msub-btn[data-tab]` in index.html; `.subnav-bar` / `.subnav-btn` in styles.css |
-| Pay rules engine | `APP_SETTINGS` (global) / `applySettingsRow()` / `roundTime()` / `applySchedEnd()` / `adjustedTimes()` / `paidHours()` (lunch deduction lives here, v36.2) — near the time helpers (`fmtDt` area) |
+| Pay rules engine | `APP_SETTINGS` (global) / `applySettingsRow()` / `roundTime()` / `applySchedEnd()` / `adjustedTimes()` / `paidHours()` (lunch deduction lives here, v36.2; skipped per-punch when `lunchWaived===true`, v42.0) — near the time helpers (`fmtDt` area) |
 | Pay rules settings UI | `refreshSettingsPanel()` / `saveSettings()`; `mtab-settings` + `mpanel-settings` in index.html; `pt_settings` table in Supabase |
 | Hours display sites (use paidHours) | `refreshSupLog`, `refreshMasterLog`, `updateExportPreview`, `doMasterExcelZip` (Excel pack), `generatePDF` `consolidate` |
 | Excel Pack export (v40.0) | `doMasterExcelZip()` + helpers `_xlB64ToU8` / `_xlSanitize` / `_xlNumericCode` / `_xlRound2`; embedded template in `payroll-template.js` (`window.PAYROLL_TEMPLATE_B64`); ExcelJS+JSZip `<script>` tags in index.html. Replaces the old `doMasterExport` CSV fn. |
@@ -307,7 +329,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | Needs-review race guard (v40.1) | `_supLogSeq` in `refreshSupLog()`, `_masterLogSeq` in `refreshMasterLog()` — sequence-number guard so a stale, superseded call can't overwrite a newer one's render |
 | My Timecard — employee self-edit (v41.0) | `submitTimecardPin()` → `openMyTimecard(emp)` / `closeMyTimecard()` / `renderMyTcList()`; edit & add via shared `openMyTcEdit(dbId)` / `openMyTcAdd()` → `saveMyTcEdit()` (`#mytc-edit-modal-bg`, separate from the supervisor/master `#edit-modal-bg`); `buildMyTcActGrid()`/`toggleMyTcAct()`; "My Timecard" button + `#screen-mytc` in index.html; writes `manual_entry=true` (no new flag); period-lock check queries `submissions` for a `final` row overlapping `getPeriodByOffset(0)`
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
-| Version display | `index.html` line ~153 and `app.js` backup payload |
+| Version display | `index.html` version badge `<div>` (~line 195, top-left of `#screen-kiosk`) and `app.js` backup payload (`app_version`) |
 
 ---
 
@@ -319,4 +341,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 30, 2026 — v41.0_
+_Last updated: June 30, 2026 — v42.0_

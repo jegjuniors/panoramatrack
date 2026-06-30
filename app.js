@@ -31,6 +31,7 @@ let APP_SETTINGS={  // pay rules — loaded from Supabase `pt_settings` row on b
 let timeLog=[];      // active punches only cached in memory for speed
 let currentPin='';
 let pendingClockOut=null;
+let lunchWaiveRequested=false; // v42.0 — employee's "worked through lunch" tick on the clock-out screen
 let selectedActs=new Set();
 let editingIdx=null; // index into timeLog array
 let addingPunch=false;   // true while the shared edit modal is in manual-add mode (v37.0)
@@ -151,10 +152,17 @@ function paidHours(entry){
   // Display/export-only; raw punch is never modified. Threshold is checked
   // against the adjusted elapsed hours so it reflects what's actually paid.
   if(APP_SETTINGS.lunchEnabled && !entry.autoClocked && !entry.estimatedOut
-     && hrs>APP_SETTINGS.lunchThresholdHours){
+     && hrs>APP_SETTINGS.lunchThresholdHours
+     && entry.lunchWaived!==true){
     hrs=Math.max(0,hrs-(APP_SETTINGS.lunchMinutes||0)/60);
   }
   return hrs;
+}
+
+// Pending lunch-waive (v42.0): employee asked, supervisor hasn't decided yet.
+// Used by the needs-review filter, the Needs Review tile, and the export gate.
+function isPendingWaive(entry){
+  return !!entry && entry.lunchWaiveRequested===true && entry.lunchWaived==null;
 }
 
 function updateClock(){
@@ -254,7 +262,11 @@ function dbRowToEntry(r){
     activity:r.activities?r.activities:[],
     autoClocked:r.auto_clocked||false,
     editedAfterAuto:r.edited_after_auto||false,
-    manualEntry:r.manual_entry||false
+    manualEntry:r.manual_entry||false,
+    // Lunch waive (v42.0) — request = employee's ask at clock-out (bool);
+    // waived = supervisor's decision (nullable: null pending / true approved / false denied).
+    lunchWaiveRequested:r.lunch_waive_requested||false,
+    lunchWaived:(r.lunch_waived===true||r.lunch_waived===false)?r.lunch_waived:null
   };
 }
 
@@ -884,6 +896,9 @@ function showActivityScreen(emp){
   document.getElementById('activity-emp-name').textContent=emp.name;
   selectedActs=new Set();
   document.getElementById('activity-error').textContent='';
+  // Reset the lunch-waive request toggle each time (v42.0)
+  lunchWaiveRequested=false;
+  const lw=document.getElementById('lunch-waive-chk');if(lw)lw.checked=false;
   renderActList();
   showScreen('screen-activity');
   window.scrollTo(0,0); // this screen always starts at the top of the list
@@ -911,6 +926,13 @@ function toggleAct(name,id){
     if(chk)chk.checked=checked;
     item.classList.toggle('checked',checked);
   }
+}
+
+// Lunch waive request toggle (v42.0) — clock-out screen.
+function toggleLunchWaive(){
+  lunchWaiveRequested=!lunchWaiveRequested;
+  const chk=document.getElementById('lunch-waive-chk');
+  if(chk)chk.checked=lunchWaiveRequested;
 }
 
 // Custom page-scroll affordance for the activity screen (v39.1) — driven by
@@ -956,12 +978,14 @@ async function confirmClockOut(){
   const entry=pendingClockOut.entry;
   const name=pendingClockOut.emp.name;
   entry.out=now;entry.activity=[...selectedActs];
+  entry.lunchWaiveRequested=lunchWaiveRequested; // v42.0
   // Write to DB
   if(entry.dbId){
     const {error}=await sb.from('punches').update({
       clock_out:now.toISOString(),
       activities:[...selectedActs],
-      auto_clocked:false
+      auto_clocked:false,
+      lunch_waive_requested:lunchWaiveRequested
     }).eq('id',entry.dbId);
     if(error){showNotif('✗','Error','Could not save clock-out — check connection','#E24B4A');return}
   }
@@ -1060,13 +1084,19 @@ async function refreshSupLive(){
   document.getElementById('s-stat-in').textContent=active.length;
   const yestEmps=new Set(siteLogs.filter(l=>l.in>=yestStart&&l.in<=yestEnd).map(l=>l.empId));
   document.getElementById('s-stat-total').textContent=yestEmps.size;
-  // Query DB for auto-clocked count scoped to this supervisor's sites
-  const {count:flagCount}=await sb.from('punches')
+  // Query DB for outstanding-review count scoped to this supervisor's sites.
+  // v42.0: count = uncorrected auto-clocks + pending lunch-waive requests.
+  const {count:autoCount}=await sb.from('punches')
     .select('*',{count:'exact',head:true})
     .in('jobsite',sites)
     .eq('auto_clocked',true)
     .eq('edited_after_auto',false);
-  document.getElementById('s-stat-punches').textContent=flagCount||0;
+  const {count:waiveCount}=await sb.from('punches')
+    .select('*',{count:'exact',head:true})
+    .in('jobsite',sites)
+    .eq('lunch_waive_requested',true)
+    .is('lunch_waived',null);
+  document.getElementById('s-stat-punches').textContent=(autoCount||0)+(waiveCount||0);
   const tbody=document.getElementById('s-live-table');
   if(!active.length){tbody.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--txt2);padding:20px;">No employees currently clocked in</td></tr>';return}
   tbody.innerHTML=active.map(l=>`<tr><td>${l.name}</td><td>${sites.length>1?`<span class="badge b-blue" style="font-size:10px;">${l.jobsite}</span>`:''}</td><td><span class="badge b-in">In</span></td><td>${elapsed(l)}</td><td>${l.dept}</td></tr>`).join('');
@@ -1200,9 +1230,11 @@ async function refreshSupLog(){
   let logs=[];
 
   if(filter==='review'){
-    // Needs review only: ALL outstanding auto-clocked & uncorrected punches at supervisor's sites (period-independent, matches the Live tile count)
+    // Needs review only: ALL outstanding items at supervisor's sites (period-independent, matches the Live tile count).
+    // v42.0: now includes pending lunch-waive requests in addition to uncorrected auto-clocks.
     const {data,error}=await sb.from('punches').select('*')
-      .in('jobsite',sites).eq('auto_clocked',true).eq('edited_after_auto',false)
+      .in('jobsite',sites)
+      .or('and(auto_clocked.eq.true,edited_after_auto.eq.false),and(lunch_waive_requested.eq.true,lunch_waived.is.null)')
       .order('clock_in',{ascending:false});
     if(error){showCustomAlert('Error','Could not load log: '+error.message);return}
     logs=(data||[]).map(dbRowToEntry);
@@ -1260,14 +1292,19 @@ async function refreshSupLog(){
     const records=data.records;
     const totalHrs=records.reduce((s,l)=>s+(paidHours(l)||0),0);
     const flags=records.filter(l=>l.autoClocked).length;
+    const waivePend=records.filter(l=>isPendingWaive(l)).length;
     const still=records.filter(l=>!l.out).length;
-    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
+    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
       const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
       const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
       let actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
       if(l.manualEntry)actBadges=`<span class="badge" style="background:#f0a830;color:#3a2600;margin-right:2px;">✎ Manual</span>`+actBadges;
+      // v42.0 lunch-waive status badge
+      if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
+      else if(l.lunchWaived===true)actBadges+=`<span class="badge" style="background:#d8f0d8;color:#1f5e1f;margin-left:2px;">🍴 Waived</span>`;
+      else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
       const isAssignedSite=(activeSup.jobsites||[]).includes(l.jobsite);
       const siteColor=isAssignedSite?'b-blue':'b-amber'; // amber = unassigned/temp site
       return `<tr class="${l.autoClocked?'row-auto':''}">
@@ -1844,7 +1881,9 @@ async function refreshMasterLog(){
     const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
     let actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
     if(l.manualEntry)actBadges=`<span class="badge" style="background:#f0a830;color:#3a2600;margin-right:2px;">✎ Manual</span>`+actBadges;
-    const si=JOBSITES.indexOf(l.jobsite);const color=si>=0?getSiteColor(si):'#555';
+    if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
+    else if(l.lunchWaived===true)actBadges+=`<span class="badge" style="background:#d8f0d8;color:#1f5e1f;margin-left:2px;">🍴 Waived</span>`;
+    else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
     return `<tr class="${l.autoClocked?'row-auto':''}">
       <td>${l.name}${l.autoClocked?' ⚠️':''}</td>
       <td><span style="display:inline-flex;align-items:center;gap:4px;"><span class="site-stripe" style="background:${color}"></span>${l.jobsite||'—'}</span></td>
@@ -2319,6 +2358,8 @@ async function openEditModal(ref){
   const jSel=document.getElementById('edit-jobsite');
   jSel.innerHTML=JOBSITES.map(j=>`<option${entry.jobsite===j?' selected':''}>${j}</option>`).join('');
   buildEditActGrid();
+  // Lunch waive decision block (v42.0) — only when this punch carries a waive request
+  setupEditWaive(entry);
   document.getElementById('edit-err').textContent='';
   document.getElementById('edit-modal-bg').style.display='flex';
 }
@@ -2344,6 +2385,8 @@ function openAddPunchModal(ctx){
   document.getElementById('edit-out').value='';
   document.getElementById('edit-jobsite').innerHTML=JOBSITES.map(j=>`<option>${j}</option>`).join('');
   buildEditActGrid();
+  // No lunch-waive decision on a brand-new manual punch (v42.0)
+  const ww=document.getElementById('edit-waive-wrap');if(ww)ww.style.display='none';
   document.getElementById('edit-err').textContent='';
   document.getElementById('edit-modal-bg').style.display='flex';
 }
@@ -2363,6 +2406,38 @@ function quickSetEditOut(hh,mm){
   const base=inV?new Date(inV):(_editEntry&&_editEntry.in instanceof Date?new Date(_editEntry.in):new Date());
   base.setHours(hh,mm,0,0);
   document.getElementById('edit-out').value=toLocal(base);
+}
+/* ─── Lunch waive decision in edit modal (v42.0) ───
+   _editWaiveDecision: the pending decision to write on save.
+     null  = no change (leave stored value as-is)
+     true  = approve · false = deny
+   Only relevant when the punch carries lunch_waive_requested=true. */
+let _editWaiveDecision=null;
+function setupEditWaive(entry){
+  const wrap=document.getElementById('edit-waive-wrap');
+  _editWaiveDecision=null;
+  if(!wrap)return;
+  if(!entry||entry.lunchWaiveRequested!==true){wrap.style.display='none';return}
+  wrap.style.display='';
+  // Seed the displayed decision from the stored state (null/true/false)
+  _renderEditWaive(entry.lunchWaived);
+}
+function _renderEditWaive(state){
+  // state: null pending · true approved · false denied
+  const status=document.getElementById('edit-waive-status');
+  const aBtn=document.getElementById('edit-waive-approve');
+  const dBtn=document.getElementById('edit-waive-deny');
+  if(aBtn)aBtn.style.outline=(state===true)?'2px solid var(--green)':'';
+  if(dBtn)dBtn.style.outline=(state===false)?'2px solid var(--red)':'';
+  if(status){
+    if(state===true){status.textContent='✓ Approved — lunch will not be deducted';status.style.color='var(--green)';}
+    else if(state===false){status.textContent='✗ Denied — unpaid lunch still applies';status.style.color='var(--red)';}
+    else{status.textContent='Pending — choose Approve or Deny';status.style.color='var(--txt2)';}
+  }
+}
+function setEditWaive(approve){
+  _editWaiveDecision=approve; // true or false
+  _renderEditWaive(approve);
 }
 function buildEditActGrid(){
   document.getElementById('edit-act-grid').innerHTML=ACTIVITIES.map(a=>`<button class="act-btn${editActs.has(a.name)?' sel':''}" id="eact_${a.name.replace(/\s/g,'_')}" onclick="toggleEditAct('${a.name}')">${a.name}</button>`).join('');
@@ -2445,12 +2520,15 @@ async function saveEdit(){
     const upd={clock_in:newIn.toISOString(),jobsite:newJobsite,activities:newActs};
     if(newOut)upd.clock_out=newOut.toISOString();else upd.clock_out=null;
     if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
+    // Lunch waive decision (v42.0) — only write when a decision was made this session
+    if(_editWaiveDecision!==null)upd.lunch_waived=_editWaiveDecision;
     const {error}=await sb.from('punches').update(upd).eq('id',e.dbId);
     if(error){err.textContent='DB error: '+error.message;return}
   }
   // Update memory
   e.in=newIn;e.out=newOut;e.jobsite=newJobsite;e.activity=newActs;
   if(editedAfterAuto){e.autoClocked=false;e.editedAfterAuto=true;}
+  if(_editWaiveDecision!==null)e.lunchWaived=_editWaiveDecision;
   closeEditModal();
   if(document.getElementById('spanel-log')?.style.display!=='none')refreshSupLog();
   if(document.getElementById('mpanel-log')?.style.display!=='none')refreshMasterLog();
@@ -2629,14 +2707,16 @@ async function openExportConfirm(){
   const logs=await fetchExportLogs(from,to);
   if(!logs.length){err.textContent='No punch records found for this date range and jobsite(s).';return}
 
-  // ── Review gate: block submit while any punch in this report is still auto-clocked ──
+  // ── Review gate: block submit while any punch in this report still needs attention ──
   // (Supervisors only — master admin export path is intentionally not gated.)
-  // An auto-clocked punch flips auto_clocked=false once a supervisor edits in a real
-  // clock-out, so this set clears automatically as each one is addressed. Applies to
-  // both preliminary and final submissions.
+  // Two kinds of outstanding item (v42.0):
+  //   1. auto-clocked punches awaiting a real clock-out (auto_clocked flips false on edit)
+  //   2. pending lunch-waive requests awaiting an approve/deny decision
+  // Both clear automatically as they're addressed. Applies to preliminary AND final.
   const needsReview=logs.filter(l=>l.autoClocked);
-  if(needsReview.length){
-    showReviewGate(needsReview);
+  const pendingWaives=logs.filter(l=>isPendingWaive(l));
+  if(needsReview.length||pendingWaives.length){
+    showReviewGate(needsReview,pendingWaives);
     return;
   }
 
@@ -2662,16 +2742,60 @@ async function openExportConfirm(){
   await checkDupsAndProceed();
 }
 
-// ── Review gate modal (auto-clocked punches must be resolved before submit) ──
-function showReviewGate(list){
-  const el=document.getElementById('review-gate-list');
-  if(el){
-    el.innerHTML=list.map(l=>`<div style="padding:5px 0;border-bottom:0.5px solid var(--bdr);">
+// ── Review gate modal (v42.0) — blocks supervisor submit while items are unresolved.
+//    Handles two kinds: auto-clocked punches and pending lunch-waive requests. ──
+let _reviewGateWaives=[]; // pending-waive entries currently shown, for bulk approve
+function showReviewGate(autoList,waiveList){
+  autoList=autoList||[];waiveList=waiveList||[];
+  _reviewGateWaives=waiveList;
+
+  // Section 1 — auto-clocked
+  const autoSec=document.getElementById('review-gate-auto-section');
+  const autoEl=document.getElementById('review-gate-list');
+  if(autoList.length){
+    autoSec.style.display='';
+    autoEl.innerHTML=autoList.map(l=>`<div style="padding:5px 0;border-bottom:0.5px solid var(--bdr);">
         <strong style="color:var(--txt);">${l.name}</strong>
         <span style="color:var(--txt2);font-size:11px;display:block;">Clocked in ${fmtDt(l.in)} · auto-out at 12h</span>
       </div>`).join('');
-  }
+  } else { autoSec.style.display='none'; autoEl.innerHTML=''; }
+
+  // Section 2 — pending lunch waives, grouped by employee with a bulk-approve button
+  const waiveSec=document.getElementById('review-gate-waive-section');
+  const waiveEl=document.getElementById('review-gate-waive-list');
+  if(waiveList.length){
+    waiveSec.style.display='';
+    const byEmp={};
+    waiveList.forEach(l=>{(byEmp[l.empId]=byEmp[l.empId]||{name:l.name,recs:[]}).recs.push(l);});
+    waiveEl.innerHTML=Object.entries(byEmp).map(([empId,d])=>{
+      const days=d.recs.map(l=>`<span style="color:var(--txt2);font-size:11px;display:block;">${fmtDt(l.in)}</span>`).join('');
+      return `<div style="padding:7px 0;border-bottom:0.5px solid var(--bdr);">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div><strong style="color:var(--txt);">${d.name}</strong>
+            <span style="color:var(--txt2);font-size:11px;"> · ${d.recs.length} day${d.recs.length!==1?'s':''}</span>
+          </div>
+          <button class="btn-sm" style="background:var(--green);color:#fff;flex-shrink:0;" onclick="approveAllWaivesFor('${empId}')">Approve all</button>
+        </div>
+        <div style="margin-top:3px;">${days}</div>
+      </div>`;
+    }).join('');
+  } else { waiveSec.style.display='none'; waiveEl.innerHTML=''; }
+
   document.getElementById('review-gate-bg').style.display='flex';
+}
+// Bulk-approve every pending waive for one employee, straight from the gate (v42.0).
+async function approveAllWaivesFor(empId){
+  const recs=_reviewGateWaives.filter(l=>String(l.empId)===String(empId)&&l.dbId);
+  if(!recs.length)return;
+  const ids=recs.map(l=>l.dbId);
+  const {error}=await sb.from('punches').update({lunch_waived:true}).in('id',ids);
+  if(error){showCustomAlert('Error','Could not approve waives: '+error.message);return}
+  // Heal any in-memory copies
+  recs.forEach(r=>{const m=timeLog.find(l=>l.dbId===r.dbId);if(m)m.lunchWaived=true;r.lunchWaived=true;});
+  showNotif('✓','Waives approved',recs.length+' day'+(recs.length!==1?'s':'')+' approved','#2f7d31',2400);
+  // Re-run the gate check by re-opening the export flow so the gate clears / advances
+  closeReviewGate();
+  openExportConfirm();
 }
 function closeReviewGate(){document.getElementById('review-gate-bg').style.display='none';}
 function reviewGateGoNow(){
@@ -3263,7 +3387,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v40.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v42.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
