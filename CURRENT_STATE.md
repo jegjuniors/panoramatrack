@@ -1,7 +1,7 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v40.1
-**Last Updated:** June 25, 2026
+**Current Version:** v41.0
+**Last Updated:** June 30, 2026
 
 ---
 
@@ -24,7 +24,7 @@
 
 `pt_settings` (added v36.1, extended v36.2) is a single config row (`id = 1`) holding app-wide pay rules: `rounding_enabled`, `rounding_minutes`, `sched_end_enabled`, `sched_end_time`, `sched_end_window`, `lunch_enabled`, `lunch_minutes`, `lunch_threshold_hours`. Loaded on boot into `APP_SETTINGS`; edited in the master admin Settings tab. Rules are display/export-only — punch rows are never modified.
 
-`punches` columns of note: `employee_id`, `employee_name`, `department`, `jobsite`, `clock_in`, `clock_out`, `activities` (array), `auto_clocked`, `edited_after_auto`, `manual_entry` (bool, added v37.0 — true for punches created via the manual Add-punch flow rather than a real clock-in; surfaces an amber "✎ Manual" badge in the logs).
+`punches` columns of note: `employee_id`, `employee_name`, `department`, `jobsite`, `clock_in`, `clock_out`, `activities` (array), `auto_clocked`, `edited_after_auto`, `manual_entry` (bool, added v37.0 — true for punches created/edited via the supervisor/master manual Add-punch flow OR (v41.0) via employee self-edit in My Timecard; surfaces an amber "✎ Manual" badge in the logs either way — no separate flag distinguishes who made the edit).
 
 Supervisors are employees with `dept = 'Supervisor'`. Supervisor password stored in `supervisor_password` column. Supervisor jobsite assignments stored in `supervisor_jobsites` (text array).
 No separate supervisors table.
@@ -62,10 +62,24 @@ No separate supervisors table.
 - **Manual punch entry (v37.0)** — "+ Add punch" button in both the supervisor and master logs, for an employee who forgot to clock in/out entirely. Reuses the edit modal in an add mode (`openAddPunchModal(ctx)`): employee dropdown (full active roster, alphabetical), clock-in (required), clock-out (optional — covers in-only cases), jobsite, activities. Inserts a new `punches` row with `manual_entry = true`, shown with an amber "✎ Manual" badge in both logs. Both supervisors and master can use it; supervisor scope is the full roster (per Julio's call). NOT included this version (noted for future): overlap guard against double-booking an employee, and a manual marker in CSV/PDF exports.
 - **Master admin export — review warning instead of checklist (v40.1)** — the old shared 4-checkbox checklist is gone from the admin export path. `openMasterExportConfirm()` now checks the current filtered log for auto-clocked/unreviewed punches: none found → straight to the PDF/Excel Pack format picker (`#master-format-modal`); some found → a non-blocking warning modal (`#master-review-modal`) showing a count (expandable to the full name + clock-in list), with "Review now" (jumps to the master log's needs-review filter via the existing `goToReport({flags:true})`) or "Export anyway" (secondary/outline-styled override button → proceeds to the format picker). Admin export remains intentionally ungated — this is a heads-up, not a block. Supervisor's checklist/review-gate modal is untouched.
 - **Quick-set time buttons on Edit/Add Punch modals (v40.1)** — saves having to pick a date/time for the common case of fixing an auto-clock-out or backfilling a forgotten punch. Edit Punch modal: Clock-out gets two buttons, **3:15 PM** / **3:30 PM**, which stamp that time onto the *same date as the punch's existing clock-in* (correct for fixing an auto-clock from any day, not just today). Add Manual Punch modal: Clock-in gets **Today 7:00 AM** / **Yesterday 7:00 AM**; Clock-out gets **Today 3:15/3:30 PM** / **Yesterday 3:15/3:30 PM** (4 buttons). Implemented as `quickSetEditOut(hh,mm)` and `quickSetAddTime(fieldId,'today'|'yesterday',hh,mm)`; the three button rows (`#out-quickset-edit`, `#in-quickset-add`, `#out-quickset-add`) are toggled by `openEditModal()` / `openAddPunchModal()` since the modal is shared between both flows.
+- **My Timecard — employee self-edit (v41.0)** — a new "My Timecard" option on the kiosk screen, beside Clock In / Out, so employees can fix their own forgotten/incorrect punches without going through the supervisor. Employee enters their PIN (same as clock-in) to open `submitTimecardPin()` → `openMyTimecard(emp)`, which lists their punches for the **current pay period only** (`getPeriodByOffset(0)`), pulled fresh from Supabase. They can edit any of the four fields on an existing punch (clock-in, clock-out, jobsite, activities) via `openMyTcEdit(dbId)`, or add a punch they forgot entirely (missing clock-in or clock-out) via `openMyTcAdd()` — a simplified single modal shared between both flows (`#mytc-edit-modal-bg`), not the full supervisor Add-Punch modal. Every self-edit applies **immediately** (no approval queue — the agreed "flagged-but-live" model) and is written with `manual_entry = true`, the same flag supervisors already use, so it surfaces with the existing amber "✎ Manual" badge in the supervisor/master logs — no new flag, no separate before/after audit trail; supervisors follow up with the employee directly if a flagged edit looks off. **Locked once submitted:** if the current period already has a `final` row in `submissions` for that employee, the screen goes view-only (`mytc-locked-note` shown, Add/Edit buttons hidden) — only a supervisor or master admin can touch it from that point. No min/max time-shift guardrail (per Julio's call) beyond staying inside the current period's date range.
 
 ---
 
 ## 🚧 What Was Last Being Worked On
+
+**Last session date:** June 30, 2026
+**Tasks completed this session:**
+- **v41.0 — My Timecard: employee self-edit of their own punches:** Too many employees were forgetting to clock in or out entirely, and chasing every one down was overloading the supervisor. This adds a new self-service path so employees can correct their own punches directly, scoped tightly enough to keep the existing supervisor-policing model intact.
+  - **Design (confirmed with Julio before build):** employees can edit only their own punches, and only within the **current pay period** — once that period has a final submission on record, only a supervisor/master admin can touch it from then on. Edits **apply immediately** (flagged-but-live, not a request/approval queue, matching Julio's call). All four punch fields are editable (clock-in, clock-out, jobsite, activities), including adding a punch the employee forgot entirely. No before/after value is retained — the supervisor follows up directly with the employee if a flagged edit looks off. No min/max time-shift guardrail beyond staying inside the current period.
+  - **Access:** a new **"My Timecard"** button sits beside the existing "Clock In / Out" button on the kiosk screen. Employee enters their PIN (same PIN pad, same lookup as clock-in) → `submitTimecardPin()` → `openMyTimecard(emp)`.
+  - **Screen (`#screen-mytc`):** lists the employee's own punches for the current pay period only, queried fresh from Supabase each time (not from the in-memory `timeLog`, which only caches open punches). Each punch shows date, jobsite, in/out times, activities, and the existing "In" / "✎ Manual" / "Auto-clocked" badges. A "+ Add a missed punch" button sits above the list.
+  - **Editing:** reuses a dedicated, simplified modal (`#mytc-edit-modal-bg` — separate from the supervisor/master `#edit-modal-bg` to avoid entangling employee-permission logic with that modal's existing add/edit/admin branches) for both "edit an existing punch" (`openMyTcEdit(dbId)`) and "add a missed punch" (`openMyTcAdd()`). Saving validates clock-out > clock-in and that both timestamps fall inside the current pay period, then writes with **`manual_entry = true`** — intentionally reusing the existing flag rather than adding a new one, so self-edits surface with the same amber "✎ Manual" badge supervisors already watch for in the supervisor/master logs (per Julio's call — no separate audit flag).
+  - **Submission lock:** on opening "My Timecard", queries `submissions` for a `status = 'final'` row for that employee overlapping the current period (same overlap check the export duplicate-detection already uses). If found, the screen goes view-only — `#mytc-locked-note` is shown and the Add/Edit buttons are hidden.
+  - **Open-punch consistency:** if an employee uses this to add their own missing clock-out, the in-memory `timeLog` cache on that device is updated/closed too, consistent with how the existing supervisor `saveEdit()` keeps memory and DB in sync.
+  - **Roadmap impact:** this took the v41.0 slot that had been earmarked for the per-shift lunch-waive feature — that feature is now pushed to **v42.0** (see updated roadmap section below).
+  - **Files changed:** `index.html` ("My Timecard" button + `#screen-mytc` + `#mytc-edit-modal-bg` markup; version badge). `app.js` (new `submitTimecardPin()`, `openMyTimecard()`, `closeMyTimecard()`, `renderMyTcList()`, `openMyTcAdd()`, `openMyTcEdit()`, `buildMyTcActGrid()`, `toggleMyTcAct()`, `closeMyTcEditModal()`, `saveMyTcEdit()`; new state vars `myTcEmp`/`myTcPeriod`/`myTcPunches`/`myTcLocked`/`myTcEditingDbId`/`myTcAdding`/`myTcEditActs`; backup payload version). No DB migration needed — reuses the existing `manual_entry` column.
+
 
 **Last session date:** June 25, 2026
 **Tasks completed this session:**
@@ -227,7 +241,7 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ## ⏭ Next Session Agenda — Per-shift lunch waive
 
-(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump. v38.0 went to the admin nav reorg, v39.0 to the activity-checklist redesign, v40.0 to the Excel Pack export, and v40.1 to a contained tweak bundle (admin export warning, two bugfixes, quick-set buttons), so this is now slated for **v41.0** when we start.)
+(Version note: originally scoped as v36.3, but v37.0 — manual punch entry — shipped in between, so the lunch arc's numbering is broken. This feature involves a new `punches` column + a clock-out UI change + an approval flow, so by the version rule it's significant → confirm a whole-number bump. v38.0 went to the admin nav reorg, v39.0 to the activity-checklist redesign, v40.0 to the Excel Pack export, v40.1 to a contained tweak bundle (admin export warning, two bugfixes, quick-set buttons), and v41.0 to the "My Timecard" employee self-edit feature, so this is now slated for **v42.0** when we start.)
 
 Automatic lunch deduction (v36.2) is in. Remaining lunch work is the worked-through-lunch case: an employee who skips lunch and leaves early should NOT be docked the 30 min. Design direction agreed with Julio; details to settle at the start.
 
@@ -280,6 +294,7 @@ Relevant code: `paidHours` (add the per-punch waive skip), `dbRowToEntry` (map t
 | Master export review warning + format picker (v40.1) | `openMasterExportConfirm()` → `showMasterReviewWarning()` / `toggleMasterReviewList()` / `closeMasterReviewModal()` / `masterReviewGoNow()` / `masterReviewExportAnyway()` (`#master-review-modal`) → `showMasterFormatModal()` / `closeMasterFormatModal()` (`#master-format-modal`, holds the 📄 PDF / 📦 Excel Pack buttons). Replaces the old shared `chk1`–`chk4` checklist for the admin path; supervisor's checklist/review-gate unaffected. |
 | Quick-set time buttons (v40.1) | `quickSetEditOut(hh,mm)` (Edit Punch — same date as current clock-in) / `quickSetAddTime(fieldId,'today'\|'yesterday',hh,mm)` (Add Manual Punch); button rows `#out-quickset-edit` / `#in-quickset-add` / `#out-quickset-add` in index.html, toggled by `openEditModal()` / `openAddPunchModal()` |
 | Needs-review race guard (v40.1) | `_supLogSeq` in `refreshSupLog()`, `_masterLogSeq` in `refreshMasterLog()` — sequence-number guard so a stale, superseded call can't overwrite a newer one's render |
+| My Timecard — employee self-edit (v41.0) | `submitTimecardPin()` → `openMyTimecard(emp)` / `closeMyTimecard()` / `renderMyTcList()`; edit & add via shared `openMyTcEdit(dbId)` / `openMyTcAdd()` → `saveMyTcEdit()` (`#mytc-edit-modal-bg`, separate from the supervisor/master `#edit-modal-bg`); `buildMyTcActGrid()`/`toggleMyTcAct()`; "My Timecard" button + `#screen-mytc` in index.html; writes `manual_entry=true` (no new flag); period-lock check queries `submissions` for a `final` row overlapping `getPeriodByOffset(0)`
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
 | Version display | `index.html` line ~153 and `app.js` backup payload |
 
@@ -293,4 +308,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 25, 2026 — v40.1_
+_Last updated: June 30, 2026 — v41.0_

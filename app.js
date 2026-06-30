@@ -42,6 +42,14 @@ let activeSup=null;
 let exportRange={from:null,to:null};
 let empModalContext='master';
 let ARCHIVED_JOBSITES=[];
+/* My Timecard (employee self-edit, v41.0) */
+let myTcEmp=null;
+let myTcPeriod=null;
+let myTcPunches=[];
+let myTcLocked=false;
+let myTcEditingDbId=null;
+let myTcAdding=false;
+let myTcEditActs=new Set();
 
 /* ─── Loading UI helpers ─── */
 function setLoading(msg){
@@ -686,6 +694,189 @@ async function submitPin(){
     showNotif('✓',emp.name,`Punched in at ${fmt(now)} — ${site}`,'#1D9E75');
     setTimeout(()=>showCorfixReminder(site),600);
   }
+}
+
+/* ─── My Timecard (employee self-edit, v41.0) ───
+   Employee enters their own PIN to view/correct their punches for the
+   CURRENT pay period only. Once that period has a 'final' submission on
+   record, access closes — same lock supervisors/admin already respect.
+   All self-edits are written with manual_entry=true so they carry the same
+   amber "✎ Manual" badge supervisors already watch for in the logs — no
+   separate flag, per Julio's call. */
+let tcBtnBusy=false;
+async function submitTimecardPin(){
+  if(tcBtnBusy)return;
+  const btn=document.getElementById('timecard-btn');
+  tcBtnBusy=true;if(btn)btn.disabled=true;
+  setTimeout(()=>{tcBtnBusy=false;if(btn)btn.disabled=false;},2500);
+
+  const pin=currentPin;clearPin();
+  const emp=employees.find(e=>e.pin===pin&&e.active);
+  if(!emp){showNotif('✗','PIN not recognised','Please try again','#E24B4A');return}
+  await openMyTimecard(emp);
+}
+
+async function openMyTimecard(emp){
+  myTcEmp=emp;
+  myTcPeriod=getPeriodByOffset(0);
+  document.getElementById('mytc-name').textContent=emp.name+'\u2019s Timecard';
+  const from=myTcPeriod.start,to=myTcPeriod.end;
+  document.getElementById('mytc-period').textContent=
+    `Current pay period: ${from.toLocaleDateString([],{month:'short',day:'numeric'})} – ${to.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+  document.getElementById('mytc-list').innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">Loading…</p>';
+  showScreen('screen-mytc');
+
+  // Locked if this employee already has a FINAL submission overlapping the current period
+  const periodStartStr=toDateStr(from),periodEndStr=toDateStr(to);
+  const {data:subData}=await sb.from('submissions')
+    .select('*')
+    .eq('employee_id',emp.id)
+    .eq('status','final')
+    .lte('period_start',periodEndStr)
+    .gte('period_end',periodStartStr);
+  myTcLocked=!!(subData&&subData.length);
+  document.getElementById('mytc-locked-note').style.display=myTcLocked?'block':'none';
+  document.getElementById('mytc-add-btn').style.display=myTcLocked?'none':'block';
+
+  // Load this employee's punches for the current period straight from the DB
+  // (timeLog only caches open punches, not the full period history)
+  const {data:punchData,error}=await sb.from('punches').select('*')
+    .eq('employee_id',emp.id)
+    .gte('clock_in',from.toISOString())
+    .lte('clock_in',to.toISOString())
+    .order('clock_in',{ascending:false});
+  if(error){
+    document.getElementById('mytc-list').innerHTML='<p style="text-align:center;color:var(--red);padding:20px;font-size:13px;">Could not load your punches — check connection.</p>';
+    return;
+  }
+  myTcPunches=(punchData||[]).map(dbRowToEntry);
+  renderMyTcList();
+}
+
+function closeMyTimecard(){
+  myTcEmp=null;myTcPunches=[];myTcPeriod=null;myTcLocked=false;
+  showScreen('screen-kiosk');
+}
+
+function renderMyTcList(){
+  const list=document.getElementById('mytc-list');
+  if(!myTcPunches.length){
+    list.innerHTML='<p style="text-align:center;color:var(--txt2);padding:24px 10px;font-size:13px;">No punches recorded yet this pay period.</p>';
+    return;
+  }
+  list.innerHTML=myTcPunches.map(e=>{
+    const stillIn=!e.out;
+    const badges=[
+      stillIn?'<span class="badge b-in">In</span>':'',
+      e.manualEntry?'<span class="badge" style="background:var(--amber-l,#3a2e10);color:var(--amber,#e0a838);">✎ Manual</span>':'',
+      e.autoClocked?'<span class="badge" style="background:#3a1f1f;color:#e08585;">Auto-clocked</span>':''
+    ].filter(Boolean).join(' ');
+    return `<div class="card" style="margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+        <div>
+          <div style="font-weight:600;font-size:13px;">${fmtDt(e.in)}</div>
+          <div style="font-size:12px;color:var(--txt2);margin-top:2px;">${e.jobsite||'—'}</div>
+          <div style="font-size:12px;color:var(--txt2);margin-top:2px;">
+            In: ${fmt(e.in)} &nbsp;→&nbsp; Out: ${e.out?fmt(e.out):'—'}
+          </div>
+          ${(e.activity&&e.activity.length)?`<div style="font-size:11px;color:var(--txt3);margin-top:4px;">${e.activity.join(', ')}</div>`:''}
+        </div>
+        <div style="text-align:right;">${badges}</div>
+      </div>
+      ${myTcLocked?'':`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`}
+    </div>`;
+  }).join('');
+}
+
+/* Add a missed punch — simplified flow, scoped to self + current period only */
+function openMyTcAdd(){
+  if(myTcLocked)return;
+  myTcAdding=true;myTcEditingDbId=null;myTcEditActs=new Set();
+  document.getElementById('mytc-edit-title').textContent='Add a missed punch';
+  document.getElementById('mytc-edit-in').value='';
+  document.getElementById('mytc-edit-out').value='';
+  document.getElementById('mytc-edit-jobsite').innerHTML=JOBSITES.map(j=>`<option>${j}</option>`).join('');
+  buildMyTcActGrid();
+  document.getElementById('mytc-edit-err').textContent='';
+  document.getElementById('mytc-edit-modal-bg').style.display='flex';
+}
+
+function openMyTcEdit(dbId){
+  if(myTcLocked)return;
+  const e=myTcPunches.find(p=>String(p.dbId)===String(dbId));
+  if(!e)return;
+  myTcAdding=false;myTcEditingDbId=dbId;myTcEditActs=new Set(e.activity||[]);
+  document.getElementById('mytc-edit-title').textContent='Edit my punch';
+  document.getElementById('mytc-edit-in').value=toLocal(e.in);
+  document.getElementById('mytc-edit-out').value=e.out?toLocal(e.out):'';
+  document.getElementById('mytc-edit-jobsite').innerHTML=JOBSITES.map(j=>`<option${e.jobsite===j?' selected':''}>${j}</option>`).join('');
+  buildMyTcActGrid();
+  document.getElementById('mytc-edit-err').textContent='';
+  document.getElementById('mytc-edit-modal-bg').style.display='flex';
+}
+
+function buildMyTcActGrid(){
+  document.getElementById('mytc-edit-act-grid').innerHTML=ACTIVITIES.map(a=>
+    `<button type="button" class="act-btn${myTcEditActs.has(a.name)?' sel':''}" id="mtcact_${a.name.replace(/\s/g,'_')}" onclick="toggleMyTcAct('${a.name.replace(/'/g,"\\'")}')">${a.name}</button>`
+  ).join('');
+}
+function toggleMyTcAct(a){
+  if(myTcEditActs.has(a))myTcEditActs.delete(a);else myTcEditActs.add(a);
+  const el=document.getElementById('mtcact_'+a.replace(/\s/g,'_'));
+  if(el)el.classList.toggle('sel',myTcEditActs.has(a));
+}
+function closeMyTcEditModal(){
+  document.getElementById('mytc-edit-modal-bg').style.display='none';
+  myTcEditingDbId=null;myTcAdding=false;
+}
+
+async function saveMyTcEdit(){
+  const err=document.getElementById('mytc-edit-err');
+  const inV=document.getElementById('mytc-edit-in').value;
+  const outV=document.getElementById('mytc-edit-out').value;
+  if(!inV){err.textContent='Clock in time is required.';return}
+  const newIn=new Date(inV);
+  const newOut=outV?new Date(outV):null;
+  if(newOut&&newOut<=newIn){err.textContent='Clock out must be after clock in.';return}
+  // Guardrail: stays within the current pay period only
+  if(newIn<myTcPeriod.start||newIn>myTcPeriod.end){err.textContent='Clock in must fall within the current pay period.';return}
+  if(newOut&&(newOut<myTcPeriod.start||newOut>myTcPeriod.end)){err.textContent='Clock out must fall within the current pay period.';return}
+  const jobsite=document.getElementById('mytc-edit-jobsite').value;
+  const acts=[...myTcEditActs];
+  const emp=myTcEmp;
+
+  if(myTcAdding){
+    const payload={
+      employee_id:emp.id,employee_name:emp.name,department:emp.dept,
+      jobsite,clock_in:newIn.toISOString(),
+      clock_out:newOut?newOut.toISOString():null,
+      activities:acts,auto_clocked:false,manual_entry:true
+    };
+    const {error}=await sb.from('punches').insert(payload);
+    if(error){err.textContent='DB error: '+error.message;return}
+    closeMyTcEditModal();
+    showNotif('✓','Punch added','Saved to your timecard','#2f7d31',2600);
+  } else {
+    const e=myTcPunches.find(p=>String(p.dbId)===String(myTcEditingDbId));
+    if(!e){err.textContent='Punch not found — reopen and try again.';return}
+    const wasAuto=e.autoClocked;
+    const editedAfterAuto=wasAuto&&!!newOut;
+    const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true};
+    upd.clock_out=newOut?newOut.toISOString():null;
+    if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
+    const {error}=await sb.from('punches').update(upd).eq('id',e.dbId);
+    if(error){err.textContent='DB error: '+error.message;return}
+    // Keep the in-memory open-punch cache consistent for this device too
+    const memEntry=timeLog.find(l=>l.dbId===e.dbId);
+    if(memEntry){
+      memEntry.in=newIn;memEntry.out=newOut;memEntry.jobsite=jobsite;memEntry.activity=acts;memEntry.manualEntry=true;
+      if(editedAfterAuto){memEntry.autoClocked=false;memEntry.editedAfterAuto=true;}
+      if(newOut){const idx=timeLog.indexOf(memEntry);if(idx>=0)timeLog.splice(idx,1);}
+    }
+    closeMyTcEditModal();
+    showNotif('✓','Punch updated','Saved to your timecard','#2f7d31',2600);
+  }
+  await openMyTimecard(emp);
 }
 
 /* ─── Activity screen (v39.0 — full-screen checklist, replaces v36–v38 dropdown) ─── */
