@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v42.0
+**Current Version:** v42.1
 **Last Updated:** June 30, 2026
 
 ---
@@ -84,6 +84,10 @@ No separate supervisors table.
 
 **Last session date:** June 30, 2026
 **Tasks completed this session:**
+- **v42.1 — Lunch waive toggle moved to top of activities list:** Contained UI tweak. The "I worked through lunch" toggle card (`#lunch-waive-row`) now sits *above* `#act-list` instead of below it, so it's the first thing seen on the clock-out screen. `margin-top:14px` → `margin-bottom:14px` for correct spacing above the list. No JS change — the custom scroll-rail math (`updateActScroll`) reads total page scroll height regardless of element order, so it's unaffected. `index.html` only (+ this doc).
+
+**Last session date:** June 30, 2026
+**Tasks completed this session:**
 - **v42.0 — Per-shift lunch waive (worked-through-lunch request + supervisor approval):** Closes the last piece of the lunch arc. Automatic lunch deduction (v36.2) docks 30 min from any shift over 5h; this lets an employee who genuinely skipped lunch and left early request that the deduction be waived — but as a *request the supervisor approves*, never an auto-apply, so there's no standing daily incentive for 50–100 people to claim free time.
   - **Design (all confirmed with Julio before build, one question at a time):**
     1. **Two flags, not one.** `lunch_waive_requested` = the employee's ask; `lunch_waived` = the supervisor's decision. Request ≠ approval.
@@ -94,7 +98,7 @@ No separate supervisors table.
     6. **Needs-review filter + Needs Review tile** now catch pending waives in addition to auto-clocks, so "Review these now" lands on a combined list and the tile count matches.
   - **DB migration (Julio ran before build):** `ALTER TABLE punches ADD COLUMN lunch_waive_requested boolean NOT NULL DEFAULT false;` and `ADD COLUMN lunch_waived boolean;` (nullable, no default). Existing rows: requested=false, waived=null — so none are caught by the gate. No backfill.
   - **Engine:** `paidHours()` skips the lunch deduction only when `entry.lunchWaived===true` (explicit `===`, not truthiness — null/false both keep the deduction). New `isPendingWaive(entry)` helper (`requested===true && waived==null`) is the single source of truth for the gate, filter, and tile. `dbRowToEntry()` maps both columns (`lunchWaiveRequested`, `lunchWaived`).
-  - **Capture:** new `#lunch-waive-row` toggle card on `#screen-activity` (below the activity list, visually set apart); `lunchWaiveRequested` global + `toggleLunchWaive()`; reset in `showActivityScreen()`; written in `confirmClockOut()` alongside the activities/clock-out update.
+  - **Capture:** new `#lunch-waive-row` toggle card on `#screen-activity` (at the top of the activities list, above `#act-list`, visually set apart); `lunchWaiveRequested` global + `toggleLunchWaive()`; reset in `showActivityScreen()`; written in `confirmClockOut()` alongside the activities/clock-out update.
   - **Approval UI:** `#edit-waive-wrap` block in the shared edit modal, shown only when the punch carries a request (`setupEditWaive(entry)`); Approve/Deny buttons (`setEditWaive(bool)` → `_editWaiveDecision`, rendered by `_renderEditWaive()`); persisted in `saveEdit()` only when a decision was made this session (`_editWaiveDecision!==null`). Hidden in Add-Punch mode.
   - **Surfacing:** status chips (🍴 Waive pending / Waived / Waive denied) added to both supervisor and master log rows; supervisor per-employee summary gained a pending-waive count; supervisor needs-review query (`refreshSupLog` `review` branch) and Needs Review tile (`refreshSupLive`) extended with an `.or(...)` / second count for pending waives.
   - **Export gate:** `openExportConfirm()` now collects `pendingWaives` alongside `needsReview` and blocks if either is non-empty. `showReviewGate(autoList, waiveList)` rewritten with two labeled sections; waives grouped by employee with an "Approve all" button → `approveAllWaivesFor(empId)` (bulk `lunch_waived=true`, heals memory, then re-runs `openExportConfirm()` so the gate clears or advances). Master export path remains intentionally ungated (badges only).
@@ -314,7 +318,7 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | Supervisor permission gating | `refreshSupEmps()` / `openEmpModal(id,ctx)` / `saveEmployee()` — `restricted` flag; `#emp-sup-pass-field`, `#emp-restrict-note` in index.html |
 | Live tile navigation | `goToSupReport(which)` → `setSupPeriod` + `s-filter-flags` + `refreshSupLog` |
 | Submit review gate | `openExportConfirm()` (gate block) → `showReviewGate(autoList,waiveList)` / `closeReviewGate()` / `reviewGateGoNow()`; `#review-gate-bg` (two sections: `#review-gate-auto-section`/`#review-gate-list` + `#review-gate-waive-section`/`#review-gate-waive-list`) in index.html. v42.0: gate now also blocks on pending lunch waives, with bulk `approveAllWaivesFor(empId)`. Master path is intentionally not blocking — see "Master export review warning (v40.1)" row below |
-| Lunch waive — capture (v42.0) | `#lunch-waive-row`/`#lunch-waive-chk` toggle on `#screen-activity` in index.html; `lunchWaiveRequested` global + `toggleLunchWaive()`; reset in `showActivityScreen()`; written in `confirmClockOut()` (`lunch_waive_requested` column) |
+| Lunch waive — capture (v42.0) | `#lunch-waive-row`/`#lunch-waive-chk` toggle at top of `#screen-activity` (above `#act-list`) in index.html; `lunchWaiveRequested` global + `toggleLunchWaive()`; reset in `showActivityScreen()`; written in `confirmClockOut()` (`lunch_waive_requested` column) |
 | Lunch waive — approval (v42.0) | edit modal `#edit-waive-wrap` (Approve/Deny → `setEditWaive(bool)` / `_renderEditWaive()` / `setupEditWaive(entry)`, `_editWaiveDecision` global); persisted in `saveEdit()` when `_editWaiveDecision!==null` (`lunch_waived` column); hidden in Add-Punch mode. Bulk approve from the gate: `approveAllWaivesFor(empId)` (`_reviewGateWaives`) |
 | Lunch waive — engine/surfacing (v42.0) | `paidHours()` skips deduction when `lunchWaived===true`; `isPendingWaive(entry)` = `requested===true && waived==null` (single source for gate/filter/tile); `dbRowToEntry()` maps `lunchWaiveRequested`/`lunchWaived`; supervisor `review` filter `.or(...)` + `refreshSupLive` second count include pending waives; 🍴 status chips in `refreshSupLog`/`refreshMasterLog` |
 | Edit punch (existing) | `openEditModal(ref)` / `saveEdit()` / `confirmDeletePunch()` / `deletePunch()`; `#edit-modal-bg` in index.html |
@@ -341,4 +345,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 30, 2026 — v42.0_
+_Last updated: June 30, 2026 — v42.1_
