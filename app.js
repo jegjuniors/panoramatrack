@@ -768,13 +768,13 @@ function renderMyTcList(){
     const stillIn=!e.out;
     const badges=[
       stillIn?'<span class="badge b-in">In</span>':'',
-      e.manualEntry?'<span class="badge" style="background:var(--amber-l,#3a2e10);color:var(--amber,#e0a838);">✎ Manual</span>':'',
+      e.manualEntry?'<span class="badge b-amber">✎ Manual</span>':'',
       e.autoClocked?'<span class="badge" style="background:#3a1f1f;color:#e08585;">Auto-clocked</span>':''
     ].filter(Boolean).join(' ');
     return `<div class="card" style="margin-bottom:10px;">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
         <div>
-          <div style="font-weight:600;font-size:13px;">${fmtDt(e.in)}</div>
+          <div style="font-weight:600;font-size:13px;color:var(--txt);">${fmtDt(e.in)}</div>
           <div style="font-size:12px;color:var(--txt2);margin-top:2px;">${e.jobsite||'—'}</div>
           <div style="font-size:12px;color:var(--txt2);margin-top:2px;">
             In: ${fmt(e.in)} &nbsp;→&nbsp; Out: ${e.out?fmt(e.out):'—'}
