@@ -1,7 +1,7 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v42.2
-**Last Updated:** June 30, 2026
+**Current Version:** v43.0
+**Last Updated:** July 1, 2026
 
 ---
 
@@ -82,6 +82,17 @@ No separate supervisors table.
 ---
 
 ## 🚧 What Was Last Being Worked On
+
+**Last session date:** July 1, 2026
+**Tasks completed this session:**
+- **v43.0 — UI: employee lists → accordion (mobile fix) + activities alphabetical:** Batch of three UI changes agreed one at a time before build.
+  - **Employee lists converted to accordion (Admin + Supervisor panels).** The old 5-column tables overflowed on mobile — the Deactivate/Reset-PIN action buttons in the last column were pushed off-screen with no horizontal scroll. Both panels now use the existing punch-log accordion pattern (`emp-card` / `emp-card-header` / `emp-card-body` + `toggleEmpCard()`). Collapsed header shows **Name + PIN**; expanded body shows Dept, assigned jobsites (supervisors only, Admin panel), and the action buttons. Removed the `<table>` markup for both; new containers `#s-emp-accordion` (supervisor) and `#m-emp-accordion` (admin). Rewrote `refreshSupEmps()` and `refreshMasterEmps()`.
+  - **Deactivate → "Remove" with hide-on-remove (Option B).** Chose to keep the DB `active` flag (no true DELETE — protects historical punch rows that reference `employee_id`) but change the UX so removed employees don't clutter lists. **Supervisor panel:** shows active employees only. **Admin panel:** shows active employees first, then a "Removed employees" section with those cards greyed-out (`opacity:.55`) and an **Activate** button to bring them back — so Admin retains a re-activation path with no DB surgery. The button on active employees is renamed **Remove** (was "Deactivate"); `toggleEmpActive()` unchanged in logic (sets `active=false/true`), now also refreshes the supervisor accordion if present. No DB migration.
+  - **Activities listed alphabetically (Option A — everywhere).** Was sorted by `sort_order`. Now sorted by `name` (`localeCompare`) in: the admin Activities panel (`refreshActivitiesPanel`), the clock-out activity picker (`renderActList`), the supervisor/master edit-punch grid (`openEditModal`'s `edit-act-grid`), and the My Timecard grid (`buildMyTcActGrid`). Because ordering is now alphabetical, the admin panel's **↑/↓ reorder buttons and the position-number column were removed**; `moveActivity()` is now dead code (function left in place, no callers) and the `sort_order` column is retained but ignored for display (`addActivity` still stamps one — harmless). No DB migration.
+  - **Files changed:** `index.html` (both employee tables → accordion `<div>`s; version badge → v43.0). `app.js` (`refreshSupEmps`, `refreshMasterEmps`, `toggleEmpActive`, `refreshActivitiesPanel`, `renderActList`, `buildMyTcActGrid`, `openEditModal` grid; backup payload → v43.0).
+  - **Note:** the earlier v42.3 dark-mode settings-label fix (below) is already folded into this same delivery.
+
+- **v42.3 — Bugfix: settings panel checkbox labels invisible in dark mode:** The three `<label>` elements in the admin Settings panel (Punch-time rounding, Paid break-in-lieu, Unpaid lunch deduction) had `font-weight:600` but no `color`, so they fell back to browser-default black — invisible against the dark background. Fixed by adding `color:var(--txt)` to all three label elements. `index.html` only.
 
 **Last session date:** June 30, 2026
 **Tasks completed this session:**

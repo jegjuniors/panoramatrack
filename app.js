@@ -828,7 +828,7 @@ function openMyTcEdit(dbId){
 }
 
 function buildMyTcActGrid(){
-  document.getElementById('mytc-edit-act-grid').innerHTML=ACTIVITIES.map(a=>
+  document.getElementById('mytc-edit-act-grid').innerHTML=[...ACTIVITIES].sort((a,b)=>a.name.localeCompare(b.name)).map(a=>
     `<button type="button" class="act-btn${myTcEditActs.has(a.name)?' sel':''}" id="mtcact_${a.name.replace(/\s/g,'_')}" onclick="toggleMyTcAct('${a.name.replace(/'/g,"\\'")}')">${a.name}</button>`
   ).join('');
 }
@@ -907,7 +907,9 @@ function showActivityScreen(emp){
 
 function renderActList(){
   const list=document.getElementById('act-list');
-  list.innerHTML=ACTIVITIES.map(a=>`
+  // v43.0: activities shown alphabetically (was sort_order)
+  const sorted=[...ACTIVITIES].sort((a,b)=>a.name.localeCompare(b.name));
+  list.innerHTML=sorted.map(a=>`
     <div class="act-list-item${selectedActs.has(a.name)?' checked':''}" id="aitem_${a.id}" onclick="toggleAct('${a.name.replace(/'/g,"\'")}',${a.id})">
       <input type="checkbox" ${selectedActs.has(a.name)?'checked':''} onclick="event.stopPropagation()" onchange="toggleAct('${a.name.replace(/'/g,"\'")}',${a.id})" style="pointer-events:none;"/>
       <span>${a.name}</span>
@@ -1407,20 +1409,33 @@ async function saveSettings(){
 
 /* ─── Supervisor: Employees ─── */
 function refreshSupEmps(){
-  const tbody=document.getElementById('s-emp-table');
+  // v43.0: accordion (Name + PIN in header, rest in body); active employees only.
+  const container=document.getElementById('s-emp-accordion');
   const myId=activeSup&&activeSup.id;
-  tbody.innerHTML=employees.map(e=>{
+  const actives=employees.filter(e=>e.active);
+  if(!actives.length){container.innerHTML='<p style="color:var(--txt2);text-align:center;padding:24px 0;font-size:13px;">No active employees</p>';return}
+  container.innerHTML=actives.map(e=>{
     const isOtherSup=e.dept==='Supervisor'&&e.id!==myId;
-    return `<tr>
-    <td>${e.name}</td>
-    <td><code style="font-size:12px;">${e.pin}</code></td>
-    <td>${e.dept}</td>
-    <td><span class="badge ${e.active?'b-in':'b-out'}">${e.active?'Active':'Inactive'}</span></td>
-    <td style="white-space:nowrap;">
-      <button class="btn-sm" onclick="openEmpModal(${e.id},'sup')" style="margin-right:4px;">Edit</button>
-      ${isOtherSup?'':`<button class="btn-sm" onclick="openPinResetModal(${e.id})">Reset PIN</button>`}
-    </td>
-  </tr>`}).join('');
+    const cardId=`s-emp-card-${e.id}`;
+    return `<div class="emp-card">
+      <div class="emp-card-header" onclick="toggleEmpCard('${cardId}')">
+        <div>
+          <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${e.name}</p>
+          <p class="emp-summary">PIN: <code style="font-size:12px;">${e.pin}</code></p>
+        </div>
+        <span style="font-size:18px;color:var(--txt3);" id="${cardId}-chevron">▸</span>
+      </div>
+      <div class="emp-card-body" id="${cardId}">
+        <div style="padding:12px 14px;">
+          <p style="font-size:13px;color:var(--txt2);margin:0 0 10px;">Dept: <span style="color:var(--txt);">${e.dept}</span></p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="btn-sm" onclick="openEmpModal(${e.id},'sup')">Edit</button>
+            ${isOtherSup?'':`<button class="btn-sm" onclick="openPinResetModal(${e.id})">Reset PIN</button>`}
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 /* ─── PIN Reset modal ─── */
@@ -1517,13 +1532,12 @@ function refreshActivitiesPanel(){
     list.innerHTML='<p style="color:var(--txt2);font-size:13px;text-align:center;padding:20px 0;">No activities yet — add one below.</p>';
     return;
   }
-  const activeOnes=ALL_ACTIVITIES.filter(a=>a.active);
-  list.innerHTML=ALL_ACTIVITIES.map((a,i)=>{
+  // v43.0: activities listed alphabetically (was sort_order); ↑/↓ reorder removed.
+  const sorted=[...ALL_ACTIVITIES].sort((a,b)=>a.name.localeCompare(b.name));
+  list.innerHTML=sorted.map(a=>{
     const isActive=a.active;
-    const activeIdx=activeOnes.indexOf(a);
     return `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border:0.5px solid var(--bdr);border-radius:var(--radius);margin-bottom:7px;background:${isActive?'var(--bg2)':'var(--bg)'};opacity:${isActive?'1':'0.55'};">
       <div style="display:flex;align-items:center;gap:10px;">
-        <span style="color:var(--txt3);font-size:12px;width:20px;text-align:right;">${isActive?activeIdx+1:'—'}</span>
         <div>
           <p style="font-size:13px;font-weight:500;color:${isActive?'var(--txt)':'var(--txt2)'};margin:0;">${a.name}</p>
           <p style="font-size:10px;color:var(--txt3);margin:0;">${a.code?'Code: '+a.code:'No code'}${isActive?'':' · Inactive'}</p>
@@ -1532,8 +1546,6 @@ function refreshActivitiesPanel(){
       <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;">
         <button class="btn-sm" onclick="openEditActivityModal(${a.id})">Edit</button>
         ${isActive?`
-        <button class="btn-sm" onclick="moveActivity(${a.id},-1)" ${activeIdx===0?'disabled style="opacity:.3;"':''}>↑</button>
-        <button class="btn-sm" onclick="moveActivity(${a.id},1)" ${activeIdx===activeOnes.length-1?'disabled style="opacity:.3;"':''}>↓</button>
         <button class="btn-sm danger" onclick="toggleActivityActive(${a.id},false,'${a.name.replace(/'/g,"\'")}')">Deactivate</button>
         `:`<button class="btn-sm primary" onclick="toggleActivityActive(${a.id},true,'${a.name.replace(/'/g,"\'")}')">Activate</button>`}
       </div>
@@ -1760,20 +1772,40 @@ function rebuildDeptDropdown(){
 
 /* ─── Master: Employees ─── */
 function refreshMasterEmps(){
-  document.getElementById('m-emp-table').innerHTML=employees.map(e=>{
+  // v43.0: accordion (Name + PIN in header, rest in body). Active employees shown first;
+  // removed (active=false) employees shown greyed-out below with an Activate button.
+  const container=document.getElementById('m-emp-accordion');
+  const renderCard=(e)=>{
     const isSup=e.dept==='Supervisor';
     const sites=(e.supervisorJobsites||[]).map(j=>`<span class="badge b-blue" style="font-size:10px;">${j}</span>`).join(' ');
-    return `<tr>
-      <td>${e.name}${isSup?'<span class="badge b-amber" style="font-size:10px;margin-left:4px;">SUP</span>':''}${!e.active?'<span style="font-size:10px;color:var(--txt3);margin-left:4px;">(inactive)</span>':''}</td>
-      <td><code style="font-size:12px;">${e.pin}</code></td>
-      <td>${e.dept}</td>
-      <td style="max-width:160px;">${isSup?(sites||'<span style="color:var(--txt3);font-size:11px;">None</span>'):'—'}</td>
-      <td style="white-space:nowrap;">
-        <button class="btn-sm" onclick="openEmpModal(${e.id},'master')" style="margin-right:4px;">Edit</button>
-        <button class="btn-sm ${e.active?'danger':'primary'}" onclick="toggleEmpActive(${e.id})">${e.active?'Deactivate':'Activate'}</button>
-      </td>
-    </tr>`;
-  }).join('');
+    const cardId=`m-emp-card-${e.id}`;
+    return `<div class="emp-card" style="${e.active?'':'opacity:.55;'}">
+      <div class="emp-card-header" onclick="toggleEmpCard('${cardId}')">
+        <div>
+          <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${e.name}${isSup?'<span class="badge b-amber" style="font-size:10px;margin-left:4px;">SUP</span>':''}${!e.active?'<span style="font-size:10px;color:var(--txt3);margin-left:4px;">(removed)</span>':''}</p>
+          <p class="emp-summary">PIN: <code style="font-size:12px;">${e.pin}</code></p>
+        </div>
+        <span style="font-size:18px;color:var(--txt3);" id="${cardId}-chevron">▸</span>
+      </div>
+      <div class="emp-card-body" id="${cardId}">
+        <div style="padding:12px 14px;">
+          <p style="font-size:13px;color:var(--txt2);margin:0 0 8px;">Dept: <span style="color:var(--txt);">${e.dept}</span></p>
+          ${isSup?`<p style="font-size:13px;color:var(--txt2);margin:0 0 10px;">Assigned jobsites: ${sites||'<span style="color:var(--txt3);">None</span>'}</p>`:''}
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="btn-sm" onclick="openEmpModal(${e.id},'master')">Edit</button>
+            <button class="btn-sm ${e.active?'danger':'primary'}" onclick="toggleEmpActive(${e.id})">${e.active?'Remove':'Activate'}</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  };
+  const actives=employees.filter(e=>e.active);
+  const removed=employees.filter(e=>!e.active);
+  let html=actives.map(renderCard).join('');
+  if(removed.length){
+    html+=`<p style="font-size:11px;color:var(--txt3);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.4px;">Removed employees</p>`+removed.map(renderCard).join('');
+  }
+  container.innerHTML=html||'<p style="color:var(--txt2);text-align:center;padding:24px 0;font-size:13px;">No employees yet</p>';
 }
 
 /* ─── Master: Report ─── */
@@ -2441,7 +2473,7 @@ function setEditWaive(approve){
   _renderEditWaive(approve);
 }
 function buildEditActGrid(){
-  document.getElementById('edit-act-grid').innerHTML=ACTIVITIES.map(a=>`<button class="act-btn${editActs.has(a.name)?' sel':''}" id="eact_${a.name.replace(/\s/g,'_')}" onclick="toggleEditAct('${a.name}')">${a.name}</button>`).join('');
+  document.getElementById('edit-act-grid').innerHTML=[...ACTIVITIES].sort((a,b)=>a.name.localeCompare(b.name)).map(a=>`<button class="act-btn${editActs.has(a.name)?' sel':''}" id="eact_${a.name.replace(/\s/g,'_')}" onclick="toggleEditAct('${a.name}')">${a.name}</button>`).join('');
 }
 function toggleEditAct(a){
   if(editActs.has(a))editActs.delete(a);else editActs.add(a);
@@ -2653,6 +2685,7 @@ async function toggleEmpActive(id){
     id:e.id,name:e.name,password:e.supervisorPassword,jobsites:e.supervisorJobsites
   }));
   refreshMasterEmps();
+  if(document.getElementById('s-emp-accordion'))refreshSupEmps();
 }
 
 /* ─── Export ─── */
@@ -3388,7 +3421,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v42.2',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v43.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
