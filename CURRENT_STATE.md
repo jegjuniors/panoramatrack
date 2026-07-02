@@ -1,7 +1,47 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v43.0
-**Last Updated:** July 1, 2026
+**Current Version:** v43.0 *(v44.0 in progress — 3-tier submission flow, Build 1 of 3 delivered; version badge stays v43.0 until Build 3 stamps v44.0)*
+**Last Updated:** July 2, 2026
+
+---
+
+## 🚧 v44.0 IN PROGRESS — 3-Tier Submission Flow (Employee → Supervisor → Admin)
+
+**Being built across 3 sequential deploys, all landing as v44.0. Julio deploys after each build; the app stays fully working between builds. The version badge/backup-payload string stays v43.0 until Build 3.**
+
+**The new flow:** Employee reviews their own punches and **submits** their timecard → Supervisor reviews per-employee and does a single **site-wide submit** (only covers already-submitted employees; stragglers stay open) → Admin/GM sees per-site submission status and does the **final export** from the Submissions panel. Supervisors no longer need to export/email PDFs — the GM does it from the office. Supervisor PDF export is demoted to a preview tool.
+
+**Data model (migration already run by Julio):** new `pt_timecard_status` table — one row per employee per pay period, `stage` column (`open → emp_submitted → sup_submitted → exported`), additive timestamps, unique `(employee_id, period_start)`. **No row = 'open'** (no backfill). `employee_id` is `bigint` (matches `employees.id`).
+```sql
+CREATE TABLE pt_timecard_status (
+  id               bigint generated always as identity primary key,
+  employee_id      bigint not null,
+  period_start     date not null,
+  period_end       date not null,
+  stage            text not null default 'open',
+  emp_submitted_at timestamptz,
+  sup_submitted_at timestamptz,
+  exported_at      timestamptz,
+  jobsite          text,
+  updated_at       timestamptz not null default now(),
+  unique (employee_id, period_start)
+);
+```
+
+**Locked design decisions (all confirmed with Julio):**
+- **Employee submit:** button lives at the **top of the My Timecard modal**; always available. Caution warning if submitting **before** period end; clean submit **after**. **Auto-clocked punches block** submission → kicked back to the modal to fix via Edit. Employee can **pull back** their own submission — but **only while the supervisor hasn't submitted** (stage still `emp_submitted`). Post-submit punches don't require re-submit → supervisor gets an out-of-submission flag.
+- **Editing while submitted:** at `emp_submitted`, Add/Edit are disabled — the employee must **pull back first** (makes "submitted" a real handoff state). Hard-locked once `sup_submitted`.
+- **My Timecard lock rework:** the old view-only lock keyed off a `final` row in `submissions`; it now keys off **`stage = sup_submitted`** (supervisor submit), not the old export concept.
+- **Supervisor:** reviews per-employee (flag/fix), submits **site-wide** in one action; submits only already-submitted employees, stragglers stay open for a later pass. **Color-coded per-employee submission status** in the time log (so they don't submit too early). Uses **Option A** — one extra `pt_timecard_status` query per log refresh, mapped by empId (simplest, always fresh). PDF export demoted to a **preview/preliminary** tool (relabeled).
+- **Admin Submissions panel (rewritten):** jobsite **accordion**, header shows **"X of Y employees submitted"**, expand → employee rows (name, submission checkmark, total hours, **failsafe flags** so the admin can resolve/override if a supervisor bypasses or can't submit). Total hours computed **live** via `paidHours`. **Export buttons: per-jobsite** on each accordion header **+ all-sites** at the top (current period). The old per-period submissions list UI is **replaced**. Report panel stays the ad-hoc filter/export tool.
+- **`submissions` table stays** — still used by the supervisor preview-export's duplicate detection. `pt_timecard_status` is separate.
+
+**Build status:**
+- ✅ **Build 1 of 3 (DELIVERED) — Data layer + Employee side.** See task log entry below.
+- ⏳ **Build 2 of 3 — Supervisor side:** per-employee status colors in the time log (Option A query), site-wide submit action, PDF export relabel to preview.
+- ⏳ **Build 3 of 3 — Admin side:** reworked Submissions panel (jobsite accordions, X-of-Y headers, employee rows + failsafe flags, per-site + all-sites export). **This build stamps the version badge + backup payload to v44.0.**
+
+**Bank Hours** (employee requests to bank/draw hours over 88/period) was discussed and deliberately **shelved to a future feature** — not part of this v44.0 arc.
 
 ---
 
@@ -83,8 +123,32 @@ No separate supervisors table.
 
 ## 🚧 What Was Last Being Worked On
 
-**Last session date:** July 1, 2026
+**Last session date:** July 2, 2026
 **Tasks completed this session:**
+- **v44.0 Build 1 of 3 — Data layer + Employee submission side (My Timecard).** First slice of the 3-tier submission flow (see the "v44.0 IN PROGRESS" section at the top of this doc for the full design). Version badge/backup-payload intentionally **left at v43.0** — Build 3 stamps v44.0.
+  - **Data layer (`app.js`) — the single source of truth for the whole flow.** New `pt_timecard_status` helpers near the engine helpers (just after `isPendingWaive`):
+    - `TC_STAGE` constant (`OPEN/EMP/SUP/EXPORTED` → the string values) + `TC_STAGE_RANK` (0–3, for at-or-past comparisons).
+    - `getTimecardStatus(empId, periodStart)` → one employee's status row for a period (`maybeSingle`); `null` = open.
+    - `getAllStatusForPeriod(periodStart)` → all rows for a period as a `{empId: row}` map (for Build 2 supervisor colors + Build 3 admin panel).
+    - `setTimecardStage(empId, period, stage, jobsite)` → upsert on `(employee_id, period_start)`, stamps the matching `*_submitted_at` / `exported_at` timestamp. Returns `{ok, error}`.
+    - `stageOf(row)` (null row → `'open'`), `stageAtLeast(stage, target)`.
+    - `isOutOfSubmission(entry, statusRow)` → true if a punch's clock-in is newer than `emp_submitted_at` while stage ≥ `emp_submitted` (the "worked Saturday after submitting Friday" supervisor flag; detected at query time, no extra column). **Wired into UI in Build 2.**
+    - `myTcRunningHours(punches)` → `{hours, pendingWaiveCount}`. Sums `paidHours` over **completed** punches only (skips still-in), and **optimistically treats a pending lunch waive as approved** (temporarily flips `lunchWaived` for the calc, then restores — never mutates the real record). Approved/denied waives already flow through `paidHours` normally.
+  - **My Timecard — running-hours total (`#mytc-total`).** New `renderMyTcTotal()` shows "Hours accumulated this period" using `myTcRunningHours`, with a small disclaimer line: "Excludes N punches still clocked in." and/or "Includes N pending lunch waives — final hours may be lower if your supervisor denies…". Uses the rounding/deduction engine (via `paidHours`), excludes active punches, includes pending waives optimistically — exactly per Julio's spec.
+  - **My Timecard — submit / pull-back bar (`#mytc-submit-bar`, at the very top).** New `renderMyTcSubmitBar()` renders one of three states off the stage:
+    - **open** → green "Submit my timecard →" button.
+    - **emp_submitted** → green "✓ Timecard submitted" panel with a **"Pull back"** button.
+    - **sup_submitted+** → grey "✓ Submitted & locked" status, no actions.
+    - `submitMyTimecard()` — **auto-clock gate** (blocks + alert pointing them to Edit the offending punch(es); does NOT proceed); then a **before-period-end caution** via `showCustomConfirm` ("Submit before the period ends?") vs. a **clean submit after**; writes `stage='emp_submitted'` (with the most-recent punch's jobsite for admin grouping), then reloads the modal. Guarded against double-tap (`myTcBusy`).
+    - `retractMyTimecard()` — re-checks the DB stage first (in case the supervisor just submitted → "Too late to pull back"), else writes `stage='open'` and reloads.
+  - **My Timecard — lock rework.** `openMyTimecard()` no longer checks `submissions` for a `final` row. It now loads the stage via `getTimecardStatus`:
+    - `myTcLocked` = stage ≥ `sup_submitted` (hard view-only; `#mytc-locked-note` shown, Add hidden).
+    - `myTcEditable` = stage is exactly `open` (new flag). At `emp_submitted`, Add/Edit are **disabled** — a hint line tells the employee to pull back first (makes "submitted" a real handoff). `openMyTcAdd()` / `openMyTcEdit()` / the per-row Edit button now gate on `myTcEditable` (was `myTcLocked`).
+  - **State vars added:** `TC_STAGE` / `TC_STAGE_RANK` (consts), `myTcStatus`, `myTcBusy`, `myTcEditable`. All reset in `closeMyTimecard()`.
+  - **What Build 1 does NOT do yet (comes in Builds 2–3):** supervisors/admins can't yet *act* on submissions — no status colors, no site-submit, no admin panel rework. An employee submitting today simply writes a `pt_timecard_status` row and gets the submitted/locked UX; nothing downstream breaks. `isOutOfSubmission` is defined but not yet surfaced (Build 2).
+  - **Files changed:** `app.js` (all the above), `index.html` (`#mytc-submit-bar` + `#mytc-total` at the top of `#screen-mytc`). **No** `styles.css` / `payroll-template.js` change. **No new migration** (the `pt_timecard_status` table was already created by Julio before this build). Version strings untouched (still v43.0).
+  - **Verified:** `node --check` clean; 17-assertion logic harness passed (stage ranking, out-of-submission detection, running-hours with active-punch exclusion + optimistic/approved/denied waive handling + no-mutation guard); HTML div balance preserved.
+
 - **v43.0 — UI: employee lists → accordion (mobile fix) + activities alphabetical:** Batch of three UI changes agreed one at a time before build.
   - **Employee lists converted to accordion (Admin + Supervisor panels).** The old 5-column tables overflowed on mobile — the Deactivate/Reset-PIN action buttons in the last column were pushed off-screen with no horizontal scroll. Both panels now use the existing punch-log accordion pattern (`emp-card` / `emp-card-header` / `emp-card-body` + `toggleEmpCard()`). Collapsed header shows **Name + PIN**; expanded body shows Dept, assigned jobsites (supervisors only, Admin panel), and the action buttons. Removed the `<table>` markup for both; new containers `#s-emp-accordion` (supervisor) and `#m-emp-accordion` (admin). Rewrote `refreshSupEmps()` and `refreshMasterEmps()`.
   - **Deactivate → "Remove" with hide-on-remove (Option B).** Chose to keep the DB `active` flag (no true DELETE — protects historical punch rows that reference `employee_id`) but change the UX so removed employees don't clutter lists. **Supervisor panel:** shows active employees only. **Admin panel:** shows active employees first, then a "Removed employees" section with those cards greyed-out (`opacity:.55`) and an **Activate** button to bring them back — so Admin retains a re-activation path with no DB surgery. The button on active employees is renamed **Remove** (was "Deactivate"); `toggleEmpActive()` unchanged in logic (sets `active=false/true`), now also refreshes the supervisor accordion if present. No DB migration.
@@ -297,9 +361,23 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ## ⏭ Next Session Agenda
 
-**Per-shift lunch waive — ✅ SHIPPED in v42.0.** (See the v42.0 entry under "What Was Last Being Worked On" for the full design + build record.) The lunch arc is now complete: auto-deduction (v36.2) + per-shift waive request/approval (v42.0).
+**🔴 MID-FLIGHT: v44.0 Build 2 of 3 — Supervisor side.** Build 1 (data layer + employee submit) is delivered and deployed. **Next up, Build 2:**
+1. **Per-employee submission status colors in the supervisor time log** (`refreshSupLog`). Use **Option A**: call `getAllStatusForPeriod(currentPeriod.start)` once per refresh, map by `empId`, and color each employee card/summary by stage (e.g. neutral/grey = open/not submitted, green = `emp_submitted` ready to review, a third state once `sup_submitted`). Goal: supervisor can see who's in vs. outstanding so they don't submit too early. Also surface **out-of-submission** punches here via `isOutOfSubmission(entry, statusRow)` (already defined in Build 1) — flag employees who punched after handing in their card.
+2. **Site-wide "Submit site to office" action** in the supervisor Log tab (near the export button), acting on the **current pay period** across the supervisor's assigned jobsites. Moves every employee currently at `emp_submitted` → `sup_submitted` (via `setTimecardStage`); leaves `open` employees untouched (stragglers stay for a later pass). This is what hard-locks those employees' My Timecard (Build 1 already keys the lock off `stage ≥ sup_submitted`).
+3. **Demote the supervisor PDF export to a preview/preliminary tool** — relabel it (wording TBD) so it reads as a convenience preview, not the official deliverable. Keep the whole existing export machinery (`openExportConfirm`/gate/est/dup/checklist/`generatePDF`/`doExport` + the `submissions` table writes) intact — just relabel.
 
-No feature is currently mid-flight. Candidate next items, none committed:
+**Then Build 3 of 3 — Admin side** (stamps v44.0): rework the Submissions panel (`refreshSubmissionsPanel`) into jobsite accordions driven off `pt_timecard_status` + live punches — "X of Y employees submitted" headers, expand → employee rows (name, checkmark, live total hours via `paidHours`, failsafe flags), **per-site export button** on each header + **all-sites export** at the top. Replace the old per-period submissions-list UI. Bump the version badge (`index.html`) + backup payload (`app.js`) to **v44.0**.
+
+**Build 1 recap for context:** `pt_timecard_status` table exists (migration run). Data-layer helpers, employee running-hours total + submit/pull-back bar, and the stage-based My Timecard lock are all in. Version still shows v43.0 by design. See the top-of-doc "v44.0 IN PROGRESS" section + the Build 1 task-log entry for full detail.
+
+---
+
+### Post-v44.0 backlog (not committed)
+**Per-shift lunch waive — ✅ SHIPPED in v42.0.** The lunch arc is complete: auto-deduction (v36.2) + per-shift waive request/approval (v42.0).
+
+Candidate items:
+- **Bank Hours** (shelved from v44.0 scope) — employees over 88 hrs/period request to bank hours in lieu of OT, or draw banked hours to top up a short period; passed to master admin (not supervisor), shown on exported PDFs + an Excel-export notice, with an admin-editable balance under the employee detail panel. Design partially discussed, deliberately deferred.
+- **Per-shift lunch waive follow-ups:** surface the waive toggle in the My Timecard self-edit path; a "deny all" bulk action; a visible "waived" annotation on exported timesheets (the paid-hours *effect* already flows through exports).
 - **Per-shift lunch waive — possible follow-ups if they come up in use:** surface the waive toggle in the My Timecard self-edit path too (deliberately left out of v42.0); a "deny all" bulk action (deliberately left individual); a waive marker in PDF/CSV/Excel exports (currently the badge is on-screen only — the *effect* on paid hours already flows through exports via `paidHours`, but there's no visible "waived" annotation on the exported timesheet).
 - **NFC tag scanning** — explored as a PIN alternative; Web NFC works on Android Chrome, not iOS Safari. Parked, no decision.
 - **Codebase file-splitting** — plain `<script>`-tag splitting (no bundler); export functions the natural first candidate. Discussed, not actioned.
@@ -349,6 +427,9 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | Needs-review race guard (v40.1) | `_supLogSeq` in `refreshSupLog()`, `_masterLogSeq` in `refreshMasterLog()` — sequence-number guard so a stale, superseded call can't overwrite a newer one's render |
 | My Timecard — employee self-edit (v41.0) | `submitTimecardPin()` → `openMyTimecard(emp)` / `closeMyTimecard()` / `renderMyTcList()`; edit & add via shared `openMyTcEdit(dbId)` / `openMyTcAdd()` → `saveMyTcEdit()` (`#mytc-edit-modal-bg`, separate from the supervisor/master `#edit-modal-bg`); `buildMyTcActGrid()`/`toggleMyTcAct()`; "My Timecard" button + `#screen-mytc` in index.html; writes `manual_entry=true` (no new flag); period-lock check queries `submissions` for a `final` row overlapping `getPeriodByOffset(0)`
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
+| **Timecard stage — data layer (v44.0)** | `pt_timecard_status` table; `TC_STAGE`/`TC_STAGE_RANK` consts; `getTimecardStatus(empId,periodStart)` / `getAllStatusForPeriod(periodStart)` / `setTimecardStage(empId,period,stage,jobsite)` / `stageOf(row)` / `stageAtLeast(stage,target)` / `isOutOfSubmission(entry,statusRow)` — all near `isPendingWaive` in app.js |
+| **My Timecard submit/pull-back (v44.0)** | `renderMyTcSubmitBar()` (3 states off stage) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted`) + `retractMyTimecard()` (→ `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=stage≥`sup_submitted`, `myTcEditable`=stage`open` (gates Add/Edit). State: `myTcStatus`/`myTcBusy`/`myTcEditable` |
+| **My Timecard running total (v44.0)** | `myTcRunningHours(punches)` → `{hours,pendingWaiveCount}` (completed punches only, optimistic pending-waive, non-mutating); `renderMyTcTotal()` → `#mytc-total` in index.html (with disclaimer line) |
 | Version display | `index.html` version badge `<div>` (~line 195, top-left of `#screen-kiosk`) and `app.js` backup payload (`app_version`) |
 
 ---

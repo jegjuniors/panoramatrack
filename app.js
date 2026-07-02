@@ -51,6 +51,16 @@ let myTcLocked=false;
 let myTcEditingDbId=null;
 let myTcAdding=false;
 let myTcEditActs=new Set();
+/* Timecard submission stage (v44.0) — pt_timecard_status table.
+   Stage lifecycle: open → emp_submitted → sup_submitted → exported.
+   Absence of a row = 'open'. */
+const TC_STAGE={OPEN:'open',EMP:'emp_submitted',SUP:'sup_submitted',EXPORTED:'exported'};
+// Rank for comparisons (e.g. "is this at/after sup_submitted?")
+const TC_STAGE_RANK={open:0,emp_submitted:1,sup_submitted:2,exported:3};
+let myTcStatus=null;   // this employee's status row for the current period (or null = open)
+let myTcBusy=false;    // guards the submit/retract buttons against double-taps
+let myTcEditable=true; // v44.0: true only while stage='open'. Once emp_submitted, the employee
+                       // must pull back before editing; once sup_submitted it's hard-locked.
 
 /* ─── Loading UI helpers ─── */
 function setLoading(msg){
@@ -163,6 +173,91 @@ function paidHours(entry){
 // Used by the needs-review filter, the Needs Review tile, and the export gate.
 function isPendingWaive(entry){
   return !!entry && entry.lunchWaiveRequested===true && entry.lunchWaived==null;
+}
+
+/* ─── Timecard submission stage — data layer (v44.0) ───
+   Table: pt_timecard_status. One row per employee per pay period.
+   No row = 'open'. Stage: open → emp_submitted → sup_submitted → exported.
+   These helpers are the single source of truth for the whole submission flow. */
+
+// Fetch one employee's status row for a given period start (Date). null = open (no row yet).
+async function getTimecardStatus(empId,periodStart){
+  const ps=toDateStr(periodStart);
+  const {data,error}=await sb.from('pt_timecard_status')
+    .select('*').eq('employee_id',empId).eq('period_start',ps).maybeSingle();
+  if(error){console.warn('getTimecardStatus error:',error.message);return null;}
+  return data||null;
+}
+
+// Fetch ALL status rows for a period, returned as a map keyed by employee_id.
+// Used by the supervisor log (colour status) and the admin submissions panel.
+async function getAllStatusForPeriod(periodStart){
+  const ps=toDateStr(periodStart);
+  const {data,error}=await sb.from('pt_timecard_status').select('*').eq('period_start',ps);
+  if(error){console.warn('getAllStatusForPeriod error:',error.message);return {};}
+  const map={};
+  (data||[]).forEach(r=>{map[r.employee_id]=r;});
+  return map;
+}
+
+// Move an employee's timecard to a new stage for a period (upsert on employee_id+period_start).
+// Stamps the matching timestamp column. jobsite optional (helps the admin panel grouping).
+// Returns {ok, error}.
+async function setTimecardStage(empId,period,stage,jobsite){
+  const ps=toDateStr(period.start),pe=toDateStr(period.end);
+  const nowIso=new Date().toISOString();
+  const row={
+    employee_id:empId,period_start:ps,period_end:pe,
+    stage,updated_at:nowIso
+  };
+  if(jobsite!=null)row.jobsite=jobsite;
+  if(stage===TC_STAGE.EMP)row.emp_submitted_at=nowIso;
+  else if(stage===TC_STAGE.SUP)row.sup_submitted_at=nowIso;
+  else if(stage===TC_STAGE.EXPORTED)row.exported_at=nowIso;
+  const {error}=await sb.from('pt_timecard_status')
+    .upsert(row,{onConflict:'employee_id,period_start'});
+  if(error){console.warn('setTimecardStage error:',error.message);return {ok:false,error};}
+  return {ok:true};
+}
+
+// Convenience: which stage is this status row at? (null row = open)
+function stageOf(statusRow){return statusRow?statusRow.stage:TC_STAGE.OPEN;}
+// Is a stage at or past a target? e.g. stageAtLeast(row, TC_STAGE.SUP)
+function stageAtLeast(stage,target){return (TC_STAGE_RANK[stage]||0)>=(TC_STAGE_RANK[target]||0);}
+
+// Out-of-submission punch (v44.0): a punch whose clock-in is newer than the employee's
+// emp_submitted_at, while the timecard is at emp_submitted or later. Flags the supervisor
+// that the employee worked after handing in their card (no re-submit required).
+function isOutOfSubmission(entry,statusRow){
+  if(!statusRow||!statusRow.emp_submitted_at)return false;
+  if(!stageAtLeast(statusRow.stage,TC_STAGE.EMP))return false;
+  return entry.in>new Date(statusRow.emp_submitted_at);
+}
+
+// Running-total paid hours for the My Timecard panel (v44.0).
+//  - Excludes still-active punches (no clock-out yet) — same as paidHours returning null.
+//  - Optimistically treats a PENDING lunch waive as if approved, so the running total
+//    reflects what the employee expects (with an on-screen disclaimer). A supervisor
+//    denial would later reduce it. Approved/denied waives already flow through paidHours.
+// Returns {hours, pendingWaiveCount}.
+function myTcRunningHours(punches){
+  let total=0,pendingWaives=0;
+  (punches||[]).forEach(e=>{
+    if(!e.out)return; // skip active punches
+    if(isPendingWaive(e)){
+      pendingWaives++;
+      // Compute as if the waive were approved: temporarily flip the flag for the calc.
+      const orig=e.lunchWaived;
+      e.lunchWaived=true;
+      const ph=paidHours(e);
+      e.lunchWaived=orig; // restore — never mutate the real record
+      if(ph!=null)total+=ph;
+    } else {
+      const ph=paidHours(e);
+      if(ph!=null)total+=ph;
+    }
+  });
+  return {hours:total,pendingWaiveCount:pendingWaives};
 }
 
 function updateClock(){
@@ -738,17 +833,15 @@ async function openMyTimecard(emp){
   document.getElementById('mytc-list').innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">Loading…</p>';
   showScreen('screen-mytc');
 
-  // Locked if this employee already has a FINAL submission overlapping the current period
-  const periodStartStr=toDateStr(from),periodEndStr=toDateStr(to);
-  const {data:subData}=await sb.from('submissions')
-    .select('*')
-    .eq('employee_id',emp.id)
-    .eq('status','final')
-    .lte('period_start',periodEndStr)
-    .gte('period_end',periodStartStr);
-  myTcLocked=!!(subData&&subData.length);
+  // Load this employee's submission stage for the current period (v44.0).
+  // Locked to view-only once the SUPERVISOR has submitted (stage >= sup_submitted);
+  // the employee's own submission does NOT lock them (they can still pull it back).
+  myTcStatus=await getTimecardStatus(emp.id,myTcPeriod.start);
+  const stage=stageOf(myTcStatus);
+  myTcLocked=stageAtLeast(stage,TC_STAGE.SUP);       // hard-locked by supervisor submit
+  myTcEditable=(stage===TC_STAGE.OPEN);              // editable only while open (pull back first otherwise)
   document.getElementById('mytc-locked-note').style.display=myTcLocked?'block':'none';
-  document.getElementById('mytc-add-btn').style.display=myTcLocked?'none':'block';
+  document.getElementById('mytc-add-btn').style.display=myTcEditable?'block':'none';
 
   // Load this employee's punches for the current period straight from the DB
   // (timeLog only caches open punches, not the full period history)
@@ -762,11 +855,122 @@ async function openMyTimecard(emp){
     return;
   }
   myTcPunches=(punchData||[]).map(dbRowToEntry);
+  renderMyTcSubmitBar();
+  renderMyTcTotal();
   renderMyTcList();
+}
+
+/* Running-hours total + optimistic-waive disclaimer (v44.0) */
+function renderMyTcTotal(){
+  const el=document.getElementById('mytc-total');
+  if(!el)return;
+  const {hours,pendingWaiveCount}=myTcRunningHours(myTcPunches);
+  const active=myTcPunches.filter(p=>!p.out).length;
+  let html=`<div style="display:flex;justify-content:space-between;align-items:baseline;">
+      <span style="font-size:12px;color:var(--txt2);">Hours accumulated this period</span>
+      <span style="font-size:18px;font-weight:700;color:var(--txt);">${hours.toFixed(2)}h</span>
+    </div>`;
+  const notes=[];
+  if(active)notes.push(`Excludes ${active} punch${active!==1?'es':''} still clocked in.`);
+  if(pendingWaiveCount)notes.push(`Includes ${pendingWaiveCount} pending lunch waive${pendingWaiveCount!==1?'s':''} — final hours may be lower if your supervisor denies ${pendingWaiveCount!==1?'them':'it'}.`);
+  if(notes.length)html+=`<div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">${notes.join(' ')}</div>`;
+  el.innerHTML=html;
+}
+
+/* Submit / retract bar at the top of the My Timecard modal (v44.0) */
+function renderMyTcSubmitBar(){
+  const bar=document.getElementById('mytc-submit-bar');
+  if(!bar)return;
+  const stage=stageOf(myTcStatus);
+
+  // Locked (supervisor already submitted) — show a static status line, no actions.
+  if(stageAtLeast(stage,TC_STAGE.SUP)){
+    bar.innerHTML=`<div style="background:var(--bg2);border:0.5px solid var(--bdr2);border-radius:var(--radius);padding:11px 13px;">
+        <span style="font-size:13px;font-weight:600;color:var(--txt);">✓ Submitted &amp; locked</span>
+        <div style="font-size:11px;color:var(--txt2);margin-top:3px;">Your supervisor has submitted this pay period. Contact them for any corrections.</div>
+      </div>`;
+    return;
+  }
+
+  // Employee has submitted (but supervisor hasn't) — allow pull-back.
+  if(stage===TC_STAGE.EMP){
+    bar.innerHTML=`<div style="background:#173a17;border:0.5px solid #2f7d31;border-radius:var(--radius);padding:11px 13px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div>
+            <span style="font-size:13px;font-weight:600;color:#8fe08f;">✓ Timecard submitted</span>
+            <div style="font-size:11px;color:#a9cba9;margin-top:3px;">Handed in to your supervisor. You can pull it back to make changes until they submit.</div>
+          </div>
+          <button class="btn-sm" id="mytc-retract-btn" onclick="retractMyTimecard()" style="flex-shrink:0;background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">Pull back</button>
+        </div>
+      </div>`;
+    return;
+  }
+
+  // Open — show the submit button.
+  bar.innerHTML=`<button class="btn" id="mytc-submit-btn" onclick="submitMyTimecard()" style="width:100%;background:var(--green);color:#fff;font-weight:600;">Submit my timecard →</button>
+    <div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">Review your punches below, then submit to hand your timecard to your supervisor.</div>`;
+}
+
+/* Employee submits their timecard (v44.0).
+   Gates on auto-clocked punches (blocks → kicks back to fix via Edit).
+   Warns if submitting before the pay period has ended; clean submit after. */
+async function submitMyTimecard(){
+  if(myTcBusy||myTcLocked)return;
+  // Auto-clock gate — block and point them at the offending punch(es).
+  const autos=myTcPunches.filter(p=>p.autoClocked&&!p.editedAfterAuto);
+  if(autos.length){
+    showCustomAlert('Fix auto-clock-outs first',
+      `You have ${autos.length} punch${autos.length!==1?'es'
+        :''} that auto-clocked out at 12 hours. Tap Edit on ${autos.length!==1?'each of those punches':'that punch'} below and set your real clock-out time, then submit.`);
+    return;
+  }
+  const beforeEnd=new Date()<myTcPeriod.end;
+  const doSubmit=async()=>{
+    if(myTcBusy)return;
+    myTcBusy=true;
+    const btn=document.getElementById('mytc-submit-btn');if(btn)btn.disabled=true;
+    // jobsite: most recent punch's site, for the admin panel's grouping
+    const jobsite=myTcPunches.length?myTcPunches[0].jobsite:null;
+    const {ok,error}=await setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.EMP,jobsite);
+    myTcBusy=false;
+    if(!ok){showCustomAlert('Could not submit','There was a problem submitting your timecard: '+(error?.message||'unknown error')+'. Please try again.');return;}
+    showNotif('✓','Timecard submitted','Handed in to your supervisor','#2f7d31',2600);
+    await openMyTimecard(myTcEmp); // reload → shows submitted state + pull-back
+  };
+  if(beforeEnd){
+    showCustomConfirm(
+      'Submit before the period ends?',
+      'The current pay period hasn\u2019t ended yet. If you have more shifts coming up this period, wait until after your last punch. Submit anyway?',
+      'You can still pull your timecard back until your supervisor submits.',
+      'Submit anyway','var(--amber)',doSubmit);
+  } else {
+    doSubmit();
+  }
+}
+
+/* Employee pulls their submission back (v44.0) — only allowed while the supervisor
+   hasn't submitted (stage still emp_submitted). Returns the card to 'open'. */
+async function retractMyTimecard(){
+  if(myTcBusy)return;
+  // Guard: re-check the stage against the DB in case the supervisor just submitted.
+  const fresh=await getTimecardStatus(myTcEmp.id,myTcPeriod.start);
+  if(stageAtLeast(stageOf(fresh),TC_STAGE.SUP)){
+    showCustomAlert('Too late to pull back','Your supervisor has already submitted this pay period. Contact them for any corrections.');
+    await openMyTimecard(myTcEmp);
+    return;
+  }
+  myTcBusy=true;
+  const btn=document.getElementById('mytc-retract-btn');if(btn)btn.disabled=true;
+  const {ok,error}=await setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.OPEN);
+  myTcBusy=false;
+  if(!ok){showCustomAlert('Could not pull back','There was a problem: '+(error?.message||'unknown error')+'. Please try again.');return;}
+  showNotif('✓','Timecard pulled back','You can make changes now','#c47f17',2400);
+  await openMyTimecard(myTcEmp);
 }
 
 function closeMyTimecard(){
   myTcEmp=null;myTcPunches=[];myTcPeriod=null;myTcLocked=false;
+  myTcStatus=null;myTcBusy=false;myTcEditable=true;
   showScreen('screen-kiosk');
 }
 
@@ -795,14 +999,19 @@ function renderMyTcList(){
         </div>
         <div style="text-align:right;">${badges}</div>
       </div>
-      ${myTcLocked?'':`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`}
+      ${myTcEditable?`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`:''}
     </div>`;
   }).join('');
+  // If submitted (but not supervisor-locked), remind them to pull back to edit.
+  if(!myTcEditable&&!myTcLocked){
+    list.insertAdjacentHTML('afterbegin',
+      `<p style="text-align:center;color:var(--txt3);font-size:11px;margin:0 0 10px;line-height:1.4;">Your timecard is submitted. Pull it back above to make changes.</p>`);
+  }
 }
 
 /* Add a missed punch — simplified flow, scoped to self + current period only */
 function openMyTcAdd(){
-  if(myTcLocked)return;
+  if(!myTcEditable)return;
   myTcAdding=true;myTcEditingDbId=null;myTcEditActs=new Set();
   document.getElementById('mytc-edit-title').textContent='Add a missed punch';
   document.getElementById('mytc-edit-in').value='';
@@ -814,7 +1023,7 @@ function openMyTcAdd(){
 }
 
 function openMyTcEdit(dbId){
-  if(myTcLocked)return;
+  if(!myTcEditable)return;
   const e=myTcPunches.find(p=>String(p.dbId)===String(dbId));
   if(!e)return;
   myTcAdding=false;myTcEditingDbId=dbId;myTcEditActs=new Set(e.activity||[]);
