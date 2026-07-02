@@ -1405,19 +1405,28 @@ function setSupPeriod(mode){
 
   const exportBtn=document.getElementById('s-export-btn');
   const exportNote=document.getElementById('s-export-note');
-  // Always show export button — preliminary submissions allowed for in-progress periods
+  // v44.0: the supervisor PDF is now a PREVIEW tool — the office does the official export
+  // from the submitted timecards. Machinery is unchanged; only the wording is preview-framed.
   exportBtn.style.display='block';
   if(exportable){
     exportNote.textContent='';
-    exportBtn.textContent='Review & confirm submission →';
+    exportBtn.textContent='Preview PDF →';
   } else {
     if(mode==='today'||mode==='yesterday'){
       exportNote.textContent='Note: This is a partial day view.';
-      exportBtn.textContent='Export (partial) →';
+      exportBtn.textContent='Preview PDF (partial) →';
     } else if(mode==='current'){
-      exportNote.textContent='Period in progress — export now as a Preliminary report.';
-      exportBtn.textContent='Submit preliminary report →';
+      exportNote.textContent='Period in progress — this generates a preliminary preview.';
+      exportBtn.textContent='Preview PDF (preliminary) →';
     }
+  }
+
+  // v44.0: label the "Submit site to office" button with the period it will actually submit
+  // (supStatusPeriod(): today/yesterday/current → current period; last/prev2 → that period).
+  const submitLabel=document.getElementById('s-submit-period-label');
+  if(submitLabel){
+    const sp=(mode==='last')?getPeriodByOffset(1):(mode==='prev2')?getPeriodByOffset(2):getPeriodByOffset(0);
+    submitLabel.textContent=`${sp.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${sp.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
   }
   // Store period info for export
   exportRange={...exportRange,from,to,periodMode:mode};
@@ -1433,6 +1442,25 @@ function setSupPeriod(mode){
 
 /* ─── Supervisor: Log (per-employee accordion) ─── */
 let _supLogSeq=0; // v40.1: race guard — only the most recently-initiated call may render
+
+/* Which pay period do the submission stages belong to for the current log view? (v44.0)
+   Employees submit against getPeriodByOffset(0); today/yesterday are partial views of
+   that same in-progress period, so they all map to offset 0. 'last'/'prev2' map back. */
+function supStatusPeriod(){
+  if(_supPeriodMode==='last')return getPeriodByOffset(1);
+  if(_supPeriodMode==='prev2')return getPeriodByOffset(2);
+  return getPeriodByOffset(0);
+}
+/* Stage → chip styling for the supervisor log (v44.0). Distinct hues, not the near-identical
+   blue/green pair: grey (nothing yet) → amber (needs the supervisor's review) → green (handed off). */
+function supStageChip(stage){
+  if(stageAtLeast(stage,TC_STAGE.SUP))
+    return {label:'✓ Sent to office',bg:'var(--green-l)',color:'var(--green)',border:'var(--green)'};
+  if(stage===TC_STAGE.EMP)
+    return {label:'✓ Submitted — review',bg:'var(--amber-l)',color:'var(--amber)',border:'var(--amber)'};
+  return {label:'Not submitted',bg:'var(--bg3)',color:'var(--txt2)',border:'var(--bdr2)'};
+}
+
 async function refreshSupLog(){
   const _mySeq=++_supLogSeq;
   await checkAutoServer();if(!activeSup)return;
@@ -1487,10 +1515,20 @@ async function refreshSupLog(){
 
   if(_mySeq!==_supLogSeq)return; // a newer call has superseded this one — drop the stale render
 
+  // v44.0 (Option A): one submission-stage query per refresh, mapped by employee_id.
+  // Colours the per-employee cards by stage and surfaces out-of-submission punches.
+  const statusPeriod=supStatusPeriod();
+  const statusMap=await getAllStatusForPeriod(statusPeriod.start);
+  if(_mySeq!==_supLogSeq)return; // re-guard: the extra async call could have been superseded
+
   // Update export preview with same date range
   updateExportPreview();
   const container=document.getElementById('s-log-accordion');
-  if(!logs.length){container.innerHTML='<p style="color:var(--txt2);text-align:center;padding:24px 0;font-size:13px;">No records for this period</p>';return}
+  if(!logs.length){
+    container.innerHTML='<p style="color:var(--txt2);text-align:center;padding:24px 0;font-size:13px;">No records for this period</p>';
+    updateSubmitSummary({},{});
+    return;
+  }
 
   // Group by employee
   const empMap={};
@@ -1501,11 +1539,16 @@ async function refreshSupLog(){
 
   container.innerHTML=Object.entries(empMap).map(([empId,data])=>{
     const records=data.records;
+    // v44.0: submission stage for this employee in the viewed period (null row = open).
+    const statusRow=statusMap[empId]||null;
+    const stage=stageOf(statusRow);
+    const chip=supStageChip(stage);
+    const oos=records.filter(l=>isOutOfSubmission(l,statusRow)).length; // punched after submitting
     const totalHrs=records.reduce((s,l)=>s+(paidHours(l)||0),0);
     const flags=records.filter(l=>l.autoClocked).length;
     const waivePend=records.filter(l=>isPendingWaive(l)).length;
     const still=records.filter(l=>!l.out).length;
-    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
+    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${oos?` · <span style="color:#e07070;font-weight:600;">${oos} ⚠️ after submit</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
       const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
@@ -1516,6 +1559,8 @@ async function refreshSupLog(){
       if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
       else if(l.lunchWaived===true)actBadges+=`<span class="badge" style="background:#d8f0d8;color:#1f5e1f;margin-left:2px;">🍴 Waived</span>`;
       else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
+      // v44.0: punch landed after the employee handed in their card
+      if(isOutOfSubmission(l,statusRow))actBadges+=`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:2px;">⚠️ After submit</span>`;
       const isAssignedSite=(activeSup.jobsites||[]).includes(l.jobsite);
       const siteColor=isAssignedSite?'b-blue':'b-amber'; // amber = unassigned/temp site
       return `<tr class="${l.autoClocked?'row-auto':''}">
@@ -1529,10 +1574,12 @@ async function refreshSupLog(){
     }).join('');
 
     const cardId=`emp-card-${empId}`;
-    return `<div class="emp-card">
+    return `<div class="emp-card" style="border-left:3px solid ${chip.border};">
       <div class="emp-card-header" onclick="toggleEmpCard('${cardId}')">
         <div>
-          <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${data.name}</p>
+          <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${data.name}
+            <span class="badge" style="background:${chip.bg};color:${chip.color};margin-left:6px;font-size:10px;vertical-align:middle;">${chip.label}</span>
+          </p>
           <p class="emp-summary">${summary}</p>
         </div>
         <span style="font-size:18px;color:var(--txt3);" id="${cardId}-chevron">▸</span>
@@ -1547,6 +1594,90 @@ async function refreshSupLog(){
       </div>
     </div>`;
   }).join('');
+
+  updateSubmitSummary(empMap,statusMap);
+}
+
+/* ─── Supervisor: site-wide submit to office (v44.0) ───────────────────────────
+   Moves every employee currently at emp_submitted → sup_submitted for the viewed
+   pay period, across the supervisor's assigned jobsites. 'open' employees (haven't
+   handed in yet) are left untouched — stragglers stay for a later pass. This is what
+   hard-locks those employees' My Timecard (the lock keys off stage ≥ sup_submitted). */
+
+// Live count line under the submit button, based on the employees currently shown.
+function updateSubmitSummary(empMap,statusMap){
+  const el=document.getElementById('s-submit-summary');
+  if(!el)return;
+  const ids=Object.keys(empMap||{});
+  let submitted=0,open=0,sent=0;
+  ids.forEach(id=>{
+    const stage=stageOf(statusMap[id]||null);
+    if(stageAtLeast(stage,TC_STAGE.SUP))sent++;
+    else if(stage===TC_STAGE.EMP)submitted++;
+    else open++;
+  });
+  const parts=[];
+  if(submitted)parts.push(`<span style="color:var(--amber);font-weight:600;">${submitted} ready to send</span>`);
+  if(sent)parts.push(`<span style="color:var(--green);font-weight:600;">${sent} already sent</span>`);
+  if(open)parts.push(`<span style="color:var(--txt3);">${open} not submitted</span>`);
+  el.innerHTML=ids.length?`Shown: ${parts.join(' · ')}`:'';
+}
+
+// The button click: authoritative period-scoped pass (independent of the display filter).
+async function submitSiteToOffice(){
+  if(!activeSup)return;
+  const sites=activeSup.jobsites||[];
+  if(!sites.length){showCustomAlert('No jobsites','You have no assigned jobsites to submit.');return;}
+  const period=supStatusPeriod();
+  const periodLabel=`${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+
+  // Roster = every employee with a punch at this supervisor's sites in the viewed period.
+  const {data:siteData,error:siteErr}=await sb.from('punches')
+    .select('employee_id')
+    .in('jobsite',sites)
+    .gte('clock_in',period.start.toISOString())
+    .lte('clock_in',period.end.toISOString());
+  if(siteErr){showCustomAlert('Error','Could not load the roster: '+siteErr.message);return;}
+  const empIds=[...new Set((siteData||[]).map(r=>r.employee_id).filter(Boolean))];
+  if(!empIds.length){showCustomAlert('Nothing to submit',`No punches found at your jobsites for ${periodLabel}.`);return;}
+
+  const statusMap=await getAllStatusForPeriod(period.start);
+  const ready=empIds.filter(id=>stageOf(statusMap[id]||null)===TC_STAGE.EMP);
+  const openCount=empIds.filter(id=>stageOf(statusMap[id]||null)===TC_STAGE.OPEN).length;
+  const alreadySent=empIds.filter(id=>stageAtLeast(stageOf(statusMap[id]||null),TC_STAGE.SUP)).length;
+
+  if(!ready.length){
+    showCustomAlert('No submitted timecards yet',
+      `None of your employees have submitted their timecard for ${periodLabel} yet`+
+      (openCount?`, so there's nothing to send. ${openCount} ${openCount!==1?'are':'is'} still open.`:'.')+
+      (alreadySent?` (${alreadySent} already sent.)`:''));
+    return;
+  }
+
+  const sub=openCount
+    ? `${openCount} employee${openCount!==1?'s have':' has'} not submitted yet and will stay open for a later pass.`
+    : 'All employees at your sites have submitted.';
+  showCustomConfirm(
+    `Submit ${ready.length} timecard${ready.length!==1?'s':''} to the office?`,
+    `This sends the submitted timecards for ${periodLabel} to head office and locks them for those employees. This can't be undone from here.`,
+    sub,
+    `Submit ${ready.length} to office`,'var(--green)',
+    ()=>doSubmitSiteToOffice(ready,period,statusMap,periodLabel));
+}
+
+async function doSubmitSiteToOffice(ready,period,statusMap,periodLabel){
+  const results=await Promise.all(ready.map(id=>{
+    const jobsite=(statusMap[id]&&statusMap[id].jobsite)||null; // preserve the emp-submit stamp
+    return setTimecardStage(id,period,TC_STAGE.SUP,jobsite);
+  }));
+  const failed=results.filter(r=>!r.ok).length;
+  if(failed){
+    showCustomAlert('Some did not submit',
+      `${ready.length-failed} of ${ready.length} submitted. ${failed} failed — check your connection and try again.`);
+  } else {
+    showNotif('✓','Site submitted',`${ready.length} timecard${ready.length!==1?'s':''} sent for ${periodLabel}`,'#2f7d31',2800);
+  }
+  refreshSupLog(); // repaint stage colours → submitted employees flip to "Sent to office"
 }
 
 /* ─── Navigate from Live tiles to the Time log with the right view ─── */
@@ -3164,13 +3295,13 @@ function openChecklist(){
   const submitBtn=document.getElementById('export-confirm-submit');
   if(isPrelim){
     if(prelimSection)prelimSection.style.display='block';
-    if(modalTitle)modalTitle.textContent='Preliminary submission confirmation';
-    if(submitBtn)submitBtn.textContent='Submit preliminary report →';
+    if(modalTitle)modalTitle.textContent='Preliminary preview — confirm';
+    if(submitBtn)submitBtn.textContent='Generate preview PDF →';
     submitBtn.style.background='var(--amber)';
   } else {
     if(prelimSection)prelimSection.style.display='none';
-    if(modalTitle)modalTitle.textContent='Supervisor confirmation required';
-    if(submitBtn)submitBtn.textContent='Submit & export PDF';
+    if(modalTitle)modalTitle.textContent='Preview PDF — confirm';
+    if(submitBtn)submitBtn.textContent='Generate preview PDF';
     submitBtn.style.background='var(--green)';
   }
   document.getElementById('export-confirm-modal').style.display='flex';
@@ -3179,7 +3310,7 @@ function closeConfirmModal(){
   document.getElementById('export-confirm-modal').style.display='none';
   const submitBtn=document.getElementById('export-confirm-submit');
   submitBtn.style.display='';
-  submitBtn.textContent='Submit \u0026 export PDF';
+  submitBtn.textContent='Generate preview PDF';
   submitBtn.onclick=doExport;
 }
 async function doExport(){

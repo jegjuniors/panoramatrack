@@ -146,13 +146,13 @@
 <!-- EXPORT CONFIRM MODAL -->
 <div id="export-confirm-modal" class="modal-bg" style="display:none;">
   <div class="modal">
-    <h3>Supervisor confirmation required</h3>
-    <p class="subtext" style="margin-bottom:14px;">Before submitting to head office, confirm each item below:</p>
+    <h3>Preview PDF — confirm</h3>
+    <p class="subtext" style="margin-bottom:14px;">This generates a preview PDF for your own review. Confirm each item below:</p>
     <div style="margin:12px 0;">
       <div class="chk-row"><input type="checkbox" id="chk1"/><label for="chk1">I have reviewed all employee clock-in and clock-out times for this pay period.</label></div>
       <div class="chk-row"><input type="checkbox" id="chk2"/><label for="chk2">I have corrected any records flagged as auto-clocked (12-hour timeout) where the actual hours are known.</label></div>
-      <div class="chk-row"><input type="checkbox" id="chk3"/><label for="chk3">I confirm all hours shown are accurate and approved for payroll processing.</label></div>
-      <div class="chk-row"><input type="checkbox" id="chk4"/><label for="chk4">I understand this export will be sent to head office and cannot be recalled.</label></div>
+      <div class="chk-row"><input type="checkbox" id="chk3"/><label for="chk3">I confirm the hours shown look accurate for my review.</label></div>
+      <div class="chk-row"><input type="checkbox" id="chk4"/><label for="chk4">I understand this PDF is a preview for my own use — the official payroll export is finalized by the office from the submitted timecards.</label></div>
       <!-- Preliminary-only section -->
       <div id="checklist-prelim-section" style="display:none;margin-top:10px;padding-top:10px;border-top:0.5px solid var(--amber);border-radius:4px;">
         <p style="font-size:11px;color:var(--amber);font-weight:600;margin-bottom:8px;">⚠ PRELIMINARY REPORT — additional confirmation</p>
@@ -162,7 +162,7 @@
     <div id="confirm-err" style="color:var(--red);font-size:12px;min-height:14px;"></div>
     <div class="modal-actions">
       <button class="modal-cancel" onclick="closeConfirmModal()">← Go back</button>
-      <button class="modal-save" id="export-confirm-submit" onclick="doExport()" style="background:var(--green);">Submit &amp; export PDF</button>
+      <button class="modal-save" id="export-confirm-submit" onclick="doExport()" style="background:var(--green);">Generate preview PDF</button>
     </div>
   </div>
 </div>
@@ -336,7 +336,7 @@
   <div id="prelim-banner">
     <p id="prelim-banner-text"></p>
     <div class="prelim-actions">
-      <button class="btn-sm primary" onclick="switchSupTab('log')">Review & submit final →</button>
+      <button class="btn-sm primary" onclick="switchSupTab('log')">Review timecards →</button>
       <button class="btn-sm" onclick="dismissPrelimBanner()">Dismiss</button>
     </div>
   </div>
@@ -397,13 +397,24 @@
     <!-- Punch records accordion -->
     <div id="s-log-accordion"></div>
 
-    <!-- Export section -->
+    <!-- Submit to office (v44.0) — primary handoff -->
     <div style="margin-top:18px;border-top:0.5px solid var(--bdr);padding-top:16px;">
-      <p style="font-size:13px;font-weight:600;color:var(--txt);margin-bottom:4px;">Export report</p>
-      <p class="subtext" style="font-size:11px;margin-bottom:10px;">Export pays for the selected completed period only.</p>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+        <p style="font-size:13px;font-weight:600;color:var(--txt);margin:0;">Submit site to office</p>
+        <span id="s-submit-period-label" style="font-size:11px;color:var(--txt2);"></span>
+      </div>
+      <p class="subtext" style="font-size:11px;margin-bottom:10px;">Sends every <b>submitted</b> employee timecard for this period to head office and locks them. Employees who haven't submitted stay open for a later pass.</p>
+      <div id="s-submit-summary" style="font-size:12px;color:var(--txt2);min-height:16px;margin-bottom:8px;"></div>
+      <button class="btn btn-primary" id="s-submit-site-btn" onclick="submitSiteToOffice()">Submit site to office →</button>
+    </div>
+
+    <!-- Preview export (v44.0) — supervisor PDF demoted to a preview; the office finalizes -->
+    <div style="margin-top:16px;border-top:0.5px solid var(--bdr);padding-top:16px;">
+      <p style="font-size:13px;font-weight:600;color:var(--txt);margin-bottom:4px;">Preliminary export (preview)</p>
+      <p class="subtext" style="font-size:11px;margin-bottom:10px;">Generates a preview PDF for your own review. The official payroll export is finalized by the office from the submitted timecards.</p>
       <div id="s-export-preview" style="background:var(--bg2);border-radius:var(--radius);padding:9px 12px;font-size:13px;color:var(--txt2);min-height:34px;margin-bottom:8px;"></div>
       <div id="s-export-err" style="color:var(--red);font-size:12px;margin-bottom:8px;min-height:14px;"></div>
-      <button class="btn btn-primary" id="s-export-btn" onclick="openExportConfirm()" style="display:none;">Review &amp; confirm submission →</button>
+      <button class="btn" id="s-export-btn" onclick="openExportConfirm()" style="display:none;background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">Preview PDF →</button>
     </div>
   </div>
 

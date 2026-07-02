@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v43.0 *(v44.0 in progress — 3-tier submission flow, Build 1 of 3 delivered; version badge stays v43.0 until Build 3 stamps v44.0)*
+**Current Version:** v43.0 *(v44.0 in progress — 3-tier submission flow, Builds 1 & 2 of 3 delivered; version badge stays v43.0 until Build 3 stamps v44.0)*
 **Last Updated:** July 2, 2026
 
 ---
@@ -38,8 +38,10 @@ CREATE TABLE pt_timecard_status (
 
 **Build status:**
 - ✅ **Build 1 of 3 (DELIVERED) — Data layer + Employee side.** See task log entry below.
-- ⏳ **Build 2 of 3 — Supervisor side:** per-employee status colors in the time log (Option A query), site-wide submit action, PDF export relabel to preview.
+- ✅ **Build 2 of 3 (DELIVERED) — Supervisor side.** Per-employee stage colours in the time log (Option A query), out-of-submission flags, site-wide "Submit site to office" action, supervisor PDF export relabelled to a preview tool. See task log entry below.
 - ⏳ **Build 3 of 3 — Admin side:** reworked Submissions panel (jobsite accordions, X-of-Y headers, employee rows + failsafe flags, per-site + all-sites export). **This build stamps the version badge + backup payload to v44.0.**
+
+**⚠️ One decision made in Build 2 to confirm:** the "Submit site to office" button and the stage colours are anchored to the **pay period currently selected in the log view** (`supStatusPeriod()`), not hard-wired to "current period." Rationale: employees submit against `getPeriodByOffset(0)`, but a period that has just ended rolls from offset 0 → offset 1 within a day or two, so hard-wiring "current" would miss the just-ended period the supervisor is finalizing. Anchoring to the viewed period lets the supervisor pick "Current period" (in-progress) or "Last period ✓" (completed) and submit exactly what they're looking at. The button label shows the exact period it will submit. Flag for Julio: confirm this is the desired behaviour.
 
 **Bank Hours** (employee requests to bank/draw hours over 88/period) was discussed and deliberately **shelved to a future feature** — not part of this v44.0 arc.
 
@@ -125,6 +127,18 @@ No separate supervisors table.
 
 **Last session date:** July 2, 2026
 **Tasks completed this session:**
+- **v44.0 Build 2 of 3 — Supervisor side.** Middle slice of the 3-tier flow. Version badge/backup-payload still **v43.0** (Build 3 stamps v44.0). No DB migration (uses the Build 1 `pt_timecard_status` table + helpers). No `styles.css` / `payroll-template.js` change — new chips/badges/blocks are inline-styled with theme vars.
+  - **Per-employee stage colours in the supervisor time log (`refreshSupLog`) — Option A.** One `getAllStatusForPeriod(supStatusPeriod().start)` call per refresh, re-guarded by the existing `_supLogSeq` sequence number (a second race-check added after the extra async call). Each employee card now carries a **stage chip** next to the name + a **left-border accent**, via new `supStageChip(stage)`:
+    - **grey "Not submitted"** (open / no row) → **amber "✓ Submitted — review"** (emp_submitted) → **green "✓ Sent to office"** (sup_submitted / exported). Deliberately grey→amber→green (distinct hues) rather than the near-identical blue/green in this palette.
+  - **Out-of-submission surfacing (`isOutOfSubmission`, defined in Build 1, now wired).** Per-row "⚠️ After submit" badge on any punch whose clock-in is newer than the employee's `emp_submitted_at`, plus an "N ⚠️ after submit" count in the card summary line — flags employees who worked after handing in their card (no re-submit required from them).
+  - **New helper `supStatusPeriod()`** — maps the log's period mode to the stage period: `last`→offset 1, `prev2`→offset 2, everything else (`today`/`yesterday`/`current`)→offset 0 (the in-progress period employees submit against). Used by both the colours and the site-submit action so they always agree.
+  - **Site-wide "Submit site to office" action.** New primary block at the bottom of the Log tab (above the demoted preview export), with a period label (`#s-submit-period-label`, set in `setSupPeriod`) and a live "N ready to send · N already sent · N not submitted" summary (`#s-submit-summary`, updated by `updateSubmitSummary()` at the end of every `refreshSupLog`, counted over the shown employees).
+    - `submitSiteToOffice()` runs an **authoritative period-scoped pass independent of the display filter**: queries punches at the supervisor's assigned jobsites within `supStatusPeriod()`, builds the roster, then moves every employee at `emp_submitted` → `sup_submitted`. `open` employees are left untouched (stragglers stay for a later pass); already-`sup_submitted` are skipped (idempotent). Confirm dialog states how many will be sent and how many stay open; empty-state alerts ("no submitted timecards yet"). `doSubmitSiteToOffice()` does the writes via `Promise.all` of `setTimecardStage(id, period, SUP, jobsite)` (jobsite preserved from the emp-submit stamp), reports any failures, then `refreshSupLog()` repaints (submitted employees flip to green). This is what **hard-locks** those employees' My Timecard (Build 1 keyed the lock off stage ≥ `sup_submitted`).
+    - **Period-anchor decision flagged for Julio** — see the "⚠️ One decision made in Build 2" note in the v44.0 section above. Anchored to the viewed period (not hard-wired "current") to avoid missing a just-ended period after the offset rolls.
+  - **Supervisor PDF export demoted to a preview tool.** Wording-only — **all machinery intact** (`openExportConfirm` / review-gate / est-clockout / dup-check / checklist / `generatePDF` / `doExport`, and the `submissions`-table writes that the future admin preview-export dup-detection relies on). Relabels: export section header → "Preliminary export (preview)" with a subtext saying the office finalizes; the export button demoted from `btn-primary` to a neutral outline `btn` and relabelled ("Preview PDF →" / "…(partial)" / "…(preliminary)" in `setSupPeriod`); confirm-modal title/subtext/submit-button → preview framing (`openChecklist` + `closeConfirmModal` + the static defaults in `index.html`); **chk4** reworded from "…sent to head office and cannot be recalled" → "…this PDF is a preview for my own use — the official payroll export is finalized by the office"; chk3 softened to "look accurate for my review"; prelim-banner button "Review & submit final →" → "Review timecards →".
+  - **Files changed:** `app.js` (new `supStatusPeriod`/`supStageChip`/`updateSubmitSummary`/`submitSiteToOffice`/`doSubmitSiteToOffice`; `refreshSupLog` stage fetch + chips + out-of-submission badges + summary; `setSupPeriod` button relabels + submit period label; `openChecklist`/`closeConfirmModal` relabels), `index.html` (Submit-to-office block + demoted preview block in `#spanel-log`; export-confirm-modal defaults + chk3/chk4 wording; prelim-banner button). Version strings untouched (still v43.0).
+  - **Verified:** `node --check` clean on `app.js`; HTML div balance preserved (delta unchanged from the pre-edit file). **Standing-rule checks:** all new injected text uses theme-aware colours (chips are explicit bg+colour pills); the `refreshSupLog` row-builder locals (`idx`, `ph`, `hrs`, and the new `statusRow`/`stage`/`chip`/`oos`) are all declared above their template literals — smoke-test that the supervisor log still renders rows after deploy.
+
 - **v44.0 Build 1 of 3 — Data layer + Employee submission side (My Timecard).** First slice of the 3-tier submission flow (see the "v44.0 IN PROGRESS" section at the top of this doc for the full design). Version badge/backup-payload intentionally **left at v43.0** — Build 3 stamps v44.0.
   - **Data layer (`app.js`) — the single source of truth for the whole flow.** New `pt_timecard_status` helpers near the engine helpers (just after `isPendingWaive`):
     - `TC_STAGE` constant (`OPEN/EMP/SUP/EXPORTED` → the string values) + `TC_STAGE_RANK` (0–3, for at-or-past comparisons).
@@ -361,14 +375,18 @@ _(Full roadmap is in `PanoramaTrack_Future_Features.md`)_
 
 ## ⏭ Next Session Agenda
 
-**🔴 MID-FLIGHT: v44.0 Build 2 of 3 — Supervisor side.** Build 1 (data layer + employee submit) is delivered and deployed. **Next up, Build 2:**
-1. **Per-employee submission status colors in the supervisor time log** (`refreshSupLog`). Use **Option A**: call `getAllStatusForPeriod(currentPeriod.start)` once per refresh, map by `empId`, and color each employee card/summary by stage (e.g. neutral/grey = open/not submitted, green = `emp_submitted` ready to review, a third state once `sup_submitted`). Goal: supervisor can see who's in vs. outstanding so they don't submit too early. Also surface **out-of-submission** punches here via `isOutOfSubmission(entry, statusRow)` (already defined in Build 1) — flag employees who punched after handing in their card.
-2. **Site-wide "Submit site to office" action** in the supervisor Log tab (near the export button), acting on the **current pay period** across the supervisor's assigned jobsites. Moves every employee currently at `emp_submitted` → `sup_submitted` (via `setTimecardStage`); leaves `open` employees untouched (stragglers stay for a later pass). This is what hard-locks those employees' My Timecard (Build 1 already keys the lock off `stage ≥ sup_submitted`).
-3. **Demote the supervisor PDF export to a preview/preliminary tool** — relabel it (wording TBD) so it reads as a convenience preview, not the official deliverable. Keep the whole existing export machinery (`openExportConfirm`/gate/est/dup/checklist/`generatePDF`/`doExport` + the `submissions` table writes) intact — just relabel.
+**🔴 MID-FLIGHT: v44.0 Build 3 of 3 — Admin side (this build stamps v44.0).** Builds 1 (data layer + employee submit) and 2 (supervisor stage colours + site-wide submit + PDF-as-preview) are delivered and deployed. **Next up, the final build:**
 
-**Then Build 3 of 3 — Admin side** (stamps v44.0): rework the Submissions panel (`refreshSubmissionsPanel`) into jobsite accordions driven off `pt_timecard_status` + live punches — "X of Y employees submitted" headers, expand → employee rows (name, checkmark, live total hours via `paidHours`, failsafe flags), **per-site export button** on each header + **all-sites export** at the top. Replace the old per-period submissions-list UI. Bump the version badge (`index.html`) + backup payload (`app.js`) to **v44.0**.
+Rework the admin Submissions panel (`refreshSubmissionsPanel`) into **jobsite accordions** driven off `pt_timecard_status` + live punches:
+1. **Jobsite accordion headers** — one per site, each showing **"X of Y employees submitted"** for the current period.
+2. **Expand → employee rows** — name, submission checkmark, **live total hours** via `paidHours`, and **failsafe flags** so the admin can resolve/override if a supervisor bypasses or can't submit (e.g. force a stuck employee to `sup_submitted`/`exported`, or see out-of-submission punches).
+3. **Export buttons** — **per-jobsite** on each accordion header **+ all-sites** at the top (current period). These are the **official** payroll export (PDF / Excel Pack) — the supervisor PDF is now just a preview. Wire the existing master export machinery (`openMasterExportConfirm` / `doMasterExcelZip` / `generateMasterPDF`) to per-site + all-sites scopes, and stamp exported rows → `stage='exported'` via `setTimecardStage`.
+4. **Replace** the old per-period submissions-list UI. The Report panel stays the ad-hoc filter/export tool.
+5. **Stamp the version** → badge (`index.html`) + backup payload `app_version` (`app.js`) to **v44.0**.
 
-**Build 1 recap for context:** `pt_timecard_status` table exists (migration run). Data-layer helpers, employee running-hours total + submit/pull-back bar, and the stage-based My Timecard lock are all in. Version still shows v43.0 by design. See the top-of-doc "v44.0 IN PROGRESS" section + the Build 1 task-log entry for full detail.
+**Carry-over to confirm before/at Build 3:** the Build 2 **period-anchor decision** for the supervisor site-submit (anchored to the *viewed* period, not hard-wired "current") — see the "⚠️ One decision made in Build 2" note in the v44.0 section. Confirm the admin panel should use the same anchoring model.
+
+**Builds 1–2 recap for context:** `pt_timecard_status` table exists (migration run). Data-layer helpers, employee running-hours total + submit/pull-back bar, stage-based My Timecard lock (Build 1); supervisor stage colours, out-of-submission flags, `submitSiteToOffice()`, and the PDF-as-preview relabel (Build 2) are all in. Version still shows v43.0 by design until Build 3. See the top-of-doc "v44.0 IN PROGRESS" section + the Build 1 & 2 task-log entries for full detail.
 
 ---
 
@@ -430,6 +448,9 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | **Timecard stage — data layer (v44.0)** | `pt_timecard_status` table; `TC_STAGE`/`TC_STAGE_RANK` consts; `getTimecardStatus(empId,periodStart)` / `getAllStatusForPeriod(periodStart)` / `setTimecardStage(empId,period,stage,jobsite)` / `stageOf(row)` / `stageAtLeast(stage,target)` / `isOutOfSubmission(entry,statusRow)` — all near `isPendingWaive` in app.js |
 | **My Timecard submit/pull-back (v44.0)** | `renderMyTcSubmitBar()` (3 states off stage) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted`) + `retractMyTimecard()` (→ `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=stage≥`sup_submitted`, `myTcEditable`=stage`open` (gates Add/Edit). State: `myTcStatus`/`myTcBusy`/`myTcEditable` |
 | **My Timecard running total (v44.0)** | `myTcRunningHours(punches)` → `{hours,pendingWaiveCount}` (completed punches only, optimistic pending-waive, non-mutating); `renderMyTcTotal()` → `#mytc-total` in index.html (with disclaimer line) |
+| **Supervisor stage colours + out-of-submission (v44.0)** | `supStatusPeriod()` (log mode → stage period) / `supStageChip(stage)` (grey/amber/green pill) in `refreshSupLog`; per-employee chip + left-border + "⚠️ After submit" row badges via `isOutOfSubmission`; one `getAllStatusForPeriod` call per refresh (Option A), re-guarded by `_supLogSeq` |
+| **Supervisor site-wide submit (v44.0)** | `submitSiteToOffice()` (period-scoped roster query at `activeSup.jobsites`, moves `emp_submitted`→`sup_submitted`, leaves `open`) → confirm → `doSubmitSiteToOffice()` (Promise.all `setTimecardStage`); `updateSubmitSummary(empMap,statusMap)` live count; `#s-submit-site-btn` / `#s-submit-period-label` / `#s-submit-summary` in index.html `#spanel-log` |
+| **Supervisor PDF export (now a PREVIEW, v44.0)** | Machinery unchanged (`openExportConfirm`/gate/est/dup/`openChecklist`/`generatePDF`/`doExport` + `submissions` writes) — only wording relabelled to "preview/preliminary". Button `#s-export-btn` demoted to outline; labels set in `setSupPeriod`/`openChecklist`/`closeConfirmModal`; chk3/chk4 reworded in index.html |
 | Version display | `index.html` version badge `<div>` (~line 195, top-left of `#screen-kiosk`) and `app.js` backup payload (`app_version`) |
 
 ---
@@ -442,4 +463,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: June 30, 2026 — v42.2_
+_Last updated: July 2, 2026 — v43.0 (v44.0 Build 2 of 3 delivered)_
