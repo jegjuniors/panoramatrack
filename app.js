@@ -57,10 +57,13 @@ let myTcEditActs=new Set();
 const TC_STAGE={OPEN:'open',EMP:'emp_submitted',SUP:'sup_submitted',EXPORTED:'exported'};
 // Rank for comparisons (e.g. "is this at/after sup_submitted?")
 const TC_STAGE_RANK={open:0,emp_submitted:1,sup_submitted:2,exported:3};
-let myTcStatus=null;   // this employee's status row for the current period (or null = open)
+let myTcStatusRows=[]; // v44.0 Build 3: ALL of this employee's status rows for the period (one
+                       // per jobsite they worked — see pt_timecard_status schema note below).
+                       // [] = open everywhere. Aggregate helpers: minStage()/maxStage().
 let myTcBusy=false;    // guards the submit/retract buttons against double-taps
-let myTcEditable=true; // v44.0: true only while stage='open'. Once emp_submitted, the employee
-                       // must pull back before editing; once sup_submitted it's hard-locked.
+let myTcEditable=true; // v44.0: true only while no rows exist yet (never submitted). Once
+                       // submitted, the employee must pull back before editing; once ANY site
+                       // row reaches sup_submitted the whole card is hard-locked.
 
 /* ─── Loading UI helpers ─── */
 function setLoading(msg){
@@ -178,44 +181,61 @@ function isPendingWaive(entry){
 /* ─── Timecard submission stage — data layer (v44.0) ───
    Table: pt_timecard_status. One row per employee per pay period.
    No row = 'open'. Stage: open → emp_submitted → sup_submitted → exported.
-   These helpers are the single source of truth for the whole submission flow. */
+   These helpers are the single source of truth for the whole submission flow.
 
-// Fetch one employee's status row for a given period start (Date). null = open (no row yet).
-async function getTimecardStatus(empId,periodStart){
+   v44.0 Build 3 schema change: the table moved from ONE ROW PER EMPLOYEE PER PERIOD to
+   ONE ROW PER EMPLOYEE PER PERIOD PER JOBSITE (unique key employee_id+period_start+jobsite).
+   Reason: employees can split a pay period across multiple jobsites/supervisors, and each
+   site needs its own independent submit/export lifecycle. jobsite is now REQUIRED on every
+   write — never call setTimecardStage() without one. */
+
+// Fetch one employee's status row for a given period start + jobsite. null = open (no row yet).
+async function getTimecardStatus(empId,periodStart,jobsite){
   const ps=toDateStr(periodStart);
   const {data,error}=await sb.from('pt_timecard_status')
-    .select('*').eq('employee_id',empId).eq('period_start',ps).maybeSingle();
+    .select('*').eq('employee_id',empId).eq('period_start',ps).eq('jobsite',jobsite).maybeSingle();
   if(error){console.warn('getTimecardStatus error:',error.message);return null;}
   return data||null;
 }
 
-// Fetch ALL status rows for a period, returned as a map keyed by employee_id.
-// Used by the supervisor log (colour status) and the admin submissions panel.
+// Fetch ALL of one employee's status rows for a period (every jobsite they've submitted at).
+// Used by My Timecard, which shows one aggregate view regardless of how many sites they worked.
+async function getEmployeeStatusRows(empId,periodStart){
+  const ps=toDateStr(periodStart);
+  const {data,error}=await sb.from('pt_timecard_status')
+    .select('*').eq('employee_id',empId).eq('period_start',ps);
+  if(error){console.warn('getEmployeeStatusRows error:',error.message);return [];}
+  return data||[];
+}
+
+// Fetch ALL status rows for a period, returned as a map keyed by employee_id → array of rows
+// (one entry per jobsite that employee has a row for). Used by the supervisor log and the
+// admin submissions panel.
 async function getAllStatusForPeriod(periodStart){
   const ps=toDateStr(periodStart);
   const {data,error}=await sb.from('pt_timecard_status').select('*').eq('period_start',ps);
   if(error){console.warn('getAllStatusForPeriod error:',error.message);return {};}
   const map={};
-  (data||[]).forEach(r=>{map[r.employee_id]=r;});
+  (data||[]).forEach(r=>{(map[r.employee_id]=map[r.employee_id]||[]).push(r);});
   return map;
 }
 
-// Move an employee's timecard to a new stage for a period (upsert on employee_id+period_start).
-// Stamps the matching timestamp column. jobsite optional (helps the admin panel grouping).
-// Returns {ok, error}.
+// Move an employee's timecard to a new stage for a period+jobsite (upsert on
+// employee_id+period_start+jobsite). Stamps the matching timestamp column.
+// jobsite is REQUIRED (it's part of the row's identity now). Returns {ok, error}.
 async function setTimecardStage(empId,period,stage,jobsite){
+  if(jobsite==null){console.warn('setTimecardStage called without a jobsite');return {ok:false,error:{message:'jobsite is required'}};}
   const ps=toDateStr(period.start),pe=toDateStr(period.end);
   const nowIso=new Date().toISOString();
   const row={
-    employee_id:empId,period_start:ps,period_end:pe,
+    employee_id:empId,period_start:ps,period_end:pe,jobsite,
     stage,updated_at:nowIso
   };
-  if(jobsite!=null)row.jobsite=jobsite;
   if(stage===TC_STAGE.EMP)row.emp_submitted_at=nowIso;
   else if(stage===TC_STAGE.SUP)row.sup_submitted_at=nowIso;
   else if(stage===TC_STAGE.EXPORTED)row.exported_at=nowIso;
   const {error}=await sb.from('pt_timecard_status')
-    .upsert(row,{onConflict:'employee_id,period_start'});
+    .upsert(row,{onConflict:'employee_id,period_start,jobsite'});
   if(error){console.warn('setTimecardStage error:',error.message);return {ok:false,error};}
   return {ok:true};
 }
@@ -224,6 +244,30 @@ async function setTimecardStage(empId,period,stage,jobsite){
 function stageOf(statusRow){return statusRow?statusRow.stage:TC_STAGE.OPEN;}
 // Is a stage at or past a target? e.g. stageAtLeast(row, TC_STAGE.SUP)
 function stageAtLeast(stage,target){return (TC_STAGE_RANK[stage]||0)>=(TC_STAGE_RANK[target]||0);}
+// Aggregate helpers across an employee's multiple site-rows (v44.0 Build 3):
+//  - minStage: the LEAST advanced stage — "what still needs attention" (used by the
+//    supervisor card & admin readiness checks).
+//  - maxStage: the MOST advanced stage — used for My Timecard's hard-lock (once ANY site has
+//    gone to the office, the whole card locks; partial per-site employee editing is out of scope).
+function minStage(rows){
+  if(!rows||!rows.length)return TC_STAGE.OPEN;
+  return rows.reduce((m,r)=>TC_STAGE_RANK[r.stage]<TC_STAGE_RANK[m]?r.stage:m,rows[0].stage);
+}
+function maxStage(rows){
+  if(!rows||!rows.length)return TC_STAGE.OPEN;
+  return rows.reduce((m,r)=>TC_STAGE_RANK[r.stage]>TC_STAGE_RANK[m]?r.stage:m,rows[0].stage);
+}
+// Is this employee fully ready to export? True only if EVERY jobsite they worked this period
+// (sitesWorked — pass the jobsites from their PUNCHES, not just their existing status rows) has
+// a row at exactly sup_submitted. A jobsite with no row at all still blocks readiness — it's
+// implicitly 'open' there, not something isFullyReadyForExport should skip past. Under this
+// design export is all-or-nothing per employee (fires once across every site, stamping all rows
+// exported together), so a mix of exported + non-exported rows shouldn't occur in practice.
+function isFullyReadyForExport(rows,sitesWorked){
+  const sites=new Set([...(sitesWorked||[]),...(rows||[]).map(r=>r.jobsite)]);
+  if(!sites.size)return false;
+  return [...sites].every(s=>{const r=(rows||[]).find(rr=>rr.jobsite===s);return !!r&&r.stage===TC_STAGE.SUP;});
+}
 
 // Out-of-submission punch (v44.0): a punch whose clock-in is newer than the employee's
 // emp_submitted_at, while the timecard is at emp_submitted or later. Flags the supervisor
@@ -833,13 +877,14 @@ async function openMyTimecard(emp){
   document.getElementById('mytc-list').innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">Loading…</p>';
   showScreen('screen-mytc');
 
-  // Load this employee's submission stage for the current period (v44.0).
-  // Locked to view-only once the SUPERVISOR has submitted (stage >= sup_submitted);
-  // the employee's own submission does NOT lock them (they can still pull it back).
-  myTcStatus=await getTimecardStatus(emp.id,myTcPeriod.start);
-  const stage=stageOf(myTcStatus);
-  myTcLocked=stageAtLeast(stage,TC_STAGE.SUP);       // hard-locked by supervisor submit
-  myTcEditable=(stage===TC_STAGE.OPEN);              // editable only while open (pull back first otherwise)
+  // Load this employee's submission stage for the current period (v44.0 Build 3: one row per
+  // jobsite they worked — fetch ALL of them and use the aggregate). Locked to view-only once
+  // ANY site's supervisor has submitted (maxStage >= sup_submitted); the employee's own
+  // submission does NOT lock them (they can still pull it back, as long as no site has advanced).
+  myTcStatusRows=await getEmployeeStatusRows(emp.id,myTcPeriod.start);
+  const stage=maxStage(myTcStatusRows);
+  myTcLocked=stageAtLeast(stage,TC_STAGE.SUP);       // hard-locked once any site is sent to office
+  myTcEditable=(myTcStatusRows.length===0);          // editable only before the first submit (pull back first otherwise)
   document.getElementById('mytc-locked-note').style.display=myTcLocked?'block':'none';
   document.getElementById('mytc-add-btn').style.display=myTcEditable?'block':'none';
 
@@ -881,7 +926,7 @@ function renderMyTcTotal(){
 function renderMyTcSubmitBar(){
   const bar=document.getElementById('mytc-submit-bar');
   if(!bar)return;
-  const stage=stageOf(myTcStatus);
+  const stage=maxStage(myTcStatusRows); // v44.0 Build 3: aggregate across this employee's site-rows
 
   // Locked (supervisor already submitted) — show a static status line, no actions.
   if(stageAtLeast(stage,TC_STAGE.SUP)){
@@ -929,11 +974,14 @@ async function submitMyTimecard(){
     if(myTcBusy)return;
     myTcBusy=true;
     const btn=document.getElementById('mytc-submit-btn');if(btn)btn.disabled=true;
-    // jobsite: most recent punch's site, for the admin panel's grouping
-    const jobsite=myTcPunches.length?myTcPunches[0].jobsite:null;
-    const {ok,error}=await setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.EMP,jobsite);
+    // v44.0 Build 3: one row per distinct jobsite worked this period (multi-site employees
+    // get a row per site — each site's supervisor submits/tracks their own independently).
+    const jobsites=[...new Set(myTcPunches.map(p=>p.jobsite).filter(Boolean))];
+    if(!jobsites.length){myTcBusy=false;showCustomAlert('Nothing to submit','No jobsite found on your punches this period. Contact your supervisor.');return;}
+    const results=await Promise.all(jobsites.map(js=>setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.EMP,js)));
     myTcBusy=false;
-    if(!ok){showCustomAlert('Could not submit','There was a problem submitting your timecard: '+(error?.message||'unknown error')+'. Please try again.');return;}
+    const failed=results.filter(r=>!r.ok);
+    if(failed.length){showCustomAlert('Could not submit','There was a problem submitting your timecard: '+(failed[0].error?.message||'unknown error')+'. Please try again.');return;}
     showNotif('✓','Timecard submitted','Handed in to your supervisor','#2f7d31',2600);
     await openMyTimecard(myTcEmp); // reload → shows submitted state + pull-back
   };
@@ -952,25 +1000,28 @@ async function submitMyTimecard(){
    hasn't submitted (stage still emp_submitted). Returns the card to 'open'. */
 async function retractMyTimecard(){
   if(myTcBusy)return;
-  // Guard: re-check the stage against the DB in case the supervisor just submitted.
-  const fresh=await getTimecardStatus(myTcEmp.id,myTcPeriod.start);
-  if(stageAtLeast(stageOf(fresh),TC_STAGE.SUP)){
+  // Guard: re-check ALL site-rows against the DB in case a supervisor just submitted one.
+  const fresh=await getEmployeeStatusRows(myTcEmp.id,myTcPeriod.start);
+  if(stageAtLeast(maxStage(fresh),TC_STAGE.SUP)){
     showCustomAlert('Too late to pull back','Your supervisor has already submitted this pay period. Contact them for any corrections.');
     await openMyTimecard(myTcEmp);
     return;
   }
+  if(!fresh.length){await openMyTimecard(myTcEmp);return;} // nothing to pull back
   myTcBusy=true;
   const btn=document.getElementById('mytc-retract-btn');if(btn)btn.disabled=true;
-  const {ok,error}=await setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.OPEN);
+  // Reset every one of this employee's site-rows for the period back to open.
+  const results=await Promise.all(fresh.map(r=>setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.OPEN,r.jobsite)));
   myTcBusy=false;
-  if(!ok){showCustomAlert('Could not pull back','There was a problem: '+(error?.message||'unknown error')+'. Please try again.');return;}
+  const failed=results.filter(r=>!r.ok);
+  if(failed.length){showCustomAlert('Could not pull back','There was a problem: '+(failed[0].error?.message||'unknown error')+'. Please try again.');return;}
   showNotif('✓','Timecard pulled back','You can make changes now','#c47f17',2400);
   await openMyTimecard(myTcEmp);
 }
 
 function closeMyTimecard(){
   myTcEmp=null;myTcPunches=[];myTcPeriod=null;myTcLocked=false;
-  myTcStatus=null;myTcBusy=false;myTcEditable=true;
+  myTcStatusRows=[];myTcBusy=false;myTcEditable=true;
   showScreen('screen-kiosk');
 }
 
@@ -1515,8 +1566,9 @@ async function refreshSupLog(){
 
   if(_mySeq!==_supLogSeq)return; // a newer call has superseded this one — drop the stale render
 
-  // v44.0 (Option A): one submission-stage query per refresh, mapped by employee_id.
-  // Colours the per-employee cards by stage and surfaces out-of-submission punches.
+  // v44.0 (Option A): one submission-stage query per refresh, mapped by employee_id → array of
+  // site-rows (Build 3: one row per jobsite). Colours the per-employee cards by stage and
+  // surfaces out-of-submission punches + Force Submit for stragglers at this supervisor's sites.
   const statusPeriod=supStatusPeriod();
   const statusMap=await getAllStatusForPeriod(statusPeriod.start);
   if(_mySeq!==_supLogSeq)return; // re-guard: the extra async call could have been superseded
@@ -1537,17 +1589,30 @@ async function refreshSupLog(){
     empMap[l.empId].records.push(l);
   });
 
+  const myStatusMap={}; // v44.0 Build 3: per-employee status rows scoped to this supervisor's sites (for updateSubmitSummary)
   container.innerHTML=Object.entries(empMap).map(([empId,data])=>{
     const records=data.records;
-    // v44.0: submission stage for this employee in the viewed period (null row = open).
-    const statusRow=statusMap[empId]||null;
-    const stage=stageOf(statusRow);
+    // v44.0 Build 3: this employee's status rows scoped to THIS supervisor's own jobsites
+    // (they may also have rows at other sites/supervisors — not this card's concern).
+    const allRows=statusMap[empId]||[];
+    const mySiteRows=allRows.filter(r=>sites.includes(r.jobsite));
+    myStatusMap[empId]=mySiteRows;
+    const stage=minStage(mySiteRows); // least-advanced site = what still needs attention
     const chip=supStageChip(stage);
-    const oos=records.filter(l=>isOutOfSubmission(l,statusRow)).length; // punched after submitting
+    // out-of-submission: match each punch to ITS OWN site's row (not a single shared row).
+    const oos=records.filter(l=>isOutOfSubmission(l,mySiteRows.find(r=>r.jobsite===l.jobsite)||null)).length;
     const totalHrs=records.reduce((s,l)=>s+(paidHours(l)||0),0);
     const flags=records.filter(l=>l.autoClocked).length;
     const waivePend=records.filter(l=>isPendingWaive(l)).length;
     const still=records.filter(l=>!l.out).length;
+    // Force Submit (v44.0 Build 3): sites among this supervisor's own jobsites where this
+    // employee has punches this period but no status row yet (never submitted for that site).
+    const mySiteRowsBySite={};mySiteRows.forEach(r=>{mySiteRowsBySite[r.jobsite]=r;});
+    const recordSites=[...new Set(records.filter(l=>sites.includes(l.jobsite)).map(l=>l.jobsite))];
+    const openSupSites=recordSites.filter(s=>!mySiteRowsBySite[s]);
+    const forceBtn=openSupSites.length
+      ? `<button class="btn-sm" onclick="event.stopPropagation();forceSubmitEmployee('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--amber-l);color:var(--amber);border:0.5px solid var(--amber);margin-left:6px;">Force submit</button>`
+      : '';
     const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${oos?` · <span style="color:#e07070;font-weight:600;">${oos} ⚠️ after submit</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
@@ -1559,8 +1624,8 @@ async function refreshSupLog(){
       if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
       else if(l.lunchWaived===true)actBadges+=`<span class="badge" style="background:#d8f0d8;color:#1f5e1f;margin-left:2px;">🍴 Waived</span>`;
       else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
-      // v44.0: punch landed after the employee handed in their card
-      if(isOutOfSubmission(l,statusRow))actBadges+=`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:2px;">⚠️ After submit</span>`;
+      // v44.0: punch landed after the employee handed in their card (matched to that punch's own site)
+      if(isOutOfSubmission(l,mySiteRows.find(r=>r.jobsite===l.jobsite)||null))actBadges+=`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:2px;">⚠️ After submit</span>`;
       const isAssignedSite=(activeSup.jobsites||[]).includes(l.jobsite);
       const siteColor=isAssignedSite?'b-blue':'b-amber'; // amber = unassigned/temp site
       return `<tr class="${l.autoClocked?'row-auto':''}">
@@ -1579,6 +1644,7 @@ async function refreshSupLog(){
         <div>
           <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${data.name}
             <span class="badge" style="background:${chip.bg};color:${chip.color};margin-left:6px;font-size:10px;vertical-align:middle;">${chip.label}</span>
+            ${forceBtn}
           </p>
           <p class="emp-summary">${summary}</p>
         </div>
@@ -1595,7 +1661,7 @@ async function refreshSupLog(){
     </div>`;
   }).join('');
 
-  updateSubmitSummary(empMap,statusMap);
+  updateSubmitSummary(empMap,myStatusMap);
 }
 
 /* ─── Supervisor: site-wide submit to office (v44.0) ───────────────────────────
@@ -1605,13 +1671,14 @@ async function refreshSupLog(){
    hard-locks those employees' My Timecard (the lock keys off stage ≥ sup_submitted). */
 
 // Live count line under the submit button, based on the employees currently shown.
+// statusMap here is already scoped to this supervisor's own jobsites (mySiteRows per employee).
 function updateSubmitSummary(empMap,statusMap){
   const el=document.getElementById('s-submit-summary');
   if(!el)return;
   const ids=Object.keys(empMap||{});
   let submitted=0,open=0,sent=0;
   ids.forEach(id=>{
-    const stage=stageOf(statusMap[id]||null);
+    const stage=minStage(statusMap[id]||[]);
     if(stageAtLeast(stage,TC_STAGE.SUP))sent++;
     else if(stage===TC_STAGE.EMP)submitted++;
     else open++;
@@ -1641,12 +1708,25 @@ async function submitSiteToOffice(){
   const empIds=[...new Set((siteData||[]).map(r=>r.employee_id).filter(Boolean))];
   if(!empIds.length){showCustomAlert('Nothing to submit',`No punches found at your jobsites for ${periodLabel}.`);return;}
 
+  // v44.0 Build 3: statusMap is empId → array of site-rows. Scope to THIS supervisor's own
+  // sites and work in (empId, jobsite) pairs — an employee can be ready at one of the
+  // supervisor's sites and still open at another.
   const statusMap=await getAllStatusForPeriod(period.start);
-  const ready=empIds.filter(id=>stageOf(statusMap[id]||null)===TC_STAGE.EMP);
-  const openCount=empIds.filter(id=>stageOf(statusMap[id]||null)===TC_STAGE.OPEN).length;
-  const alreadySent=empIds.filter(id=>stageAtLeast(stageOf(statusMap[id]||null),TC_STAGE.SUP)).length;
+  const readyPairs=[]; // {empId, jobsite}
+  let alreadySent=0;
+  empIds.forEach(id=>{
+    const rows=(statusMap[id]||[]).filter(r=>sites.includes(r.jobsite));
+    rows.forEach(r=>{
+      if(r.stage===TC_STAGE.EMP)readyPairs.push({empId:id,jobsite:r.jobsite});
+      else if(stageAtLeast(r.stage,TC_STAGE.SUP))alreadySent++;
+    });
+  });
+  const openCount=empIds.filter(id=>{
+    const rows=(statusMap[id]||[]).filter(r=>sites.includes(r.jobsite));
+    return rows.length===0; // hasn't submitted at any of this supervisor's sites yet
+  }).length;
 
-  if(!ready.length){
+  if(!readyPairs.length){
     showCustomAlert('No submitted timecards yet',
       `None of your employees have submitted their timecard for ${periodLabel} yet`+
       (openCount?`, so there's nothing to send. ${openCount} ${openCount!==1?'are':'is'} still open.`:'.')+
@@ -1658,26 +1738,75 @@ async function submitSiteToOffice(){
     ? `${openCount} employee${openCount!==1?'s have':' has'} not submitted yet and will stay open for a later pass.`
     : 'All employees at your sites have submitted.';
   showCustomConfirm(
-    `Submit ${ready.length} timecard${ready.length!==1?'s':''} to the office?`,
+    `Submit ${readyPairs.length} timecard${readyPairs.length!==1?'s':''} to the office?`,
     `This sends the submitted timecards for ${periodLabel} to head office and locks them for those employees. This can't be undone from here.`,
     sub,
-    `Submit ${ready.length} to office`,'var(--green)',
-    ()=>doSubmitSiteToOffice(ready,period,statusMap,periodLabel));
+    `Submit ${readyPairs.length} to office`,'var(--green)',
+    ()=>doSubmitSiteToOffice(readyPairs,period,periodLabel));
 }
 
-async function doSubmitSiteToOffice(ready,period,statusMap,periodLabel){
-  const results=await Promise.all(ready.map(id=>{
-    const jobsite=(statusMap[id]&&statusMap[id].jobsite)||null; // preserve the emp-submit stamp
-    return setTimecardStage(id,period,TC_STAGE.SUP,jobsite);
-  }));
+async function doSubmitSiteToOffice(readyPairs,period,periodLabel){
+  const results=await Promise.all(readyPairs.map(p=>setTimecardStage(p.empId,period,TC_STAGE.SUP,p.jobsite)));
   const failed=results.filter(r=>!r.ok).length;
   if(failed){
     showCustomAlert('Some did not submit',
-      `${ready.length-failed} of ${ready.length} submitted. ${failed} failed — check your connection and try again.`);
+      `${readyPairs.length-failed} of ${readyPairs.length} submitted. ${failed} failed — check your connection and try again.`);
   } else {
-    showNotif('✓','Site submitted',`${ready.length} timecard${ready.length!==1?'s':''} sent for ${periodLabel}`,'#2f7d31',2800);
+    showNotif('✓','Site submitted',`${readyPairs.length} timecard${readyPairs.length!==1?'s':''} sent for ${periodLabel}`,'#2f7d31',2800);
   }
   refreshSupLog(); // repaint stage colours → submitted employees flip to "Sent to office"
+}
+
+/* ─── Supervisor: Force Submit on an employee's behalf (v44.0 Build 3) ───────────────
+   For an employee who can't/didn't submit themselves (away, forgot, etc.) — the supervisor
+   reviews/corrects their punches, then force-submits for whichever of the supervisor's own
+   sites that employee hasn't submitted yet (open → emp_submitted). Blocked by unresolved
+   auto-clocks / pending lunch waives, same gate as everywhere else in the app. No audit
+   marker is kept — once forced, it's indistinguishable from a normal employee submission. */
+async function forceSubmitEmployee(empId,empName){
+  if(!activeSup)return;
+  const sites=activeSup.jobsites||[];
+  const period=supStatusPeriod();
+  const periodLabel=`${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+
+  // Fresh punches for this employee at the supervisor's sites, within the status period.
+  const {data,error}=await sb.from('punches').select('*')
+    .eq('employee_id',empId).in('jobsite',sites)
+    .gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString());
+  if(error){showCustomAlert('Error','Could not load punches: '+error.message);return;}
+  const punches=(data||[]).map(dbRowToEntry);
+  if(!punches.length){showCustomAlert('Nothing to submit',`${empName} has no punches at your sites for ${periodLabel}.`);return;}
+
+  // Which of the supervisor's sites does this employee have punches at, but no status row yet?
+  const rows=await getEmployeeStatusRows(empId,period.start);
+  const rowsBySite={};rows.forEach(r=>{rowsBySite[r.jobsite]=r;});
+  const openSites=[...new Set(punches.map(p=>p.jobsite))].filter(s=>sites.includes(s)&&!rowsBySite[s]);
+  if(!openSites.length){showCustomAlert('Already submitted',`${empName} has already submitted for your site(s) this period.`);return;}
+
+  // Gate: unresolved auto-clocks / pending waives among punches at the sites being forced.
+  const relevant=punches.filter(p=>openSites.includes(p.jobsite));
+  const autos=relevant.filter(p=>p.autoClocked&&!p.editedAfterAuto);
+  const waives=relevant.filter(p=>isPendingWaive(p));
+  if(autos.length||waives.length){
+    const parts=[];
+    if(autos.length)parts.push(`${autos.length} unresolved auto-clock-out${autos.length!==1?'s':''}`);
+    if(waives.length)parts.push(`${waives.length} pending lunch waive${waives.length!==1?'s':''}`);
+    showCustomAlert('Fix these first',`${empName} has ${parts.join(' and ')} at ${openSites.join(', ')}. Resolve via Edit before force-submitting.`);
+    return;
+  }
+
+  showCustomConfirm(
+    `Force submit for ${empName}?`,
+    `This submits ${empName}'s timecard for ${openSites.join(', ')} (${periodLabel}) on their behalf, as if they'd submitted it themselves. Review their punches above before doing this.`,
+    'They can still be included in your next "Submit site to office" pass.',
+    'Force submit','var(--amber)',
+    async()=>{
+      const results=await Promise.all(openSites.map(js=>setTimecardStage(empId,period,TC_STAGE.EMP,js)));
+      const failed=results.filter(r=>!r.ok);
+      if(failed.length){showCustomAlert('Could not submit','There was a problem: '+(failed[0].error?.message||'unknown error'));return;}
+      showNotif('✓','Force submitted',`${empName}'s timecard is ready to send`,'#c47f17',2600);
+      refreshSupLog();
+    });
 }
 
 /* ─── Navigate from Live tiles to the Time log with the right view ─── */
@@ -1850,7 +1979,7 @@ function switchMasterTab(tab){
   if(tab==='employees')refreshMasterEmps();
   if(tab==='departments')refreshDepartmentsPanel();
   if(tab==='activities')refreshActivitiesPanel();
-  if(tab==='submissions')refreshSubmissionsPanel();
+  if(tab==='submissions')setSubPeriod(_subPeriodMode||'current'); // v44.0 Build 3: also paints the period-button active state
   if(tab==='settings')refreshSettingsPanel();
   if(tab==='log'){
     populateMasterFilters();
@@ -2274,6 +2403,12 @@ async function refreshMasterLog(){
    Flow: no flagged records → straight to format picker. Flagged records → warning modal first,
    with "Review now" (jumps to needs-review filter) or "Export anyway" (proceeds to format picker). */
 let masterExportRange={from:null,to:null,siteF:'',empF:''};
+// v44.0 Build 3: when the admin Submissions panel triggers an export (per-site or all-sites),
+// this holds a callback that stamps the included employees' status rows to 'exported' once the
+// PDF/Excel generation finishes. Set by openSubmissionsExport(), consumed + cleared by
+// doMasterExcelZip()/generateMasterPDF() right after they finish building the file. The
+// ad-hoc Report-tab export never sets this, so it never touches pt_timecard_status.
+let _pendingExportStampFn=null;
 let _masterReviewList=[];
 function openMasterExportConfirm(){
   const logs=_masterLogs||[];
@@ -2475,6 +2610,8 @@ async function doMasterExcelZip(){
   showNotif('✓','Excel pack exported',msg,'#1D9E75',4500);
   if(outsideWarn.length)console.warn('Excel export: punches outside the 14-day grid were skipped for:',[...new Set(outsideWarn)]);
   if(multiCodeWarn.length)console.warn('Excel export: 3+ activity codes at one jobsite/day (parked GM case) for:',[...new Set(multiCodeWarn.filter(Boolean))]);
+  // v44.0 Build 3: if this export came from the admin Submissions panel, stamp stage='exported'.
+  if(_pendingExportStampFn){const fn=_pendingExportStampFn;_pendingExportStampFn=null;await fn();}
 }
 function generateMasterPDF(){
   const {jsPDF}=window.jspdf;
@@ -2695,6 +2832,8 @@ function generateMasterPDF(){
   closeMasterFormatModal();
   const totalCards=siteOrder.reduce((s,site)=>s+Object.keys(siteMap[site]).length,0);
   showNotif('✓','PDF generated',`${totalCards} time card${totalCards!==1?'s':''} downloaded`,'#1D9E75',3500);
+  // v44.0 Build 3: if this export came from the admin Submissions panel, stamp stage='exported'.
+  if(_pendingExportStampFn){const fn=_pendingExportStampFn;_pendingExportStampFn=null;fn();}
 }
 // _editEntry holds the current entry being edited (may come from DB query, not timeLog array)
 let _editEntry=null;
@@ -3670,74 +3809,215 @@ function generatePDF(){
 }
 
 /* ─── Submissions panel (master admin) ─── */
-async function refreshSubmissionsPanel(){
-  const list=document.getElementById('submissions-list');
-  list.innerHTML='<p style="color:var(--txt2);font-size:13px;padding:12px 0;">Loading…</p>';
-  const {data,error}=await sb.from('submissions').select('*').order('submitted_at',{ascending:false});
-  if(error){list.innerHTML='<p style="color:var(--red);">Error loading submissions.</p>';return}
-  const subs=data||[];
-  // Populate period filter
-  const periods=[...new Set(subs.map(s=>s.period_start))].sort().reverse();
-  const supNames=[...new Set(subs.map(s=>s.submitted_by))].sort();
-  const pSel=document.getElementById('sub-filter-period');
-  const sSel=document.getElementById('sub-filter-sup');
-  const curP=pSel.value,curS=sSel.value;
-  pSel.innerHTML='<option value="">All periods</option>'+periods.map(p=>{
-    const ps=new Date(p+'T00:00:00');
-    const label=ps.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'});
-    return `<option value="${p}"${p===curP?' selected':''}>${label}</option>`;
-  }).join('');
-  sSel.innerHTML='<option value="">All supervisors</option>'+supNames.map(s=>`<option${s===curS?' selected':''}>${s}</option>`).join('');
-  // Filter
-  let filtered=subs;
-  if(curP)filtered=filtered.filter(s=>s.period_start===curP);
-  if(curS)filtered=filtered.filter(s=>s.submitted_by===curS);
-  if(!filtered.length){list.innerHTML='<p style="color:var(--txt2);text-align:center;padding:20px;font-size:13px;">No submissions match.</p>';return}
-  // Group by period
-  const byPeriod={};
-  filtered.forEach(s=>{
-    if(!byPeriod[s.period_start])byPeriod[s.period_start]=[];
-    byPeriod[s.period_start].push(s);
+/* ─── MASTER: Submissions panel (v44.0 Build 3 — full rewrite) ────────────────────
+   Replaces the old first-submission-wins list (which read the `submissions` table — that
+   table is now only used by the supervisor's preview-export duplicate detection, unrelated
+   to this panel). This panel reads pt_timecard_status and is organized as jobsite accordions
+   with "X of Y submitted" headers, per-employee failsafe flags + admin override, and
+   per-site / all-sites export that produces one full consolidated file per employee. */
+
+let _subPeriodMode='current'; // 'current' | 'last' — mirrors the supervisor's period pattern
+function subStatusPeriod(){
+  return _subPeriodMode==='last'?getPeriodByOffset(1):getPeriodByOffset(0);
+}
+function setSubPeriod(mode){
+  _subPeriodMode=mode;
+  ['current','last'].forEach(m=>{
+    const btn=document.getElementById('subbtn-'+m);
+    if(btn){
+      btn.style.fontWeight=m===mode?'700':'500';
+      btn.style.background=m===mode?'var(--blue-l)':'';
+      btn.style.color=m===mode?'var(--blue-d)':'';
+    }
   });
-  list.innerHTML=Object.entries(byPeriod).sort((a,b)=>b[0].localeCompare(a[0])).map(([ps,records])=>{
-    const pStart=new Date(ps+'T00:00:00');
-    const pEnd=new Date(records[0].period_end+'T00:00:00');
-    const periodLabel=`${pStart.toLocaleDateString([],{month:'short',day:'numeric'})} – ${pEnd.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
-    const rows=records.map(s=>{
-      const dt=new Date(s.submitted_at);
-      const dtStr=dt.toLocaleDateString([],{month:'short',day:'numeric'})+' '+dt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-      const badge=s.status==='preliminary'?'<span class="badge b-amber" style="font-size:10px;">Preliminary</span>':'<span class="badge b-in" style="font-size:10px;">Final</span>';
-      return `<tr>
-        <td>${s.employee_name} ${badge}</td>
-        <td style="font-size:11px;color:var(--txt2);">${s.submitted_by}</td>
-        <td style="font-size:11px;color:var(--txt2);">${dtStr}</td>
-        <td><button class="btn-sm danger" onclick="deleteSubmission(${s.id},'${s.employee_name.replace(/'/g,"\'")}')">Clear</button></td>
-      </tr>`;
+  refreshSubmissionsPanel();
+}
+
+async function refreshSubmissionsPanel(){
+  const container=document.getElementById('submissions-list');
+  container.innerHTML='<p style="color:var(--txt2);font-size:13px;padding:12px 0;">Loading…</p>';
+  const period=subStatusPeriod();
+  const periodLabel=`${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+  const lbl=document.getElementById('sub-period-label');if(lbl)lbl.textContent=periodLabel;
+
+  const [statusMap,punchRes]=await Promise.all([
+    getAllStatusForPeriod(period.start),
+    sb.from('punches').select('*').gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString())
+  ]);
+  if(punchRes.error){container.innerHTML='<p style="color:var(--red);">Error loading punches: '+punchRes.error.message+'</p>';return;}
+  const allPunches=(punchRes.data||[]).map(dbRowToEntry);
+
+  // Group punches by employee (all sites — for the total-hours figure) and by employee+jobsite
+  // (for that row's failsafe flags), and track which jobsites each employee actually worked
+  // (needed so isFullyReadyForExport can catch a worked site with NO row yet, not just check
+  // the rows that happen to exist).
+  const punchesByEmp={},punchesByEmpSite={},sitesWorkedByEmp={};
+  allPunches.forEach(p=>{
+    if(!p.empId)return;
+    (punchesByEmp[p.empId]=punchesByEmp[p.empId]||[]).push(p);
+    (punchesByEmpSite[p.empId+'|'+p.jobsite]=punchesByEmpSite[p.empId+'|'+p.jobsite]||[]).push(p);
+    (sitesWorkedByEmp[p.empId]=sitesWorkedByEmp[p.empId]||new Set()).add(p.jobsite);
+  });
+
+  // Jobsite → set of employee IDs (union of who punched there + who has a status row there).
+  const siteEmpSet={};
+  const addToSite=(site,empId)=>{if(!site)return;(siteEmpSet[site]=siteEmpSet[site]||new Set()).add(String(empId));};
+  allPunches.forEach(p=>addToSite(p.jobsite,p.empId));
+  Object.values(statusMap).forEach(rows=>rows.forEach(r=>addToSite(r.jobsite,r.employee_id)));
+  const sitesOrdered=[...new Set([...JOBSITES.filter(j=>siteEmpSet[j]),...Object.keys(siteEmpSet).filter(j=>!JOBSITES.includes(j))])];
+
+  const empNameById={};(employees||[]).forEach(e=>{empNameById[e.id]=e.name;});
+  const now=new Date();
+  const periodEnded=_subPeriodMode==='last'||now>=period.end;
+  let anyFullyReadyAnywhere=false;
+
+  const accordionHtml=sitesOrdered.map(site=>{
+    const empIds=[...siteEmpSet[site]].sort((a,b)=>(empNameById[a]||'').localeCompare(empNameById[b]||''));
+    let readyCount=0,canExportSite=false;
+    const rowsHtml=empIds.map(empId=>{
+      const rows=statusMap[empId]||[];
+      const row=rows.find(r=>r.jobsite===site)||null;
+      const stage=stageOf(row);
+      const ready=stageAtLeast(stage,TC_STAGE.SUP);
+      if(ready)readyCount++;
+      const exported=stage===TC_STAGE.EXPORTED;
+      const fullyReady=isFullyReadyForExport(rows,[...(sitesWorkedByEmp[empId]||[])]);
+      if(fullyReady){anyFullyReadyAnywhere=true;if(ready)canExportSite=true;}
+      const name=empNameById[empId]||`Employee #${empId}`;
+      const totalHrs=(punchesByEmp[empId]||[]).reduce((s,p)=>s+(paidHours(p)||0),0);
+      const sitePunches=punchesByEmpSite[empId+'|'+site]||[];
+      const oosCount=sitePunches.filter(p=>isOutOfSubmission(p,row)).length;
+      const autoCount=sitePunches.filter(p=>p.autoClocked&&!p.editedAfterAuto).length;
+      const waiveCount=sitePunches.filter(p=>isPendingWaive(p)).length;
+      const neverSubmitted=stage===TC_STAGE.OPEN&&periodEnded;
+      const stuckEmp=stage===TC_STAGE.EMP;
+
+      const flagParts=[];
+      if(neverSubmitted)flagParts.push('Never submitted');
+      if(stuckEmp)flagParts.push('Waiting on supervisor');
+      if(oosCount)flagParts.push(`${oosCount} punch${oosCount!==1?'es':''} after submit`);
+      if(autoCount)flagParts.push(`${autoCount} unresolved auto-clock${autoCount!==1?'s':''}`);
+      if(waiveCount)flagParts.push(`${waiveCount} pending waive${waiveCount!==1?'s':''}`);
+      const hasFlag=flagParts.length>0;
+      const blocked=autoCount>0||waiveCount>0;
+      const canOverride=(neverSubmitted||stuckEmp)&&!blocked;
+
+      let actionHtml='';
+      if(!ready&&canOverride){
+        actionHtml=`<button class="btn-sm" onclick="event.stopPropagation();adminOverrideSite('${empId}','${site.replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}')" style="background:var(--amber-l);color:var(--amber);border:0.5px solid var(--amber);margin-left:6px;">Override</button>`;
+      } else if(!ready&&blocked){
+        actionHtml=`<span style="font-size:10px;color:var(--txt3);margin-left:6px;">Fix punches first</span>`;
+      }
+      const statusHtml=exported
+        ? '<span class="badge" style="background:var(--blue-l,#dbeafe);color:var(--blue-d,#1e40af);font-size:10px;margin-left:6px;">✓ Exported</span>'
+        : ready?'<span style="color:var(--green);font-weight:700;margin-left:6px;">✓</span>':'';
+
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
+        <div style="min-width:0;">
+          <span style="font-size:13px;color:var(--txt);font-weight:600;">${name}</span>${statusHtml}
+          ${hasFlag?`<div style="font-size:11px;color:${blocked?'#e07070':'var(--amber)'};margin-top:2px;">⚠️ ${flagParts.join(' · ')}</div>`:''}
+        </div>
+        <div style="display:flex;align-items:center;flex-shrink:0;">
+          <span style="font-size:13px;font-weight:600;color:var(--txt);">${totalHrs.toFixed(1)}h</span>
+          ${actionHtml}
+        </div>
+      </div>`;
     }).join('');
-    return `<div style="margin-bottom:14px;">
-      <p style="font-size:11px;font-weight:600;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Period: ${periodLabel}</p>
-      <div style="border:0.5px solid var(--bdr);border-radius:var(--radius);overflow:hidden;">
-        <table><thead><tr><th>Employee</th><th>Submitted by</th><th>Date &amp; time</th><th></th></tr></thead>
-        <tbody>${rows}</tbody></table>
+
+    const cardId=`sub-site-${site.replace(/[^a-zA-Z0-9]/g,'_')}`;
+    return `<div class="emp-card">
+      <div class="emp-card-header" onclick="toggleEmpCard('${cardId}')">
+        <div>
+          <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${site}</p>
+          <p class="emp-summary">${readyCount} of ${empIds.length} submitted</p>
+        </div>
+        <span style="font-size:18px;color:var(--txt3);" id="${cardId}-chevron">▸</span>
+      </div>
+      <div class="emp-card-body" id="${cardId}">
+        ${rowsHtml||'<p style="color:var(--txt2);font-size:12px;padding:8px 4px;">No employees this period.</p>'}
+        <div style="padding:10px 4px 2px;">
+          <button class="btn-sm" ${canExportSite?'':'disabled'} onclick="openSubmissionsExport('site','${site.replace(/'/g,"\\'")}')" style="${canExportSite?'':'opacity:.5;'}">Export ${site} →</button>
+        </div>
       </div>
     </div>`;
   }).join('');
+
+  const topExportBtn=document.getElementById('sub-export-all-btn');
+  if(topExportBtn)topExportBtn.disabled=!anyFullyReadyAnywhere;
+
+  container.innerHTML=accordionHtml||'<p style="color:var(--txt2);text-align:center;padding:20px;font-size:13px;">No punch records for this period.</p>';
 }
 
-function deleteSubmission(id,empName){
+/* Admin override (v44.0 Build 3): forces a flagged employee's THIS-SITE row straight to
+   sup_submitted — standing in for BOTH the employee's submission and the supervisor's review,
+   for when neither is available to act. Same clean-punches gate as Force Submit. No audit
+   marker is kept — once overridden it's indistinguishable from a normal supervisor submit. */
+async function adminOverrideSite(empId,jobsite,empName){
+  const period=subStatusPeriod();
+  const {data,error}=await sb.from('punches').select('*')
+    .eq('employee_id',empId).eq('jobsite',jobsite)
+    .gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString());
+  if(error){showCustomAlert('Error','Could not load punches: '+error.message);return;}
+  const punches=(data||[]).map(dbRowToEntry);
+  const autos=punches.filter(p=>p.autoClocked&&!p.editedAfterAuto);
+  const waives=punches.filter(p=>isPendingWaive(p));
+  if(autos.length||waives.length){
+    const parts=[];
+    if(autos.length)parts.push(`${autos.length} unresolved auto-clock-out${autos.length!==1?'s':''}`);
+    if(waives.length)parts.push(`${waives.length} pending lunch waive${waives.length!==1?'s':''}`);
+    showCustomAlert('Fix these first',`${empName} has ${parts.join(' and ')} at ${jobsite}. Resolve via Edit before overriding.`);
+    return;
+  }
   showCustomConfirm(
-    `Clear submission for ${empName}?`,
-    'This will allow this employee to be submitted again for the same pay period.',
-    'The supervisor will no longer see a duplicate warning for this employee.',
-    'Clear record',
-    'var(--amber)',
+    `Override for ${empName} at ${jobsite}?`,
+    `This marks ${empName}'s timecard at ${jobsite} as ready for export — standing in for both the employee's submission and the supervisor's review. Use this only when neither is available.`,
+    'Double-check the hours above before overriding.',
+    'Override','var(--amber)',
     async()=>{
-      const {error}=await sb.from('submissions').delete().eq('id',id);
-      if(error){showCustomAlert('Error','Could not delete: '+error.message);return}
+      const {ok,error:err}=await setTimecardStage(empId,period,TC_STAGE.SUP,jobsite);
+      if(!ok){showCustomAlert('Could not override','There was a problem: '+(err?.message||'unknown error'));return;}
+      showNotif('✓','Overridden',`${empName} at ${jobsite} is ready for export`,'#c47f17',2600);
       refreshSubmissionsPanel();
-      showNotif('✓','Submission cleared',empName+' can be resubmitted','#c47f17',2400);
-    }
-  );
+    });
+}
+
+/* Export (v44.0 Build 3): only includes employees who are sup_submitted at EVERY jobsite they
+   worked this period (isFullyReadyForExport). Generates ONE full consolidated file per employee
+   — all hours, all sites, same as the existing template — then stamps stage='exported' on every
+   one of their site-rows at once, so they drop out of every accordion together. Reuses the
+   existing PDF/Excel machinery by pointing _masterLogs + the Report tab's date fields at this
+   scoped set (see _pendingExportStampFn's comment for why that's necessary), then routes through
+   the same format picker used by the Report tab. */
+async function openSubmissionsExport(scopeType,jobsite){
+  const period=subStatusPeriod();
+  const [statusMap,punchRes]=await Promise.all([
+    getAllStatusForPeriod(period.start),
+    sb.from('punches').select('*').gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString())
+  ]);
+  if(punchRes.error){showCustomAlert('Error','Could not load punches: '+punchRes.error.message);return;}
+  const allLogs=(punchRes.data||[]).map(dbRowToEntry);
+  const sitesWorkedByEmp={};
+  allLogs.forEach(p=>{if(!p.empId)return;(sitesWorkedByEmp[p.empId]=sitesWorkedByEmp[p.empId]||new Set()).add(p.jobsite);});
+
+  let eligibleIds=Object.keys(statusMap).filter(id=>isFullyReadyForExport(statusMap[id],[...(sitesWorkedByEmp[id]||[])]));
+  if(scopeType==='site')eligibleIds=eligibleIds.filter(id=>(statusMap[id]||[]).some(r=>r.jobsite===jobsite&&r.stage===TC_STAGE.SUP));
+  if(!eligibleIds.length){showCustomAlert('Nothing ready','No employees are fully ready for export yet — every site they worked needs to reach "Sent to office" first.');return;}
+
+  const logs=allLogs.filter(l=>eligibleIds.includes(String(l.empId)));
+  if(!logs.length){showCustomAlert('No data','No completed punches found for the ready employees.');return;}
+
+  _masterLogs=logs;
+  masterExportRange={logs};
+  document.getElementById('m-log-from').value=toDateStr(period.start);
+  document.getElementById('m-log-to').value=toDateStr(period.end);
+
+  _pendingExportStampFn=async()=>{
+    const pairs=[];
+    eligibleIds.forEach(id=>{(statusMap[id]||[]).forEach(r=>pairs.push({empId:id,jobsite:r.jobsite}));});
+    await Promise.all(pairs.map(p=>setTimecardStage(p.empId,period,TC_STAGE.EXPORTED,p.jobsite)));
+    refreshSubmissionsPanel();
+  };
+  showMasterFormatModal();
 }
 
 /* ─── Preliminary reminder banner ─── */
@@ -3761,7 +4041,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v43.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v44.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
