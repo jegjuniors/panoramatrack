@@ -1,7 +1,59 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v44.1 *(supervisor login simplified + uniqueness enforcement for PINs & supervisor passwords)*
+**Current Version:** v44.3 *(admin export buttons — no more silent-fail; state-aware breakdown popup + re-export)*
 **Last Updated:** July 7, 2026
+
+---
+
+## ✅ v44.3 — Admin export buttons: no more silent-fail; state-aware breakdown + re-export
+
+**The problem:** In the admin Submissions panel, the top "Export all sites" button and each per-site "Export [site] →" button were being silently disabled (`.disabled = true` + `opacity:.5`) whenever nothing was eligible for export. On a phone the greyed-out state was easy to miss — from the admin's perspective, the button "just didn't do anything" when tapped. There was also no way to re-export employees who had already been exported this period (needed occasionally for lost files, corrected copies, or forwarding to a different recipient).
+
+**The fix — hybrid design (all option-A picks + wording option 2):**
+
+- **Buttons are never disabled anymore.** Both the top button (`sub-export-all-btn`) and every per-site button stay clickable at all times. When nothing is eligible, the label swaps to **"Nothing to export — details"** — same primary blue styling for the top button, same `btn-sm` styling for per-site buttons. The label swap happens at panel-refresh time via the same `anyFullyReadyAnywhere` / `canExportSite` conditions that used to drive the disabled state.
+
+- **openSubmissionsExport routes to a breakdown popup instead of the old flat "Nothing ready" alert.** When it finds no eligible IDs, it now calls `showExportEmptyBreakdown()`, which computes state buckets and shows the new `#export-breakdown-bg` modal. The old `showCustomAlert('Nothing ready', ...)` line is gone.
+
+- **The popup shows counts only (no names).** Buckets, using the same "worked sites" definition as `isFullyReadyForExport` (union of sites the employee punched at ∪ sites where a status row exists):
+  - **fully exported** — every worked site at `stage='exported'`
+  - **partially exported** — some sites at `exported`, others below (rare edge case: new punch at a new site after export; usually 0)
+  - **not submitted** — no sites at `exported` AND not fully at `sup_submitted` either (covers open/emp_submitted/mixed-below-sup states)
+  - Zero-count lines are omitted entirely; if none of the buckets have anyone, the body reads "No employees with punches this period."
+  - For **per-site scope**, only counts employees who touched that specific jobsite (either punched there or have a status row for it).
+
+- **Wording softener (option 2):** the "not submitted" line reads **"not yet submitted (period still open)"** when viewing the **current** period (mid-period supervisors legitimately can't submit yet, so no blame) and **"waiting on supervisor submission"** when viewing the **last** period (where a delay actually matters). Driven off `_subPeriodMode === 'current'`.
+
+- **Re-export lives inside the popup only.** When `fullyExported > 0`, a blue Re-export button appears in the modal's action row alongside Close. Label reads **"Re-export N already-exported employee(s)"**. Clicking runs `startReExport()`, which filters `statusMap` to employees whose every worked site is at `stage='exported'` (further filtered to the per-site scope's jobsite if applicable), routes the same `_masterLogs` / `masterExportRange` handoff as the initial export, and opens the format picker (`showMasterFormatModal`). **No stages are re-stamped** — the rows are already `exported`, so the assigned `_pendingExportStampFn` is a no-op that only calls `refreshSubmissionsPanel()` for consistency.
+
+**Modal structure (`#export-breakdown-bg`):** mirrors the existing `#custom-alert-bg` pattern but uses `innerHTML` on the body (not `textContent`) so the count lines can render as a bulleted list. Wired identically — `showExportBreakdown(title, bodyHtml, reExportLabel, onReExport)` sets everything up, `closeExportBreakdown()` dismisses, and the Re-export button's click handler is attached once on DOMContentLoaded. A single module-level `_ebReExportCb` holds the callback for the current instance (nulled on close).
+
+**What was NOT touched:**
+- The eligible-export path (`openSubmissionsExport` when `eligibleIds.length > 0`) is unchanged — same stage-stamping, same format picker, same behavior.
+- Per-site export scoping logic is unchanged.
+- Employee accordion rows are unchanged — the individual per-employee flags (⚠️ Never submitted, ⚠️ Waiting on supervisor, ✓ Exported, etc.) still surface there as they did in v44.0 Build 3.
+- No schema changes. No migration needed.
+
+**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`.
+
+---
+
+## ✅ v44.2 — Force Submit reappears after pull-back
+
+**Tiny, focused fix.** Surfaced during v44.1 testing: an employee could submit their timecard, then pull it back, and the supervisor's Force Submit button would not reappear — leaving the supervisor with no escalation path if the employee then didn't re-submit.
+
+**Root cause:** `refreshSupLog`'s Force Submit condition was `!mySiteRowsBySite[s]` — it only surfaced when NO status row existed for that (employee, period, jobsite) tuple. But pull-back (`retractMyTimecard`) doesn't delete the row — it resets the row's stage to `'open'`. So the row still existed, just at `open`, and the button stayed hidden.
+
+**Fix (one condition change in `app.js`):** widened the filter to also include rows at `stage === TC_STAGE.OPEN`:
+```js
+const openSupSites = recordSites.filter(s => {
+  const r = mySiteRowsBySite[s];
+  return !r || r.stage === TC_STAGE.OPEN;
+});
+```
+No UI differentiation between never-submitted and pulled-back — the button looks and behaves identically in both cases. The clean-punches gate in `forceSubmitEmployee` still runs (blocks on unresolved auto-clocks or pending waives), so the safety net is unchanged.
+
+**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change.
 
 ---
 
@@ -500,4 +552,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 7, 2026 — v44.1 (supervisor login simplified + PIN/password uniqueness enforcement)_
+_Last updated: July 7, 2026 — v44.3 (admin export buttons — no more silent-fail; state-aware breakdown popup + re-export)_

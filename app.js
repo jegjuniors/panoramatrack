@@ -1610,11 +1610,18 @@ async function refreshSupLog(){
     const flags=records.filter(l=>l.autoClocked).length;
     const waivePend=records.filter(l=>isPendingWaive(l)).length;
     const still=records.filter(l=>!l.out).length;
-    // Force Submit (v44.0 Build 3): sites among this supervisor's own jobsites where this
-    // employee has punches this period but no status row yet (never submitted for that site).
+    // Force Submit (v44.0 Build 3, widened v44.2): sites among this supervisor's own jobsites
+    // where this employee has punches this period but no valid submission — either no status
+    // row yet (never submitted) OR a row that exists but is back at 'open' (pulled back).
+    // A pulled-back row is functionally identical to a never-submitted one from the supervisor's
+    // perspective: the employee has punches and no live submission, so Force Submit still
+    // applies. No UI differentiation between the two — the button looks the same in both cases.
     const mySiteRowsBySite={};mySiteRows.forEach(r=>{mySiteRowsBySite[r.jobsite]=r;});
     const recordSites=[...new Set(records.filter(l=>sites.includes(l.jobsite)).map(l=>l.jobsite))];
-    const openSupSites=recordSites.filter(s=>!mySiteRowsBySite[s]);
+    const openSupSites=recordSites.filter(s=>{
+      const r=mySiteRowsBySite[s];
+      return !r || r.stage===TC_STAGE.OPEN;
+    });
     const forceBtn=openSupSites.length
       ? `<button class="btn-sm" onclick="event.stopPropagation();forceSubmitEmployee('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--amber-l);color:var(--amber);border:0.5px solid var(--amber);margin-left:6px;">Force submit</button>`
       : '';
@@ -3947,14 +3954,20 @@ async function refreshSubmissionsPanel(){
       <div class="emp-card-body" id="${cardId}">
         ${rowsHtml||'<p style="color:var(--txt2);font-size:12px;padding:8px 4px;">No employees this period.</p>'}
         <div style="padding:10px 4px 2px;">
-          <button class="btn-sm" ${canExportSite?'':'disabled'} onclick="openSubmissionsExport('site','${site.replace(/'/g,"\\'")}')" style="${canExportSite?'':'opacity:.5;'}">Export ${site} →</button>
+          <button class="btn-sm" onclick="openSubmissionsExport('site','${site.replace(/'/g,"\\'")}')">${canExportSite?`Export ${site} →`:'Nothing to export — details'}</button>
         </div>
       </div>
     </div>`;
   }).join('');
 
+  // v44.3: top button is never disabled — always clickable. Label swaps to signal state;
+  // click routes to openSubmissionsExport('all',null), which shows the breakdown popup
+  // when nothing is eligible (instead of the old silent-fail disabled state).
   const topExportBtn=document.getElementById('sub-export-all-btn');
-  if(topExportBtn)topExportBtn.disabled=!anyFullyReadyAnywhere;
+  if(topExportBtn){
+    topExportBtn.disabled=false;
+    topExportBtn.textContent=anyFullyReadyAnywhere?'Export all sites (ready employees) →':'Nothing to export — details';
+  }
 
   container.innerHTML=accordionHtml||'<p style="color:var(--txt2);text-align:center;padding:20px;font-size:13px;">No punch records for this period.</p>';
 }
@@ -4012,7 +4025,13 @@ async function openSubmissionsExport(scopeType,jobsite){
 
   let eligibleIds=Object.keys(statusMap).filter(id=>isFullyReadyForExport(statusMap[id],[...(sitesWorkedByEmp[id]||[])]));
   if(scopeType==='site')eligibleIds=eligibleIds.filter(id=>(statusMap[id]||[]).some(r=>r.jobsite===jobsite&&r.stage===TC_STAGE.SUP));
-  if(!eligibleIds.length){showCustomAlert('Nothing ready','No employees are fully ready for export yet — every site they worked needs to reach "Sent to office" first.');return;}
+  if(!eligibleIds.length){
+    // v44.3: instead of a flat "Nothing ready" alert, show a state-aware breakdown popup
+    // with counts (fully exported / not yet submitted / partially exported) and a
+    // conditional Re-export button when any employees are already exported.
+    showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period);
+    return;
+  }
 
   const logs=allLogs.filter(l=>eligibleIds.includes(String(l.empId)));
   if(!logs.length){showCustomAlert('No data','No completed punches found for the ready employees.');return;}
@@ -4028,6 +4047,163 @@ async function openSubmissionsExport(scopeType,jobsite){
     await Promise.all(pairs.map(p=>setTimecardStage(p.empId,period,TC_STAGE.EXPORTED,p.jobsite)));
     refreshSubmissionsPanel();
   };
+  showMasterFormatModal();
+}
+
+/* ─── v44.3: Export breakdown popup + re-export path ────────────────────────────
+
+   The admin Submissions panel used to silently disable the "Export all sites" and
+   per-site export buttons when nothing was eligible for export — no feedback, and no
+   way to re-export employees already exported this period. v44.3 replaces that with:
+
+     1. Buttons stay clickable at all times (label swaps to "Nothing to export — details"
+        when nothing is eligible, courtesy of refreshSubmissionsPanel).
+     2. openSubmissionsExport routes to showExportEmptyBreakdown() when it finds no
+        eligible IDs — a state-aware popup with counts (no names) and a conditional
+        Re-export button.
+     3. Re-export runs the same file-generation path as the initial export but stamps
+        no stages (the rows are already 'exported'), so the panel view is unchanged
+        after re-export finishes.
+
+   Wording softener (v44.3, "option 2"): when viewing the CURRENT period, mid-period
+   supervisors haven't had a chance to submit yet — so we say "not yet submitted
+   (period still open)" instead of the sharper "waiting on supervisor submission",
+   which is reserved for the LAST-period view where a delay actually matters. */
+
+let _ebReExportCb=null;
+function showExportBreakdown(title,bodyHtml,reExportLabel,onReExport){
+  document.getElementById('eb-title').textContent=title;
+  document.getElementById('eb-body').innerHTML=bodyHtml;
+  const btn=document.getElementById('eb-reexport-btn');
+  if(reExportLabel&&onReExport){
+    btn.textContent=reExportLabel;
+    btn.style.display='';
+    _ebReExportCb=onReExport;
+  } else {
+    btn.style.display='none';
+    _ebReExportCb=null;
+  }
+  document.getElementById('export-breakdown-bg').style.display='flex';
+}
+function closeExportBreakdown(){
+  document.getElementById('export-breakdown-bg').style.display='none';
+  _ebReExportCb=null;
+}
+function doExportBreakdownReExport(){
+  const cb=_ebReExportCb;
+  closeExportBreakdown();
+  if(cb)cb();
+}
+// Wire the Re-export button once the DOM is ready.
+document.addEventListener('DOMContentLoaded',()=>{
+  const b=document.getElementById('eb-reexport-btn');
+  if(b)b.addEventListener('click',doExportBreakdownReExport);
+});
+
+/* Compute state buckets for the empty-export popup, then show it.
+   Buckets (using the same "worked sites" definition as isFullyReadyForExport — union of
+   sites the employee punched at AND sites where a status row exists):
+     - fullyExported:     every worked site at stage='exported'
+     - partiallyExported: some sites at 'exported', others below (rare edge case — new
+                          punch at a new site after export; usually 0)
+     - notSubmitted:      no sites at 'exported' AND not fully at 'sup_submitted' either
+                          (covers open/emp_submitted/mixed-below-sup states)
+   For per-site scope, only counts employees who touched that specific jobsite. */
+function showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period){
+  const empIds=Object.keys(statusMap);
+  const punchEmpIds=Object.keys(sitesWorkedByEmp);
+  const allEmpIds=[...new Set([...empIds,...punchEmpIds])];
+
+  // For per-site scope: only count employees who touched this site (either punched
+  // there or have a status row for it — the same union used across the panel).
+  const scoped=scopeType==='site'
+    ? allEmpIds.filter(id=>{
+        const worked=sitesWorkedByEmp[id];
+        const hasRow=(statusMap[id]||[]).some(r=>r.jobsite===jobsite);
+        return (worked&&worked.has(jobsite))||hasRow;
+      })
+    : allEmpIds;
+
+  let fullyExported=0,partiallyExported=0,notSubmitted=0;
+  scoped.forEach(id=>{
+    const rows=statusMap[id]||[];
+    const worked=[...(sitesWorkedByEmp[id]||[])];
+    const sites=new Set([...worked,...rows.map(r=>r.jobsite)]);
+    if(!sites.size)return;
+    const stages=[...sites].map(s=>{
+      const r=rows.find(rr=>rr.jobsite===s);
+      return r?r.stage:TC_STAGE.OPEN;
+    });
+    const allEx=stages.every(st=>st===TC_STAGE.EXPORTED);
+    const anyEx=stages.some(st=>st===TC_STAGE.EXPORTED);
+    if(allEx)fullyExported++;
+    else if(anyEx)partiallyExported++;
+    else notSubmitted++;
+  });
+
+  const isCurrent=_subPeriodMode==='current';
+  const notSubmittedLabel=isCurrent
+    ? 'not yet submitted (period still open)'
+    : 'waiting on supervisor submission';
+
+  const title=scopeType==='site'?`Nothing to export at ${jobsite}`:'Nothing to export';
+
+  const lines=[];
+  if(fullyExported>0)lines.push(`<strong>${fullyExported}</strong> employee${fullyExported!==1?'s':''} already fully exported this period`);
+  if(notSubmitted>0)lines.push(`<strong>${notSubmitted}</strong> employee${notSubmitted!==1?'s':''} ${notSubmittedLabel}`);
+  if(partiallyExported>0)lines.push(`<strong>${partiallyExported}</strong> employee${partiallyExported!==1?'s':''} partially exported`);
+
+  const bodyHtml=lines.length
+    ? '<ul style="margin:6px 0 0;padding-left:20px;color:var(--txt);font-size:13px;line-height:1.7;">'+lines.map(l=>`<li>${l}</li>`).join('')+'</ul>'
+    : '<p style="color:var(--txt2);font-size:13px;margin:0;">No employees with punches this period.</p>';
+
+  const canReExport=fullyExported>0;
+  const reExportLabel=canReExport
+    ? `Re-export ${fullyExported} already-exported employee${fullyExported!==1?'s':''}`
+    : null;
+  const onReExport=canReExport
+    ? ()=>startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period)
+    : null;
+
+  showExportBreakdown(title,bodyHtml,reExportLabel,onReExport);
+}
+
+/* Re-export path — regenerates the same consolidated file(s) for employees whose every
+   worked site is already at stage='exported'. No stage stamping (they're already
+   exported); the no-op _pendingExportStampFn still refreshes the panel afterwards for
+   consistency. For per-site scope, further filtered to employees who worked that site. */
+function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period){
+  let reExportIds=Object.keys(statusMap).filter(id=>{
+    const rows=statusMap[id]||[];
+    const worked=[...(sitesWorkedByEmp[id]||[])];
+    const sites=new Set([...worked,...rows.map(r=>r.jobsite)]);
+    if(!sites.size)return false;
+    return [...sites].every(s=>{
+      const r=rows.find(rr=>rr.jobsite===s);
+      return !!r&&r.stage===TC_STAGE.EXPORTED;
+    });
+  });
+  if(scopeType==='site')reExportIds=reExportIds.filter(id=>{
+    const worked=sitesWorkedByEmp[id];
+    return worked&&worked.has(jobsite);
+  });
+
+  if(!reExportIds.length){
+    showCustomAlert('Nothing to re-export','No fully-exported employees found for this scope.');
+    return;
+  }
+
+  const logs=allLogs.filter(l=>reExportIds.includes(String(l.empId)));
+  if(!logs.length){showCustomAlert('No data','No punches found for the exported employees.');return;}
+
+  _masterLogs=logs;
+  masterExportRange={logs};
+  document.getElementById('m-log-from').value=toDateStr(period.start);
+  document.getElementById('m-log-to').value=toDateStr(period.end);
+
+  // v44.3: no stage-stamping on re-export — rows are already 'exported'. The stamp
+  // function still refreshes the panel so any concurrent-tab changes show through.
+  _pendingExportStampFn=async()=>{refreshSubmissionsPanel();};
   showMasterFormatModal();
 }
 
@@ -4052,7 +4228,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v44.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v44.3',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
