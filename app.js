@@ -4012,9 +4012,25 @@ async function refreshSubmissionsPanel(){
       const neverSubmitted=stage===TC_STAGE.OPEN&&periodEnded;
       const stuckEmp=stage===TC_STAGE.EMP;
 
+      // v45.1: cross-site blocker note — this site's row is done, but the employee worked
+      // another site that isn't at sup_submitted yet, so the all-or-nothing export is still
+      // held up there. Last-period view only: mid-period, other sites simply haven't had
+      // time to submit yet, so it'd just be noise (matches the "period still open" leniency
+      // already used elsewhere in this panel).
+      let blockingSites=[];
+      if(ready&&_subPeriodMode==='last'){
+        const otherSites=new Set([...(sitesWorkedByEmp[empId]||[]),...rows.map(r=>r.jobsite)]);
+        otherSites.delete(site);
+        blockingSites=[...otherSites].filter(s=>{
+          const r=rows.find(rr=>rr.jobsite===s);
+          return !stageAtLeast(r?r.stage:TC_STAGE.OPEN,TC_STAGE.SUP);
+        });
+      }
+
       const flagParts=[];
       if(neverSubmitted)flagParts.push('Never submitted');
-      if(stuckEmp)flagParts.push('Waiting on supervisor');
+      if(stuckEmp)flagParts.push('Needs supervisor review'); // v45.1: renamed from "Waiting on supervisor" — freed up "Waiting on:" for the cross-site note below
+      if(blockingSites.length)flagParts.push(`Waiting on: ${blockingSites.join(', ')}`);
       if(oosCount)flagParts.push(`${oosCount} punch${oosCount!==1?'es':''} after submit`);
       if(autoCount)flagParts.push(`${autoCount} unresolved auto-clock${autoCount!==1?'s':''}`);
       if(waiveCount)flagParts.push(`${waiveCount} pending waive${waiveCount!==1?'s':''}`);
@@ -4330,7 +4346,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v45.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v45.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

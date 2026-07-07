@@ -1,7 +1,22 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v45.0 *(employee last-period catch-up — My Timecard)*
+**Current Version:** v45.1 *(Submissions panel — cross-site blocker note + flag rename)*
 **Last Updated:** July 7, 2026
+
+---
+
+## ✅ v45.1 — Submissions panel: cross-site blocker note + flag rename
+
+**Found during v45.0 testing:** two employees showed "✓ Sent to office" in the supervisor's Bluevale log, but stayed stuck in the admin Submissions panel's "waiting on supervisor submission" bucket. Not a bug — the supervisor log's chip is scoped to that supervisor's own jobsites only (`mySiteRows` filtered to `activeSup.jobsites`), while export readiness (`isFullyReadyForExport`) requires every site the employee worked to be sup_submitted. Both employees were multi-site and had a second, unsubmitted site (Kings) — the all-or-nothing export was correctly holding them, but nothing in the UI said which site was the actual blocker.
+
+**The fix:**
+
+- **Cross-site blocker note:** each employee row in the Submissions panel accordion now shows `Waiting on: Kings` under their name when that site's own row is already sup_submitted but another site they worked isn't yet. Computed inline in `refreshSubmissionsPanel`'s row builder from data already being fetched (`statusMap` + `sitesWorkedByEmp`) — no new queries.
+- **Last-period view only:** mid-period, other sites simply haven't had time to submit — showing the note there would just be noise. Gated on `_subPeriodMode==='last'`.
+- **Flag rename to avoid a wording clash:** the existing same-site flag (this site's row stuck at `emp_submitted`, supervisor hasn't reviewed) was also called "Waiting on supervisor" — same phrase, different meaning from the new cross-site note. Renamed to **"Needs supervisor review"**.
+- **Export breakdown popup left as-is:** the earlier plan was to also split the "Nothing to export" popup's bucket wording (never-submitted vs. blocked-by-another-site). Decided against it — the row-level note now explains the "why" right where you're already looking, so the popup's summary count doesn't need the same detail twice.
+
+**Files touched:** `app.js`, `CURRENT_STATE.md`. No schema change, no HTML change.
 
 ---
 
@@ -560,7 +575,7 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | **Supervisor site-wide submit (v44.0, reworked for per-site pairs in Build 3)** | `submitSiteToOffice()` (period-scoped roster query at `activeSup.jobsites`, builds `{empId,jobsite}` "ready pairs" where that site's row is `emp_submitted`) → confirm → `doSubmitSiteToOffice(readyPairs,...)` (Promise.all `setTimecardStage` per pair); `updateSubmitSummary(empMap,statusMap)` live count (statusMap here is pre-scoped to supervisor's sites, captured as `myStatusMap` during the row-build loop); `#s-submit-site-btn` / `#s-submit-period-label` / `#s-submit-summary` in index.html `#spanel-log` |
 | **Supervisor Force Submit (NEW, v44.0 Build 3)** | `forceSubmitEmployee(empId,empName)` — finds this employee's open sites among the supervisor's own jobsites, gates on unresolved auto-clocks/pending waives (alert+block), confirms, writes `emp_submitted` per open site on the employee's behalf. "Force submit" button rendered inline in `refreshSupLog`'s card header when `openSupSites.length>0`. No audit marker. |
 | **Supervisor PDF export (now a PREVIEW, v44.0)** | Machinery unchanged (`openExportConfirm`/gate/est/dup/`openChecklist`/`generatePDF`/`doExport` + `submissions` writes) — only wording relabelled to "preview/preliminary". Button `#s-export-btn` demoted to outline; labels set in `setSupPeriod`/`openChecklist`/`closeConfirmModal`; chk3/chk4 reworded in index.html |
-| **Admin Submissions panel (REWRITTEN, v44.0 Build 3)** | `refreshSubmissionsPanel()` — jobsite accordions (reuses `emp-card`/`toggleEmpCard`), "X of Y submitted" headers, per-employee failsafe flags + Override button; `setSubPeriod(mode)`/`subStatusPeriod()` (Current/Last selector); `#mpanel-submissions`/`#submissions-list`/`#subbtn-current`/`#subbtn-last`/`#sub-export-all-btn`/`#sub-period-label` in index.html. Replaces the old `submissions`-table-driven list; that old UI + `deleteSubmission()` were removed entirely. |
+| **Admin Submissions panel (REWRITTEN, v44.0 Build 3; cross-site note added v45.1)** | `refreshSubmissionsPanel()` — jobsite accordions (reuses `emp-card`/`toggleEmpCard`), "X of Y submitted" headers, per-employee failsafe flags + Override button; `setSubPeriod(mode)`/`subStatusPeriod()` (Current/Last selector); `#mpanel-submissions`/`#submissions-list`/`#subbtn-current`/`#subbtn-last`/`#sub-export-all-btn`/`#sub-period-label` in index.html. Replaces the old `submissions`-table-driven list; that old UI + `deleteSubmission()` were removed entirely. v45.1: row builder now also computes `blockingSites` (Last period only) — other jobsites the employee worked that aren't sup_submitted yet, shown as `Waiting on: <site>`; same-site stuck-at-emp_submitted flag renamed "Needs supervisor review" to avoid clashing with it. |
 | **Admin override (NEW, v44.0 Build 3)** | `adminOverrideSite(empId,jobsite,empName)` — same clean-punches gate as Force Submit, pushes one employee's one-site row straight to `sup_submitted` (stands in for both employee + supervisor). No audit marker. |
 | **Admin export → stage stamping (NEW, v44.0 Build 3)** | `openSubmissionsExport(scopeType,jobsite)` — eligibility via `isFullyReadyForExport`, scopes `_masterLogs` + Report-tab date fields to the ready employees' full-period punches, opens the shared `#master-format-modal` picker. `_pendingExportStampFn` global — set here, consumed by `doMasterExcelZip()`/`generateMasterPDF()` right after they finish building the file, stamps `exported` on every included employee's site-rows, then refreshes the panel. The ad-hoc Report-tab export never sets this hook, so it never touches `pt_timecard_status`. |
 | Version display | `index.html` version badge `<div>` (top-left of `#screen-kiosk`) and `app.js` backup payload (`app_version`) |
@@ -575,4 +590,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 7, 2026 — v45.0 (employee last-period catch-up — My Timecard)_
+_Last updated: July 7, 2026 — v45.1 (Submissions panel — cross-site blocker note + flag rename)_
