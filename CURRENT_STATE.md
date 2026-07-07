@@ -1,7 +1,29 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v44.3 *(admin export buttons — no more silent-fail; state-aware breakdown popup + re-export)*
+**Current Version:** v45.0 *(employee last-period catch-up — My Timecard)*
 **Last Updated:** July 7, 2026
+
+---
+
+## ✅ v45.0 — Employee last-period catch-up (My Timecard)
+
+**The problem:** `openMyTimecard()` always loaded `getPeriodByOffset(0)` — the period containing *today*. The moment a new pay period started, an employee who never tapped Submit before the previous Sunday's cutoff lost all access to that period from the employee side: no banner, no warning, nothing. The "before period ends" confirm only evaluates against whatever period is loaded, so on the new period it silently applied there instead — completely unrelated to the lapsed one. The only recovery path was a supervisor manually switching their log to "Last" period and Force Submitting, with zero visibility on the employee's end that anything was outstanding.
+
+**The fix — prompt on entry + persistent banner + full last-period access (decided: 1C + 2A + 3A):**
+
+- **Detection (`refreshMyTcCatchupState`):** runs every time the current period loads. Computes the jobsites the employee actually worked last period (from punches, not just status rows — same "worked sites" union pattern as `isFullyReadyForExport`) and flags catch-up needed if any of those sites is still at `open` (no row, or an explicit open row). If *any* site for that period has already reached `sup_submitted`+, catch-up is skipped entirely — the whole card is already locked from the employee's side (same all-or-nothing lock the current period uses), so prompting would just dead-end.
+- **PIN-entry prompt:** `submitTimecardPin()` now always opens the current period first, then — if catch-up is needed — shows a confirm modal: "You have an unsubmitted timecard for [dates]. Review and submit it now?" Re-checked fresh every PIN entry, not a one-time dismiss.
+- **Persistent banner:** if the prompt is dismissed ("Cancel"), a new `#mytc-period-bar` amber banner sits above the submit bar on the current-period view, tappable to jump into catch-up mode. Reuses the `--amber`/`--amber-l` warning convention already used for Force Submit / Override buttons.
+- **Last-period mode reuses the whole screen — no parallel code path:** `myTcPeriodOffset` (0 = current, 1 = last) now drives `openMyTimecard(emp, offset)`. The punch list, submit bar, running total, edit modal, and add-punch flow were already generic against `myTcPeriod`, so viewing/editing/submitting last period needed no new UI machinery. Header switches to "Reviewing last pay period: [dates]" with a "← Back to current period" link rendered in the same banner slot (`renderMyTcPeriodBar()`).
+- **Full edit parity, not submit-only:** the auto-clock gate still blocks submission with unresolved auto-clocks, but employees can now fix those punches (Edit) or add a missed one for the catch-up period too — otherwise an unresolved auto-clock in a lapsed period would be a permanent dead end with no one able to act on it but a supervisor.
+- **Clean submit, no false warning:** `submitMyTimecard`'s "before period ends" check (`new Date() < myTcPeriod.end`) naturally evaluates false for a period that's already over, so catch-up submits skip that modal and go straight through.
+- **Auto-return after catch-up submit:** on success the screen jumps back to the current period automatically with a "Last period submitted — you're all caught up" toast, instead of reloading the now-empty catch-up view.
+
+**Scope, deliberately narrow:** only reaches back one period (`getPeriodByOffset(1)`). An employee who's missed two periods running still needs a supervisor Force Submit for the older one — not handled here.
+
+**Known edge case, unchanged from today's behavior:** a multi-site employee whose last period is locked at one site but still open at another still won't get flagged — the lock check is all-or-nothing, same as it already is for the current period.
+
+**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change, no migration needed — reads `pt_timecard_status` rows that already exist.
 
 ---
 
@@ -533,6 +555,7 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | **Timecard stage — data layer (v44.0, schema+signatures changed in Build 3)** | `pt_timecard_status` table (now one row per employee per period **per jobsite**); `TC_STAGE`/`TC_STAGE_RANK` consts; `getTimecardStatus(empId,periodStart,jobsite)` (one site) / `getEmployeeStatusRows(empId,periodStart)` (all of one employee's site-rows, NEW Build 3) / `getAllStatusForPeriod(periodStart)` (→ `{empId:[rows]}`, array-valued since Build 3) / `setTimecardStage(empId,period,stage,jobsite)` (jobsite now REQUIRED) / `stageOf(row)` / `stageAtLeast(stage,target)` / `minStage(rows)` / `maxStage(rows)` (NEW Build 3 aggregate helpers) / `isFullyReadyForExport(rows,sitesWorked)` (NEW Build 3 — sitesWorked param is what makes a worked-but-unsubmitted site correctly block readiness) / `isOutOfSubmission(entry,statusRow)` — all near `isPendingWaive` in app.js |
 | **My Timecard submit/pull-back (v44.0, retrofit in Build 3)** | `renderMyTcSubmitBar()` (3 states off `maxStage(myTcStatusRows)`) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted` **per distinct jobsite worked**, `Promise.all`) + `retractMyTimecard()` (resets **every** site-row → `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=`maxStage`≥`sup_submitted`, `myTcEditable`=`myTcStatusRows.length===0`. State: `myTcStatusRows` (array, was `myTcStatus` single row pre-Build-3) / `myTcBusy` / `myTcEditable` |
 | **My Timecard running total (v44.0)** | `myTcRunningHours(punches)` → `{hours,pendingWaiveCount}` (completed punches only, optimistic pending-waive, non-mutating); `renderMyTcTotal()` → `#mytc-total` in index.html (with disclaimer line) |
+| **My Timecard last-period catch-up (NEW, v45.0)** | `refreshMyTcCatchupState(emp)` (worked-sites-vs-status-rows check against `getPeriodByOffset(1)`) / `switchMyTcPeriod(offset)` / `renderMyTcPeriodBar()`; `myTcPeriodOffset` global (0=current,1=last) now drives `openMyTimecard(emp,offset)` — same screen, same submit/edit/add machinery, reused as-is; PIN-entry prompt added in `submitTimecardPin()`; `#mytc-period-bar` in index.html |
 | **Supervisor stage colours + out-of-submission (v44.0, scoped to supervisor's own sites in Build 3)** | `supStatusPeriod()` (log mode → stage period) / `supStageChip(stage)` (grey/amber/green pill) in `refreshSupLog`; per-employee chip now driven by `minStage(mySiteRows)` where `mySiteRows` = that employee's status rows filtered to `activeSup.jobsites`; left-border + "⚠️ After submit" row badges via `isOutOfSubmission` matched per-punch to its own site's row; one `getAllStatusForPeriod` call per refresh (Option A), re-guarded by `_supLogSeq` |
 | **Supervisor site-wide submit (v44.0, reworked for per-site pairs in Build 3)** | `submitSiteToOffice()` (period-scoped roster query at `activeSup.jobsites`, builds `{empId,jobsite}` "ready pairs" where that site's row is `emp_submitted`) → confirm → `doSubmitSiteToOffice(readyPairs,...)` (Promise.all `setTimecardStage` per pair); `updateSubmitSummary(empMap,statusMap)` live count (statusMap here is pre-scoped to supervisor's sites, captured as `myStatusMap` during the row-build loop); `#s-submit-site-btn` / `#s-submit-period-label` / `#s-submit-summary` in index.html `#spanel-log` |
 | **Supervisor Force Submit (NEW, v44.0 Build 3)** | `forceSubmitEmployee(empId,empName)` — finds this employee's open sites among the supervisor's own jobsites, gates on unresolved auto-clocks/pending waives (alert+block), confirms, writes `emp_submitted` per open site on the employee's behalf. "Force submit" button rendered inline in `refreshSupLog`'s card header when `openSupSites.length>0`. No audit marker. |
@@ -552,4 +575,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 7, 2026 — v44.3 (admin export buttons — no more silent-fail; state-aware breakdown popup + re-export)_
+_Last updated: July 7, 2026 — v45.0 (employee last-period catch-up — My Timecard)_

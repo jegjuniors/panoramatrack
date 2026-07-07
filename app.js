@@ -51,6 +51,12 @@ let myTcLocked=false;
 let myTcEditingDbId=null;
 let myTcAdding=false;
 let myTcEditActs=new Set();
+/* v45.0: last-period catch-up. myTcPeriodOffset drives which period My Timecard is showing
+   (0=current, 1=last). myTcCatchupNeeded/myTcCatchupPeriod are refreshed every time the CURRENT
+   period loads (see refreshMyTcCatchupState) and drive both the PIN-entry prompt and the banner. */
+let myTcPeriodOffset=0;
+let myTcCatchupNeeded=false;
+let myTcCatchupPeriod=null;
 /* Timecard submission stage (v44.0) — pt_timecard_status table.
    Stage lifecycle: open → emp_submitted → sup_submitted → exported.
    Absence of a row = 'open'. */
@@ -849,11 +855,17 @@ async function submitPin(){
 
 /* ─── My Timecard (employee self-edit, v41.0) ───
    Employee enters their own PIN to view/correct their punches for the
-   CURRENT pay period only. Once that period has a 'final' submission on
-   record, access closes — same lock supervisors/admin already respect.
+   CURRENT pay period by default. Once that period has a 'final' submission
+   on record, access closes — same lock supervisors/admin already respect.
    All self-edits are written with manual_entry=true so they carry the same
    amber "✎ Manual" badge supervisors already watch for in the logs — no
-   separate flag, per Julio's call. */
+   separate flag, per Julio's call.
+   v45.0: last-period catch-up. If the employee has a worked jobsite from
+   LAST period that was never submitted (and isn't already locked by a
+   supervisor), a prompt fires on PIN entry offering to review/submit it,
+   with a persistent banner as a fallback if dismissed. Reuses this entire
+   module against myTcPeriodOffset=1 instead of a parallel code path — see
+   refreshMyTcCatchupState/switchMyTcPeriod/renderMyTcPeriodBar below. */
 let tcBtnBusy=false;
 async function submitTimecardPin(){
   if(tcBtnBusy)return;
@@ -864,20 +876,35 @@ async function submitTimecardPin(){
   const pin=currentPin;clearPin();
   const emp=employees.find(e=>e.pin===pin&&e.active);
   if(!emp){showNotif('✗','PIN not recognised','Please try again','#E24B4A');return}
-  await openMyTimecard(emp);
+  await openMyTimecard(emp,0);
+  // v45.0: fresh check every PIN entry — nudge if last period was never submitted. Not a
+  // one-time dismiss: if they tap "Not now" it'll ask again next time, and the banner stays
+  // up on the current-period screen in the meantime.
+  if(myTcCatchupNeeded){
+    const p=myTcCatchupPeriod;
+    const periodLabel=`${p.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${p.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+    showCustomConfirm(
+      'Unsubmitted timecard',
+      `You have an unsubmitted timecard for ${periodLabel}. Review and submit it now?`,
+      'You can switch back to your current period any time from there.',
+      'Review now','var(--amber)',
+      ()=>switchMyTcPeriod(1));
+  }
 }
 
-async function openMyTimecard(emp){
+async function openMyTimecard(emp,offset){
   myTcEmp=emp;
-  myTcPeriod=getPeriodByOffset(0);
+  if(offset!=null)myTcPeriodOffset=offset;
+  const isCatchup=myTcPeriodOffset===1; // v45.0: viewing last period in catch-up mode
+  myTcPeriod=getPeriodByOffset(myTcPeriodOffset);
   document.getElementById('mytc-name').textContent=emp.name+'\u2019s Timecard';
   const from=myTcPeriod.start,to=myTcPeriod.end;
   document.getElementById('mytc-period').textContent=
-    `Current pay period: ${from.toLocaleDateString([],{month:'short',day:'numeric'})} – ${to.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+    `${isCatchup?'Reviewing last pay period':'Current pay period'}: ${from.toLocaleDateString([],{month:'short',day:'numeric'})} – ${to.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
   document.getElementById('mytc-list').innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">Loading…</p>';
   showScreen('screen-mytc');
 
-  // Load this employee's submission stage for the current period (v44.0 Build 3: one row per
+  // Load this employee's submission stage for the period in view (v44.0 Build 3: one row per
   // jobsite they worked — fetch ALL of them and use the aggregate). Locked to view-only once
   // ANY site's supervisor has submitted (maxStage >= sup_submitted); the employee's own
   // submission does NOT lock them (they can still pull it back, as long as no site has advanced).
@@ -888,7 +915,7 @@ async function openMyTimecard(emp){
   document.getElementById('mytc-locked-note').style.display=myTcLocked?'block':'none';
   document.getElementById('mytc-add-btn').style.display=myTcEditable?'block':'none';
 
-  // Load this employee's punches for the current period straight from the DB
+  // Load this employee's punches for the period in view straight from the DB
   // (timeLog only caches open punches, not the full period history)
   const {data:punchData,error}=await sb.from('punches').select('*')
     .eq('employee_id',emp.id)
@@ -900,9 +927,72 @@ async function openMyTimecard(emp){
     return;
   }
   myTcPunches=(punchData||[]).map(dbRowToEntry);
+
+  // v45.0: only re-check last-period catch-up state while looking at the CURRENT period —
+  // this is what feeds both the PIN-entry prompt (submitTimecardPin) and the banner below.
+  if(!isCatchup)await refreshMyTcCatchupState(emp);
+
   renderMyTcSubmitBar();
   renderMyTcTotal();
   renderMyTcList();
+  renderMyTcPeriodBar();
+}
+
+/* v45.0: does this employee have an unsubmitted LAST period? Re-checked fresh every time the
+   current period loads. "Unsubmitted" = at least one jobsite they worked last period is still
+   sitting at 'open' (no status row, or an explicit open row) — AND nothing at that period has
+   already escalated to sup_submitted+ (if it has, the whole card is already locked from the
+   employee's side, same all-or-nothing lock as the current period uses; see the known
+   multi-site edge case noted in CURRENT_STATE.md). Fails closed (no nudge) on a DB error. */
+async function refreshMyTcCatchupState(emp){
+  const period=getPeriodByOffset(1);
+  myTcCatchupPeriod=period;
+  myTcCatchupNeeded=false;
+  const rows=await getEmployeeStatusRows(emp.id,period.start);
+  if(stageAtLeast(maxStage(rows),TC_STAGE.SUP))return; // already out of their hands
+  const {data,error}=await sb.from('punches').select('jobsite')
+    .eq('employee_id',emp.id)
+    .gte('clock_in',period.start.toISOString())
+    .lte('clock_in',period.end.toISOString());
+  if(error)return; // don't nag if we can't tell
+  const sitesWorked=[...new Set((data||[]).map(p=>p.jobsite).filter(Boolean))];
+  if(!sitesWorked.length)return; // nothing worked last period — nothing to catch up on
+  const rowsBySite={};rows.forEach(r=>{rowsBySite[r.jobsite]=r;});
+  myTcCatchupNeeded=sitesWorked.some(s=>{
+    const r=rowsBySite[s];
+    return !r||r.stage===TC_STAGE.OPEN;
+  });
+}
+
+/* v45.0: switch the My Timecard view between current (0) and last-period catch-up (1). */
+async function switchMyTcPeriod(offset){
+  if(myTcBusy||!myTcEmp)return;
+  await openMyTimecard(myTcEmp,offset);
+}
+
+/* v45.0: banner above the submit bar — a "last period's still open" nudge while viewing
+   current, or a "back to current" link while viewing catch-up. Empty/hidden otherwise. */
+function renderMyTcPeriodBar(){
+  const bar=document.getElementById('mytc-period-bar');
+  if(!bar)return;
+  const isCatchup=myTcPeriodOffset===1;
+  if(isCatchup){
+    bar.innerHTML=`<button class="btn-sm" onclick="switchMyTcPeriod(0)" style="background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">← Back to current period</button>`;
+    bar.style.display='block';
+    return;
+  }
+  if(myTcCatchupNeeded&&myTcCatchupPeriod){
+    const p=myTcCatchupPeriod;
+    const label=`${p.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${p.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+    bar.innerHTML=`<div onclick="switchMyTcPeriod(1)" style="cursor:pointer;background:var(--amber-l);border:0.5px solid var(--amber);border-radius:var(--radius);padding:10px 12px;">
+        <span style="font-size:12px;font-weight:600;color:var(--amber);">⚠️ Unsubmitted timecard for ${label}</span>
+        <div style="font-size:11px;color:var(--amber);margin-top:2px;">Tap to review and submit</div>
+      </div>`;
+    bar.style.display='block';
+    return;
+  }
+  bar.innerHTML='';
+  bar.style.display='none';
 }
 
 /* Running-hours total + optimistic-waive disclaimer (v44.0) */
@@ -952,8 +1042,9 @@ function renderMyTcSubmitBar(){
   }
 
   // Open — show the submit button.
+  const isCatchup=myTcPeriodOffset===1;
   bar.innerHTML=`<button class="btn" id="mytc-submit-btn" onclick="submitMyTimecard()" style="width:100%;background:var(--green);color:#fff;font-weight:600;">Submit my timecard →</button>
-    <div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">Review your punches below, then submit to hand your timecard to your supervisor.</div>`;
+    <div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">${isCatchup?'This is your last pay period — review your punches below, then submit to hand it to your supervisor.':'Review your punches below, then submit to hand your timecard to your supervisor.'}</div>`;
 }
 
 /* Employee submits their timecard (v44.0).
@@ -982,8 +1073,16 @@ async function submitMyTimecard(){
     myTcBusy=false;
     const failed=results.filter(r=>!r.ok);
     if(failed.length){showCustomAlert('Could not submit','There was a problem submitting your timecard: '+(failed[0].error?.message||'unknown error')+'. Please try again.');return;}
-    showNotif('✓','Timecard submitted','Handed in to your supervisor','#2f7d31',2600);
-    await openMyTimecard(myTcEmp); // reload → shows submitted state + pull-back
+    // v45.0: a catch-up (last-period) submit has nothing left to review — bounce straight
+    // back to the current period instead of reloading the now-submitted catch-up view.
+    const wasCatchup=myTcPeriodOffset===1;
+    if(wasCatchup){
+      showNotif('✓','Last period submitted','You\u2019re all caught up','#2f7d31',2600);
+      await openMyTimecard(myTcEmp,0);
+    } else {
+      showNotif('✓','Timecard submitted','Handed in to your supervisor','#2f7d31',2600);
+      await openMyTimecard(myTcEmp); // reload → shows submitted state + pull-back
+    }
   };
   if(beforeEnd){
     showCustomConfirm(
@@ -1022,13 +1121,15 @@ async function retractMyTimecard(){
 function closeMyTimecard(){
   myTcEmp=null;myTcPunches=[];myTcPeriod=null;myTcLocked=false;
   myTcStatusRows=[];myTcBusy=false;myTcEditable=true;
+  myTcPeriodOffset=0;myTcCatchupNeeded=false;myTcCatchupPeriod=null;
   showScreen('screen-kiosk');
 }
 
 function renderMyTcList(){
   const list=document.getElementById('mytc-list');
   if(!myTcPunches.length){
-    list.innerHTML='<p style="text-align:center;color:var(--txt2);padding:24px 10px;font-size:13px;">No punches recorded yet this pay period.</p>';
+    const msg=myTcPeriodOffset===1?'No punches recorded for that pay period.':'No punches recorded yet this pay period.';
+    list.innerHTML=`<p style="text-align:center;color:var(--txt2);padding:24px 10px;font-size:13px;">${msg}</p>`;
     return;
   }
   list.innerHTML=myTcPunches.map(e=>{
@@ -1110,9 +1211,10 @@ async function saveMyTcEdit(){
   const newIn=new Date(inV);
   const newOut=outV?new Date(outV):null;
   if(newOut&&newOut<=newIn){err.textContent='Clock out must be after clock in.';return}
-  // Guardrail: stays within the current pay period only
-  if(newIn<myTcPeriod.start||newIn>myTcPeriod.end){err.textContent='Clock in must fall within the current pay period.';return}
-  if(newOut&&(newOut<myTcPeriod.start||newOut>myTcPeriod.end)){err.textContent='Clock out must fall within the current pay period.';return}
+  // Guardrail: stays within whichever period is currently in view (current, or last-period catch-up)
+  const periodLabel=myTcPeriodOffset===1?'the last':'the current';
+  if(newIn<myTcPeriod.start||newIn>myTcPeriod.end){err.textContent=`Clock in must fall within ${periodLabel} pay period.`;return}
+  if(newOut&&(newOut<myTcPeriod.start||newOut>myTcPeriod.end)){err.textContent=`Clock out must fall within ${periodLabel} pay period.`;return}
   const jobsite=document.getElementById('mytc-edit-jobsite').value;
   const acts=[...myTcEditActs];
   const emp=myTcEmp;
@@ -4228,7 +4330,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v44.3',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v45.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
