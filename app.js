@@ -1283,10 +1283,12 @@ function showKiosk(){
 }
 function showMasterLogin(){showScreen('screen-master-login');document.getElementById('master-pass-inp').value='';document.getElementById('master-login-err').textContent=''}
 function showSupLogin(){
-  const sel=document.getElementById('sup-login-name');
-  sel.innerHTML='<option value="">— select your name —</option>'+supervisors.map(s=>`<option value="${s.id}">${s.name} (${(s.jobsites||[]).join(', ')||'No sites assigned'})</option>`).join('');
+  // v44.1: name dropdown removed — supervisor logs in with password only (unique password
+  // enforced at both app-layer and DB-layer). Autofocus the password field since it's the
+  // only input on screen now.
   document.getElementById('sup-login-pass').value='';document.getElementById('sup-login-err').textContent='';
   showScreen('screen-sup-login');
+  setTimeout(()=>{const p=document.getElementById('sup-login-pass');if(p)p.focus();},80);
 }
 function masterLogin(){
   if(document.getElementById('master-pass-inp').value===MASTER_PASSWORD){
@@ -1298,10 +1300,13 @@ function masterLogin(){
   } else {document.getElementById('master-login-err').textContent='Incorrect master password.';}
 }
 function supLogin(){
-  const id=parseInt(document.getElementById('sup-login-name').value);
+  // v44.1: password-only login. Every supervisor password is unique (enforced at save time
+  // and by a DB UNIQUE constraint on employees.supervisor_password), so one password
+  // resolves to exactly one supervisor.
   const pass=document.getElementById('sup-login-pass').value;
-  const sup=supervisors.find(s=>s.id===id&&s.password===pass);
-  if(!sup){document.getElementById('sup-login-err').textContent='Incorrect name or password.';return}
+  if(!pass){document.getElementById('sup-login-err').textContent='Enter your supervisor password.';return}
+  const sup=supervisors.find(s=>s.password===pass);
+  if(!sup){document.getElementById('sup-login-err').textContent='Incorrect password.';return}
   activeSup={...sup, jobsites:sup.jobsites||[]};
   // activeSupSite = currently selected site for log/export (defaults to first)
   activeSup.activeSite = activeSup.jobsites[0]||null;
@@ -3125,6 +3130,12 @@ async function saveEmployee(){
   if(dept==='Supervisor'){
     supPass=restricted?(target.supervisorPassword||''):document.getElementById('emp-sup-pass').value.trim();
     if(!supPass){err.textContent='Supervisor password is required.';return}
+    // v44.1: enforce supervisor password uniqueness (mirrors the PIN uniqueness check
+    // above). Matched by DB UNIQUE constraint on employees.supervisor_password so direct
+    // SQL edits can't slip a duplicate through either. Skips self so a supervisor editing
+    // their own record without changing the password isn't rejected.
+    const passDup=employees.find(e=>e.supervisorPassword&&e.supervisorPassword===supPass&&e.id!==editingEmpId);
+    if(passDup){err.textContent='Supervisor password already in use by '+passDup.name+'.';return}
     supJobsites=Array.from(document.querySelectorAll('#emp-sup-jobsites input:checked')).map(c=>c.value);
   }
 
@@ -4041,7 +4052,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v44.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v44.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

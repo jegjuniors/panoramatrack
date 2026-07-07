@@ -1,7 +1,26 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v44.0 *(3-tier submission flow complete — all 3 builds delivered)*
-**Last Updated:** July 2, 2026
+**Current Version:** v44.1 *(supervisor login simplified + uniqueness enforcement for PINs & supervisor passwords)*
+**Last Updated:** July 7, 2026
+
+---
+
+## ✅ v44.1 — Login simplification + uniqueness enforcement
+
+**Small, focused pass** on the login/identity surface — no changes to the submission flow or data model.
+
+**Supervisor login → password-only:**
+- The name dropdown on `#screen-sup-login` is gone; the screen now shows just the password field + Log in button (matches the master admin login pattern). Autofocuses the password on open.
+- `showSupLogin()` no longer builds the `<option>` list. `supLogin()` looks up by password alone: `supervisors.find(s => s.password === pass)`. Empty password shows "Enter your supervisor password."; wrong password shows "Incorrect password."
+- Session persistence (`pt_session` in `localStorage`) still stores `supId` — unchanged, so open supervisor sessions across app restart still restore correctly.
+
+**Password / PIN uniqueness — enforced at both layers:**
+- **App-side (in `saveEmployee`):** the existing PIN uniqueness check is unchanged (it's been there since v37-ish and already worked). New: a matching supervisor password uniqueness check runs right after the "supervisor password is required" check. Both skip the current record so a supervisor editing their own row without changing the password isn't rejected. Both check against the full `employees` array (including inactive records) — so a retired supervisor's password can't be silently recycled either.
+- **DB-side (`migration_v44_1.sql`, run by Julio):** `ALTER TABLE employees ADD CONSTRAINT employees_pin_unique UNIQUE (pin)` and same for `supervisor_password`. `supervisor_password` is NULL for non-supervisors — Postgres treats NULLs as distinct by default, so all the non-supervisor rows coexist without conflict; only actual passwords are checked against each other. **Assumed clean** — no pre-migration audit; if either constraint fails, the migration file has the audit query in a comment right below the failing statement.
+
+**Master admin login:** no change — was already password-only.
+
+**Files touched:** `app.js`, `index.html`, `migration_v44_1.sql` (new), `CURRENT_STATE.md`.
 
 ---
 
@@ -481,4 +500,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 2, 2026 — v44.0 (3-tier submission flow complete — all 3 builds delivered)_
+_Last updated: July 7, 2026 — v44.1 (supervisor login simplified + PIN/password uniqueness enforcement)_
