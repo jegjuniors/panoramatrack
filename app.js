@@ -919,7 +919,14 @@ async function openMyTimecard(emp,offset){
   const stage=maxStage(myTcStatusRows);
   const isSupEmp=emp.dept==='Supervisor'; // v46.0
   myTcLocked=stageAtLeast(stage,isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP);
-  myTcEditable=(myTcStatusRows.length===0);          // editable only before the first submit (pull back first otherwise)
+  // v46.2: editable whenever no site has advanced past 'open'. Pre-v46.2 this was
+  // (myTcStatusRows.length===0), which broke after pull-back: retractMyTimecard resets every
+  // row's stage to 'open' but leaves the rows in place, so a pulled-back timecard was showing
+  // as non-editable (no Edit buttons, no Add) despite technically being open. Also drove the
+  // stale "Pull it back above to make changes" reminder in renderMyTcList to keep rendering
+  // — same bug, one root cause. Fresh timecards (no rows yet) still qualify since
+  // maxStage([]) returns 'open'.
+  myTcEditable=(stage===TC_STAGE.OPEN);
   document.getElementById('mytc-locked-note').textContent=isSupEmp
     ? 'This pay period has already been exported to head office. Contact your GM for any corrections.'
     : 'This pay period has already been submitted. Contact your supervisor for corrections.';
@@ -4442,7 +4449,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v46.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v46.2',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

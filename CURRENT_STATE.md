@@ -1,7 +1,25 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v46.1 *(catch-up threshold fix — supervisor-employees were locked out of open sites)*
+**Current Version:** v46.2 *(pull-back regression fix — Edit/Add buttons + stale reminder)*
 **Last Updated:** July 7, 2026
+
+---
+
+## ✅ v46.2 — Pull-back regression: Edit/Add buttons missing, stale "pull it back" reminder
+
+**Found during v46.1 testing:** after a supervisor pulled back their submitted timecard, the "Your timecard is submitted. Pull it back above to make changes." reminder still showed — and the per-punch Edit buttons and the "+ Add a missed punch" button were gone. The pull-back succeeded (rows were correctly reset to `open`, `renderMyTcSubmitBar` correctly re-rendered the submit button), but the punch list treated the timecard as still-submitted-but-not-locked. Not a v46.x regression — actually inherited from v44.0 — but only surfaced now because v46.0's supervisor auto-approval made pull-back the routine correction path.
+
+**Root cause:** one line in `openMyTimecard`:
+
+```
+myTcEditable=(myTcStatusRows.length===0);
+```
+
+This decided both whether Edit/Add buttons render and (by negation) whether the "pull it back to edit" reminder shows. It keyed off row *existence*, not row *stage*. `retractMyTimecard` resets each row's stage to `open` but leaves the rows in place — so on the next `openMyTimecard` load `myTcStatusRows.length` was still > 0 and `myTcEditable` came back false, despite every row genuinely being open again.
+
+**The fix — one-line:** `myTcEditable=(stage===TC_STAGE.OPEN)`. Editable whenever no site has advanced past open. Fresh timecards still qualify since `maxStage([])` returns `TC_STAGE.OPEN` by construction, so the no-rows case is preserved. Pulled-back timecards now correctly re-render as editable, which also naturally gates off the reminder (`!myTcEditable && !myTcLocked` becomes false when both are false). Same one-line covers both symptoms Julio flagged.
+
+**Files touched:** `app.js`, `CURRENT_STATE.md`. Version badge bumped for consistency, no other HTML change.
 
 ---
 
@@ -612,7 +630,7 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | My Timecard — employee self-edit (v41.0) | `submitTimecardPin()` → `openMyTimecard(emp)` / `closeMyTimecard()` / `renderMyTcList()`; edit & add via shared `openMyTcEdit(dbId)` / `openMyTcAdd()` → `saveMyTcEdit()` (`#mytc-edit-modal-bg`, separate from the supervisor/master `#edit-modal-bg`); `buildMyTcActGrid()`/`toggleMyTcAct()`; "My Timecard" button + `#screen-mytc` in index.html; writes `manual_entry=true` (no new flag); period-lock check queries `submissions` for a `final` row overlapping `getPeriodByOffset(0)`
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
 | **Timecard stage — data layer (v44.0, schema+signatures changed in Build 3)** | `pt_timecard_status` table (now one row per employee per period **per jobsite**); `TC_STAGE`/`TC_STAGE_RANK` consts; `getTimecardStatus(empId,periodStart,jobsite)` (one site) / `getEmployeeStatusRows(empId,periodStart)` (all of one employee's site-rows, NEW Build 3) / `getAllStatusForPeriod(periodStart)` (→ `{empId:[rows]}`, array-valued since Build 3) / `setTimecardStage(empId,period,stage,jobsite)` (jobsite now REQUIRED) / `stageOf(row)` / `stageAtLeast(stage,target)` / `minStage(rows)` / `maxStage(rows)` (NEW Build 3 aggregate helpers) / `isFullyReadyForExport(rows,sitesWorked)` (NEW Build 3 — sitesWorked param is what makes a worked-but-unsubmitted site correctly block readiness) / `isOutOfSubmission(entry,statusRow)` — all near `isPendingWaive` in app.js |
-| **My Timecard submit/pull-back (v44.0, retrofit in Build 3; supervisor auto-approval added v46.0)** | `renderMyTcSubmitBar()` (3 states off `maxStage(myTcStatusRows)`) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted` **per distinct jobsite worked**, `Promise.all`) + `retractMyTimecard()` (resets **every** site-row → `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=`maxStage`≥`sup_submitted`, `myTcEditable`=`myTcStatusRows.length===0`. State: `myTcStatusRows` (array, was `myTcStatus` single row pre-Build-3) / `myTcBusy` / `myTcEditable`. v46.0: `isSupEmp=myTcEmp.dept==='Supervisor'` checked in all three functions — supervisors write straight to `TC_STAGE.SUP` on submit (skips peer review, any site) and use `TC_STAGE.EXPORTED` as the lock/pull-back threshold instead of `TC_STAGE.SUP` (regular employees unchanged). |
+| **My Timecard submit/pull-back (v44.0, retrofit in Build 3; supervisor auto-approval added v46.0; pull-back regression fixed v46.2)** | `renderMyTcSubmitBar()` (3 states off `maxStage(myTcStatusRows)`) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted` **per distinct jobsite worked**, `Promise.all`) + `retractMyTimecard()` (resets **every** site-row → `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=`maxStage`≥`sup_submitted`, `myTcEditable`=`stage===TC_STAGE.OPEN` (v46.2 — was `myTcStatusRows.length===0`, which stayed false after pull-back since rows still existed at open, killing Edit/Add buttons and stranding the "pull back to edit" reminder). State: `myTcStatusRows` (array, was `myTcStatus` single row pre-Build-3) / `myTcBusy` / `myTcEditable`. v46.0: `isSupEmp=myTcEmp.dept==='Supervisor'` checked in all three functions — supervisors write straight to `TC_STAGE.SUP` on submit (skips peer review, any site) and use `TC_STAGE.EXPORTED` as the lock/pull-back threshold instead of `TC_STAGE.SUP` (regular employees unchanged). |
 | **My Timecard running total (v44.0)** | `myTcRunningHours(punches)` → `{hours,pendingWaiveCount}` (completed punches only, optimistic pending-waive, non-mutating); `renderMyTcTotal()` → `#mytc-total` in index.html (with disclaimer line) |
 | **My Timecard last-period catch-up (NEW, v45.0; threshold fix v46.1)** | `refreshMyTcCatchupState(emp)` (worked-sites-vs-status-rows check against `getPeriodByOffset(1)`) / `switchMyTcPeriod(offset)` / `renderMyTcPeriodBar()`; `myTcPeriodOffset` global (0=current,1=last) now drives `openMyTimecard(emp,offset)` — same screen, same submit/edit/add machinery, reused as-is; PIN-entry prompt added in `submitTimecardPin()`; `#mytc-period-bar` in index.html. v46.1: early-return threshold now uses `isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP` — the same lock-threshold split v46.0 applied to `openMyTimecard`/`renderMyTcSubmitBar`/`retractMyTimecard`. Without this, supervisor-employees hit the short-circuit as soon as any of their sites reached `sup_submitted` (which under v46.0's auto-approval happens on their very first self-submit), leaving them locked out of catch-up on a genuinely still-open other site. |
 | **Supervisor stage colours + out-of-submission (v44.0, scoped to supervisor's own sites in Build 3)** | `supStatusPeriod()` (log mode → stage period) / `supStageChip(stage)` (grey/amber/green pill) in `refreshSupLog`; per-employee chip now driven by `minStage(mySiteRows)` where `mySiteRows` = that employee's status rows filtered to `activeSup.jobsites`; left-border + "⚠️ After submit" row badges via `isOutOfSubmission` matched per-punch to its own site's row; one `getAllStatusForPeriod` call per refresh (Option A), re-guarded by `_supLogSeq` |
@@ -634,4 +652,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 7, 2026 — v46.1 (catch-up threshold fix — supervisor-employees were locked out of open sites)_
+_Last updated: July 7, 2026 — v46.2 (pull-back regression fix — Edit/Add buttons + stale reminder)_
