@@ -1,7 +1,25 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.0 *(per-site lifecycle rework + master PDF consolidation + My Timecard quick-set buttons)*
+**Current Version:** v47.1 *(admin Timecards: "waiting on:" inline note beside ✓)*
 **Last Updated:** July 8, 2026
+
+---
+
+## ✅ v47.1 — Admin Timecards panel: cross-site blocker note beside the ✓ badge
+
+**Ask:** in the admin Timecards tab, an employee submitted at one site shows a ✓ but isn't exportable because another of their sites hasn't been sent to office yet. Ideally the ✓ should have a note beside it listing which other sites are still outstanding, so the admin can see at a glance who to nudge.
+
+**What was already there:** v45.1 built exactly this calculation (`blockingSites`), but I gated it to `_subPeriodMode==='last'` only and rendered it in the amber warning row *below* the name rather than beside the ✓. The reasoning at the time — "mid-period is noise" — didn't hold up: mid-period is actually when the admin most wants the answer to "why isn't this exportable yet."
+
+**The fix — small, targeted:**
+- Dropped the `_subPeriodMode==='last'` gate. Now shown for both current and last-period views.
+- Removed the `"Waiting on: X"` entry from `flagParts` (the amber warning row).
+- Rendered inline beside the ✓ badge as subtle gray text (`var(--txt3)`, size 11, weight 400) — reads as informational, not a warning:
+  - Before: `Ben ✓` (with amber "Waiting on: Kings" below, only in last-period view)
+  - After: `Ben ✓ waiting on: Kings` (both views, inline, subtle gray)
+- Only shows on `ready` (`sup_submitted` at this site) — not on `exported`. Once exported, the answer to "why" is no longer relevant.
+
+**Files touched:** `app.js`, `CURRENT_STATE.md`. No schema change, no HTML change.
 
 ---
 

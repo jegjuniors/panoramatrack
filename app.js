@@ -4202,13 +4202,15 @@ async function refreshSubmissionsPanel(){
       const neverSubmitted=stage===TC_STAGE.OPEN&&periodEnded;
       const stuckEmp=stage===TC_STAGE.EMP;
 
-      // v45.1: cross-site blocker note — this site's row is done, but the employee worked
-      // another site that isn't at sup_submitted yet, so the all-or-nothing export is still
-      // held up there. Last-period view only: mid-period, other sites simply haven't had
-      // time to submit yet, so it'd just be noise (matches the "period still open" leniency
-      // already used elsewhere in this panel).
+      // v47.1: cross-site blocker note — this site's row is done (or exported), but the
+      // employee worked another site that isn't at sup_submitted+ yet, so the all-or-nothing
+      // export is held up. Now shown for both current and last-period views (v45.1 gated to
+      // last-period only, but "why isn't this exportable" is the same question in both cases
+      // — mid-period is arguably when the admin most wants the answer). Rendered inline as
+      // subtle gray text beside the ✓ badge (see statusHtml below), not in the amber warning
+      // row — it's an info note, not an actionable flag.
       let blockingSites=[];
-      if(ready&&_subPeriodMode==='last'){
+      if(ready){
         const otherSites=new Set([...(sitesWorkedByEmp[empId]||[]),...rows.map(r=>r.jobsite)]);
         otherSites.delete(site);
         blockingSites=[...otherSites].filter(s=>{
@@ -4219,8 +4221,8 @@ async function refreshSubmissionsPanel(){
 
       const flagParts=[];
       if(neverSubmitted)flagParts.push('Never submitted');
-      if(stuckEmp)flagParts.push('Needs supervisor review'); // v45.1: renamed from "Waiting on supervisor" — freed up "Waiting on:" for the cross-site note below
-      if(blockingSites.length)flagParts.push(`Waiting on: ${blockingSites.join(', ')}`);
+      if(stuckEmp)flagParts.push('Needs supervisor review');
+      // v47.1: "Waiting on:" no longer in flagParts — moved inline beside ✓ in statusHtml
       if(oosCount)flagParts.push(`${oosCount} punch${oosCount!==1?'es':''} after submit`);
       if(autoCount)flagParts.push(`${autoCount} unresolved auto-clock${autoCount!==1?'s':''}`);
       if(waiveCount)flagParts.push(`${waiveCount} pending waive${waiveCount!==1?'s':''}`);
@@ -4238,9 +4240,14 @@ async function refreshSubmissionsPanel(){
       if(exported&&!actionHtml){
         actionHtml=`<button class="btn-sm" onclick="event.stopPropagation();adminSendBack('${empId}','${site.replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}')" style="background:var(--bg2);color:var(--txt2);border:0.5px solid var(--bdr2);margin-left:6px;">Send back</button>`;
       }
+      // v47.1: blocking-sites note rendered inline beside ✓ (subtle gray, so it reads
+      // as informational rather than as a warning)
+      const blockingNote=blockingSites.length
+        ? `<span style="font-size:11px;color:var(--txt3);margin-left:6px;font-weight:400;">waiting on: ${blockingSites.join(', ')}</span>`
+        : '';
       const statusHtml=exported
         ? '<span class="badge" style="background:var(--blue-l,#dbeafe);color:var(--blue-d,#1e40af);font-size:10px;margin-left:6px;">✓ Exported</span>'
-        : ready?'<span style="color:var(--green);font-weight:700;margin-left:6px;">✓</span>':'';
+        : ready?`<span style="color:var(--green);font-weight:700;margin-left:6px;">✓</span>${blockingNote}`:'';
 
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
         <div style="min-width:0;">
@@ -4559,7 +4566,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
