@@ -952,15 +952,23 @@ async function openMyTimecard(emp,offset){
 /* v45.0: does this employee have an unsubmitted LAST period? Re-checked fresh every time the
    current period loads. "Unsubmitted" = at least one jobsite they worked last period is still
    sitting at 'open' (no status row, or an explicit open row) — AND nothing at that period has
-   already escalated to sup_submitted+ (if it has, the whole card is already locked from the
-   employee's side, same all-or-nothing lock as the current period uses; see the known
-   multi-site edge case noted in CURRENT_STATE.md). Fails closed (no nudge) on a DB error. */
+   already escalated past this employee's lock threshold (regular employees: sup_submitted;
+   supervisors: exported, matching v46.1). Fails closed (no nudge) on a DB error.
+   Known multi-site edge case (noted in CURRENT_STATE.md, unchanged here): if any site is at
+   or above the lock threshold, the whole card is skipped even if a different site is still
+   open — same all-or-nothing lock as the current period uses. */
 async function refreshMyTcCatchupState(emp){
   const period=getPeriodByOffset(1);
   myTcCatchupPeriod=period;
   myTcCatchupNeeded=false;
   const rows=await getEmployeeStatusRows(emp.id,period.start);
-  if(stageAtLeast(maxStage(rows),TC_STAGE.SUP))return; // already out of their hands
+  // v46.1: supervisor-employees lock at EXPORTED, not SUP — must match openMyTimecard /
+  // renderMyTcSubmitBar / retractMyTimecard, or the catch-up prompt short-circuits the
+  // moment ANY of the supervisor's own sites has hit sup_submitted (which happens on their
+  // very first self-submit under v46.0), leaving them locked out of a genuinely open site.
+  const isSupEmp=emp.dept==='Supervisor';
+  const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
+  if(stageAtLeast(maxStage(rows),lockThreshold))return; // already out of their hands
   const {data,error}=await sb.from('punches').select('jobsite')
     .eq('employee_id',emp.id)
     .gte('clock_in',period.start.toISOString())
@@ -4434,7 +4442,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v46.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v46.1',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

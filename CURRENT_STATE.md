@@ -1,7 +1,27 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v46.0 *(supervisor self-submit auto-approval + admin correction modal + Timecards rename)*
+**Current Version:** v46.1 *(catch-up threshold fix — supervisor-employees were locked out of open sites)*
 **Last Updated:** July 7, 2026
+
+---
+
+## ✅ v46.1 — Catch-up threshold fix: supervisor-employees were locked out of their own open sites
+
+**Found during v46.0 testing:** a supervisor had a last-period status row at `open` for one jobsite (three unresolved auto-clocks that never got fixed) but no way to reach it from their own PIN — the admin Timecards panel showed "Never submitted" as expected, but the employee-facing catch-up prompt/banner (v45.0) never fired. Made the timecard genuinely unreachable from every direction: employee locked out despite the row being `open`, admin could edit punches in place via the v46.0 correction modal but couldn't send it back to the employee to actually resubmit.
+
+**Root cause:** `refreshMyTcCatchupState`'s early-return still used a hard-coded `TC_STAGE.SUP` threshold:
+
+```
+if(stageAtLeast(maxStage(rows),TC_STAGE.SUP))return;
+```
+
+This was a v45.0 assumption that pre-dated v46.0's supervisor auto-approval. After v46.0, a supervisor's own submits go straight to `sup_submitted` — so the moment a supervisor self-submits their normal site, `maxStage` returns `sup_submitted`+ and this short-circuit kicks in on every subsequent PIN entry, even if a completely different site is still sitting at `open` with unresolved auto-clocks. The three other spots that check the same lock threshold (`openMyTimecard`, `renderMyTcSubmitBar`, `retractMyTimecard`) all got the `isSupEmp?EXPORTED:SUP` branch in v46.0 — this one was missed.
+
+**The fix — two-line, targeted:** `refreshMyTcCatchupState` now uses the same `isSupEmp?EXPORTED:SUP` split. Supervisor-employees see the catch-up prompt/banner as long as none of their sites has reached `exported`; regular employees behave exactly as before.
+
+**Deliberately not addressed here:** the all-or-nothing "multi-site lock" edge case flagged as known behavior since v45.0 — if a regular employee has one site at `sup_submitted` and another at `open`, the whole card is still locked from their side. Same shape as the fix above but with a bigger blast radius (would need `openMyTimecard`'s lock rendering to become per-site-aware). Julio picked option A (targeted fix) over option B (per-site rework) — that stays as documented behavior for now.
+
+**Files touched:** `app.js`, `CURRENT_STATE.md`. No schema change, no HTML change.
 
 ---
 
@@ -594,7 +614,7 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | **Timecard stage — data layer (v44.0, schema+signatures changed in Build 3)** | `pt_timecard_status` table (now one row per employee per period **per jobsite**); `TC_STAGE`/`TC_STAGE_RANK` consts; `getTimecardStatus(empId,periodStart,jobsite)` (one site) / `getEmployeeStatusRows(empId,periodStart)` (all of one employee's site-rows, NEW Build 3) / `getAllStatusForPeriod(periodStart)` (→ `{empId:[rows]}`, array-valued since Build 3) / `setTimecardStage(empId,period,stage,jobsite)` (jobsite now REQUIRED) / `stageOf(row)` / `stageAtLeast(stage,target)` / `minStage(rows)` / `maxStage(rows)` (NEW Build 3 aggregate helpers) / `isFullyReadyForExport(rows,sitesWorked)` (NEW Build 3 — sitesWorked param is what makes a worked-but-unsubmitted site correctly block readiness) / `isOutOfSubmission(entry,statusRow)` — all near `isPendingWaive` in app.js |
 | **My Timecard submit/pull-back (v44.0, retrofit in Build 3; supervisor auto-approval added v46.0)** | `renderMyTcSubmitBar()` (3 states off `maxStage(myTcStatusRows)`) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted` **per distinct jobsite worked**, `Promise.all`) + `retractMyTimecard()` (resets **every** site-row → `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=`maxStage`≥`sup_submitted`, `myTcEditable`=`myTcStatusRows.length===0`. State: `myTcStatusRows` (array, was `myTcStatus` single row pre-Build-3) / `myTcBusy` / `myTcEditable`. v46.0: `isSupEmp=myTcEmp.dept==='Supervisor'` checked in all three functions — supervisors write straight to `TC_STAGE.SUP` on submit (skips peer review, any site) and use `TC_STAGE.EXPORTED` as the lock/pull-back threshold instead of `TC_STAGE.SUP` (regular employees unchanged). |
 | **My Timecard running total (v44.0)** | `myTcRunningHours(punches)` → `{hours,pendingWaiveCount}` (completed punches only, optimistic pending-waive, non-mutating); `renderMyTcTotal()` → `#mytc-total` in index.html (with disclaimer line) |
-| **My Timecard last-period catch-up (NEW, v45.0)** | `refreshMyTcCatchupState(emp)` (worked-sites-vs-status-rows check against `getPeriodByOffset(1)`) / `switchMyTcPeriod(offset)` / `renderMyTcPeriodBar()`; `myTcPeriodOffset` global (0=current,1=last) now drives `openMyTimecard(emp,offset)` — same screen, same submit/edit/add machinery, reused as-is; PIN-entry prompt added in `submitTimecardPin()`; `#mytc-period-bar` in index.html |
+| **My Timecard last-period catch-up (NEW, v45.0; threshold fix v46.1)** | `refreshMyTcCatchupState(emp)` (worked-sites-vs-status-rows check against `getPeriodByOffset(1)`) / `switchMyTcPeriod(offset)` / `renderMyTcPeriodBar()`; `myTcPeriodOffset` global (0=current,1=last) now drives `openMyTimecard(emp,offset)` — same screen, same submit/edit/add machinery, reused as-is; PIN-entry prompt added in `submitTimecardPin()`; `#mytc-period-bar` in index.html. v46.1: early-return threshold now uses `isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP` — the same lock-threshold split v46.0 applied to `openMyTimecard`/`renderMyTcSubmitBar`/`retractMyTimecard`. Without this, supervisor-employees hit the short-circuit as soon as any of their sites reached `sup_submitted` (which under v46.0's auto-approval happens on their very first self-submit), leaving them locked out of catch-up on a genuinely still-open other site. |
 | **Supervisor stage colours + out-of-submission (v44.0, scoped to supervisor's own sites in Build 3)** | `supStatusPeriod()` (log mode → stage period) / `supStageChip(stage)` (grey/amber/green pill) in `refreshSupLog`; per-employee chip now driven by `minStage(mySiteRows)` where `mySiteRows` = that employee's status rows filtered to `activeSup.jobsites`; left-border + "⚠️ After submit" row badges via `isOutOfSubmission` matched per-punch to its own site's row; one `getAllStatusForPeriod` call per refresh (Option A), re-guarded by `_supLogSeq` |
 | **Supervisor site-wide submit (v44.0, reworked for per-site pairs in Build 3)** | `submitSiteToOffice()` (period-scoped roster query at `activeSup.jobsites`, builds `{empId,jobsite}` "ready pairs" where that site's row is `emp_submitted`) → confirm → `doSubmitSiteToOffice(readyPairs,...)` (Promise.all `setTimecardStage` per pair); `updateSubmitSummary(empMap,statusMap)` live count (statusMap here is pre-scoped to supervisor's sites, captured as `myStatusMap` during the row-build loop); `#s-submit-site-btn` / `#s-submit-period-label` / `#s-submit-summary` in index.html `#spanel-log` |
 | **Supervisor Force Submit (NEW, v44.0 Build 3)** | `forceSubmitEmployee(empId,empName)` — finds this employee's open sites among the supervisor's own jobsites, gates on unresolved auto-clocks/pending waives (alert+block), confirms, writes `emp_submitted` per open site on the employee's behalf. "Force submit" button rendered inline in `refreshSupLog`'s card header when `openSupSites.length>0`. No audit marker. |
@@ -614,4 +634,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 7, 2026 — v46.0 (supervisor self-submit auto-approval + admin correction modal + Timecards rename)_
+_Last updated: July 7, 2026 — v46.1 (catch-up threshold fix — supervisor-employees were locked out of open sites)_
