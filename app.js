@@ -52,6 +52,7 @@ let myTcEmp=null;
 let myTcPeriod=null;
 let myTcPunches=[];
 let myTcLocked=false;
+let myTcSiteStageMap={}; // v47.0: per-site stage map {jobsite: stage} for My Timecard
 let myTcEditingDbId=null;
 let myTcAdding=false;
 let myTcEditActs=new Set();
@@ -908,30 +909,25 @@ async function openMyTimecard(emp,offset){
   document.getElementById('mytc-list').innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">Loading…</p>';
   showScreen('screen-mytc');
 
-  // Load this employee's submission stage for the period in view (v44.0 Build 3: one row per
-  // jobsite they worked — fetch ALL of them and use the aggregate). Locked to view-only once
-  // ANY site's supervisor has submitted (maxStage >= sup_submitted); the employee's own
-  // submission does NOT lock them (they can still pull it back, as long as no site has advanced).
-  // v46.0: a supervisor's own timecard already goes straight to sup_submitted on self-submit
-  // (see submitMyTimecard), so that threshold would lock them out immediately. Supervisors lock
-  // only once actually exported — same status, later trigger.
+  // v47.0: per-site lock model. Build a map of {jobsite: stage} from the status rows.
+  // Each punch is editable based on its own site's stage, not a single aggregate.
   myTcStatusRows=await getEmployeeStatusRows(emp.id,myTcPeriod.start);
-  const stage=maxStage(myTcStatusRows);
   const isSupEmp=emp.dept==='Supervisor'; // v46.0
-  myTcLocked=stageAtLeast(stage,isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP);
-  // v46.2: editable whenever no site has advanced past 'open'. Pre-v46.2 this was
-  // (myTcStatusRows.length===0), which broke after pull-back: retractMyTimecard resets every
-  // row's stage to 'open' but leaves the rows in place, so a pulled-back timecard was showing
-  // as non-editable (no Edit buttons, no Add) despite technically being open. Also drove the
-  // stale "Pull it back above to make changes" reminder in renderMyTcList to keep rendering
-  // — same bug, one root cause. Fresh timecards (no rows yet) still qualify since
-  // maxStage([]) returns 'open'.
-  myTcEditable=(stage===TC_STAGE.OPEN);
+  myTcSiteStageMap={};
+  myTcStatusRows.forEach(r=>{myTcSiteStageMap[r.jobsite]=r.stage;});
+  // Aggregate flags kept for the top-level locked note and Add button:
+  const allStages=Object.values(myTcSiteStageMap);
+  const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
+  myTcLocked=allStages.length>0&&allStages.every(s=>stageAtLeast(s,lockThreshold));
+  // myTcEditable is now per-punch (checked in renderMyTcList); keep a flag for whether
+  // ANY site is open (drives Add button visibility).
+  const anyOpen=allStages.length===0||allStages.some(s=>s===TC_STAGE.OPEN)||JOBSITES.some(j=>!myTcSiteStageMap[j]);
+  myTcEditable=anyOpen; // still used as "can add" flag
   document.getElementById('mytc-locked-note').textContent=isSupEmp
     ? 'This pay period has already been exported to head office. Contact your GM for any corrections.'
     : 'This pay period has already been submitted. Contact your supervisor for corrections.';
   document.getElementById('mytc-locked-note').style.display=myTcLocked?'block':'none';
-  document.getElementById('mytc-add-btn').style.display=myTcEditable?'block':'none';
+  document.getElementById('mytc-add-btn').style.display=anyOpen?'block':'none';
 
   // Load this employee's punches for the period in view straight from the DB
   // (timeLog only caches open punches, not the full period history)
@@ -957,36 +953,30 @@ async function openMyTimecard(emp,offset){
 }
 
 /* v45.0: does this employee have an unsubmitted LAST period? Re-checked fresh every time the
-   current period loads. "Unsubmitted" = at least one jobsite they worked last period is still
-   sitting at 'open' (no status row, or an explicit open row) — AND nothing at that period has
-   already escalated past this employee's lock threshold (regular employees: sup_submitted;
-   supervisors: exported, matching v46.1). Fails closed (no nudge) on a DB error.
-   Known multi-site edge case (noted in CURRENT_STATE.md, unchanged here): if any site is at
-   or above the lock threshold, the whole card is skipped even if a different site is still
-   open — same all-or-nothing lock as the current period uses. */
+   current period loads. v47.0: per-site model — show the catch-up banner if ANY site is still
+   open (can submit) or pullable (can retract). No longer blocked by a locked site elsewhere. */
 async function refreshMyTcCatchupState(emp){
   const period=getPeriodByOffset(1);
   myTcCatchupPeriod=period;
   myTcCatchupNeeded=false;
   const rows=await getEmployeeStatusRows(emp.id,period.start);
-  // v46.1: supervisor-employees lock at EXPORTED, not SUP — must match openMyTimecard /
-  // renderMyTcSubmitBar / retractMyTimecard, or the catch-up prompt short-circuits the
-  // moment ANY of the supervisor's own sites has hit sup_submitted (which happens on their
-  // very first self-submit under v46.0), leaving them locked out of a genuinely open site.
   const isSupEmp=emp.dept==='Supervisor';
   const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
-  if(stageAtLeast(maxStage(rows),lockThreshold))return; // already out of their hands
+  // v47.0: per-site — if ALL sites are at or past the lock threshold, nothing to catch up on.
+  // But if even one site is still open or pullable, show the banner.
   const {data,error}=await sb.from('punches').select('jobsite')
     .eq('employee_id',emp.id)
     .gte('clock_in',period.start.toISOString())
     .lte('clock_in',period.end.toISOString());
-  if(error)return; // don't nag if we can't tell
+  if(error)return;
   const sitesWorked=[...new Set((data||[]).map(p=>p.jobsite).filter(Boolean))];
-  if(!sitesWorked.length)return; // nothing worked last period — nothing to catch up on
+  if(!sitesWorked.length)return;
   const rowsBySite={};rows.forEach(r=>{rowsBySite[r.jobsite]=r;});
   myTcCatchupNeeded=sitesWorked.some(s=>{
     const r=rowsBySite[s];
-    return !r||r.stage===TC_STAGE.OPEN;
+    if(!r||r.stage===TC_STAGE.OPEN)return true; // open — needs submit
+    if(!stageAtLeast(r.stage,lockThreshold))return true; // submitted but pullable
+    return false;
   });
 }
 
@@ -1042,12 +1032,25 @@ function renderMyTcTotal(){
 function renderMyTcSubmitBar(){
   const bar=document.getElementById('mytc-submit-bar');
   if(!bar)return;
-  const stage=maxStage(myTcStatusRows); // v44.0 Build 3: aggregate across this employee's site-rows
   const isSupEmp=myTcEmp&&myTcEmp.dept==='Supervisor'; // v46.0
+  const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
+  const pullableStage=isSupEmp?TC_STAGE.SUP:TC_STAGE.EMP;
 
-  // Locked, no actions — supervisors: not until exported (their own submit already carries
-  // supervisor authority, see submitMyTimecard). Regular employees: once any site is sent to office.
-  if(stageAtLeast(stage,isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP)){
+  // v47.0: per-site categorization
+  const workedSites=[...new Set(myTcPunches.map(p=>p.jobsite).filter(Boolean))];
+  // Include sites with status rows even if no punches (edge: punches deleted but row remains)
+  myTcStatusRows.forEach(r=>{if(!workedSites.includes(r.jobsite))workedSites.push(r.jobsite);});
+  const openSites=[],submittedSites=[],lockedSites=[];
+  workedSites.forEach(s=>{
+    const st=myTcSiteStageMap[s]||TC_STAGE.OPEN;
+    if(st===TC_STAGE.OPEN)openSites.push(s);
+    else if(st===pullableStage)submittedSites.push(s);
+    else if(stageAtLeast(st,lockThreshold))lockedSites.push(s);
+    else submittedSites.push(s); // catch-all (shouldn't happen but safe)
+  });
+
+  // All locked — no actions
+  if(!openSites.length&&!submittedSites.length&&lockedSites.length){
     bar.innerHTML=`<div style="background:var(--bg2);border:0.5px solid var(--bdr2);border-radius:var(--radius);padding:11px 13px;">
         <span style="font-size:13px;font-weight:600;color:var(--txt);">✓ Submitted &amp; locked</span>
         <div style="font-size:11px;color:var(--txt2);margin-top:3px;">${isSupEmp?'This pay period has been exported to head office. Contact your GM for any corrections.':'Your supervisor has submitted this pay period. Contact them for any corrections.'}</div>
@@ -1055,29 +1058,45 @@ function renderMyTcSubmitBar(){
     return;
   }
 
-  // Submitted, pull-back still available. Regular employees: emp_submitted, waiting on a
-  // supervisor. Supervisors: sup_submitted (their own submit goes straight there — v46.0),
-  // waiting on nothing but still correctable until export.
-  if(stage===TC_STAGE.EMP||(isSupEmp&&stage===TC_STAGE.SUP)){
-    bar.innerHTML=`<div style="background:#173a17;border:0.5px solid #2f7d31;border-radius:var(--radius);padding:11px 13px;">
+  let html='';
+
+  // Submitted sites (pullable)
+  if(submittedSites.length){
+    const siteList=submittedSites.sort().join(', ');
+    const subNote=isSupEmp
+      ?`Sent to the office (${siteList}). Pull back to make changes before it\u2019s exported.`
+      :`Handed in to your supervisor (${siteList}). Pull back to make changes before they submit.`;
+    html+=`<div style="background:#173a17;border:0.5px solid #2f7d31;border-radius:var(--radius);padding:11px 13px;margin-bottom:8px;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
           <div>
-            <span style="font-size:13px;font-weight:600;color:#8fe08f;">✓ Timecard submitted</span>
-            <div style="font-size:11px;color:#a9cba9;margin-top:3px;">${isSupEmp?'Sent straight to the office. You can pull it back to make changes until it\u2019s exported.':'Handed in to your supervisor. You can pull it back to make changes until they submit.'}</div>
+            <span style="font-size:13px;font-weight:600;color:#8fe08f;">✓ Submitted${submittedSites.length<workedSites.length?' ('+siteList+')':''}</span>
+            <div style="font-size:11px;color:#a9cba9;margin-top:3px;">${subNote}</div>
           </div>
           <button class="btn-sm" id="mytc-retract-btn" onclick="retractMyTimecard()" style="flex-shrink:0;background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">Pull back</button>
         </div>
       </div>`;
-    return;
   }
 
-  // Open — show the submit button.
-  const isCatchup=myTcPeriodOffset===1;
-  const openNote=isCatchup
-    ? 'This is your last pay period — review your punches below, then submit to hand it to your supervisor.'
-    : (isSupEmp?'As a supervisor, this goes straight to the office once you submit — no need to wait on anyone else.':'Review your punches below, then submit to hand your timecard to your supervisor.');
-  bar.innerHTML=`<button class="btn" id="mytc-submit-btn" onclick="submitMyTimecard()" style="width:100%;background:var(--green);color:#fff;font-weight:600;">Submit my timecard →</button>
-    <div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">${openNote}</div>`;
+  // Locked sites (non-pullable)
+  if(lockedSites.length&&(openSites.length||submittedSites.length)){
+    const lockList=lockedSites.sort().join(', ');
+    html+=`<div style="background:var(--bg2);border:0.5px solid var(--bdr2);border-radius:var(--radius);padding:8px 13px;margin-bottom:8px;">
+        <span style="font-size:11px;color:var(--txt2);">🔒 ${lockList} — ${isSupEmp?'exported, contact your GM':'locked by supervisor'}</span>
+      </div>`;
+  }
+
+  // Open sites (can submit)
+  if(openSites.length){
+    const isCatchup=myTcPeriodOffset===1;
+    const siteNote=openSites.length<workedSites.length?' ('+openSites.sort().join(', ')+')':'';
+    const openHint=isCatchup
+      ? 'This is your last pay period — review your punches below, then submit.'
+      : (isSupEmp?'As a supervisor, this goes straight to the office once you submit.':'Review your punches below, then submit to hand your timecard to your supervisor.');
+    html+=`<button class="btn" id="mytc-submit-btn" onclick="submitMyTimecard()" style="width:100%;background:var(--green);color:#fff;font-weight:600;">Submit my timecard${siteNote} →</button>
+      <div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">${openHint}</div>`;
+  }
+
+  bar.innerHTML=html;
 }
 
 /* Employee submits their timecard (v44.0).
@@ -1099,28 +1118,27 @@ async function submitMyTimecard(){
     if(myTcBusy)return;
     myTcBusy=true;
     const btn=document.getElementById('mytc-submit-btn');if(btn)btn.disabled=true;
-    // v44.0 Build 3: one row per distinct jobsite worked this period (multi-site employees
-    // get a row per site — each site's supervisor submits/tracks their own independently).
-    const jobsites=[...new Set(myTcPunches.map(p=>p.jobsite).filter(Boolean))];
-    if(!jobsites.length){myTcBusy=false;showCustomAlert('Nothing to submit','No jobsite found on your punches this period. Contact your supervisor.');return;}
-    // v46.0: a supervisor submitting their own timecard doesn't need another supervisor's
-    // review — it goes straight to sup_submitted at every site they worked, not just ones
-    // they personally supervise (closes the gap where off-site work sat waiting on whichever
-    // supervisor DID cover that site).
+    // v47.0: only submit sites that are still open (per-site model)
+    const allJobsites=[...new Set(myTcPunches.map(p=>p.jobsite).filter(Boolean))];
+    const openJobsites=allJobsites.filter(j=>(myTcSiteStageMap[j]||TC_STAGE.OPEN)===TC_STAGE.OPEN);
+    if(!openJobsites.length){myTcBusy=false;showCustomAlert('Nothing to submit','No open sites to submit. Your timecard may already be submitted.');return;}
     const targetStage=isSupEmp?TC_STAGE.SUP:TC_STAGE.EMP;
-    const results=await Promise.all(jobsites.map(js=>setTimecardStage(myTcEmp.id,myTcPeriod,targetStage,js)));
+    const results=await Promise.all(openJobsites.map(js=>setTimecardStage(myTcEmp.id,myTcPeriod,targetStage,js)));
     myTcBusy=false;
     const failed=results.filter(r=>!r.ok);
     if(failed.length){showCustomAlert('Could not submit','There was a problem submitting your timecard: '+(failed[0].error?.message||'unknown error')+'. Please try again.');return;}
-    // v45.0: a catch-up (last-period) submit has nothing left to review — bounce straight
-    // back to the current period instead of reloading the now-submitted catch-up view.
     const wasCatchup=myTcPeriodOffset===1;
-    if(wasCatchup){
+    // v47.0: check if ALL sites are now submitted (open ones just submitted + already-submitted ones)
+    const remainingOpen=allJobsites.filter(j=>{
+      if(openJobsites.includes(j))return false; // just submitted
+      return (myTcSiteStageMap[j]||TC_STAGE.OPEN)===TC_STAGE.OPEN;
+    });
+    if(wasCatchup&&!remainingOpen.length){
       showNotif('✓','Last period submitted','You\u2019re all caught up','#2f7d31',2600);
       await openMyTimecard(myTcEmp,0);
     } else {
       showNotif('✓','Timecard submitted',isSupEmp?'Sent straight to the office':'Handed in to your supervisor','#2f7d31',2600);
-      await openMyTimecard(myTcEmp); // reload → shows submitted state + pull-back
+      await openMyTimecard(myTcEmp); // reload → shows updated per-site states
     }
   };
   if(beforeEnd){
@@ -1134,30 +1152,38 @@ async function submitMyTimecard(){
   }
 }
 
-/* Employee pulls their submission back (v44.0) — only allowed while the supervisor
-   hasn't submitted (stage still emp_submitted). Returns the card to 'open'. */
+/* Employee pulls their submission back (v44.0, reworked v47.0 per-site) — only retracts
+   sites that are still pullable (emp_submitted for regular, sup_submitted for supervisors).
+   Sites already past the lock threshold are left untouched. */
 async function retractMyTimecard(){
   if(myTcBusy)return;
   const isSupEmp=myTcEmp&&myTcEmp.dept==='Supervisor'; // v46.0
   const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
+  const pullableStage=isSupEmp?TC_STAGE.SUP:TC_STAGE.EMP;
   // Guard: re-check ALL site-rows against the DB in case things moved since this screen loaded.
   const fresh=await getEmployeeStatusRows(myTcEmp.id,myTcPeriod.start);
-  if(stageAtLeast(maxStage(fresh),lockThreshold)){
-    showCustomAlert('Too late to pull back',
-      isSupEmp?'This pay period has already been exported to head office. Contact your GM for any corrections.'
-               :'Your supervisor has already submitted this pay period. Contact them for any corrections.');
+  if(!fresh.length){await openMyTimecard(myTcEmp);return;} // nothing to pull back
+  // v47.0: only retract sites that are at the pullable stage — leave locked sites alone
+  const pullable=fresh.filter(r=>r.stage===pullableStage);
+  if(!pullable.length){
+    // Everything is either still open or already locked
+    const anyLocked=fresh.some(r=>stageAtLeast(r.stage,lockThreshold));
+    if(anyLocked){
+      showCustomAlert('Too late to pull back',
+        isSupEmp?'Your timecard has already been exported to head office. Contact your GM for any corrections.'
+                 :'Your supervisor has already submitted your timecard. Contact them for any corrections.');
+    }
     await openMyTimecard(myTcEmp);
     return;
   }
-  if(!fresh.length){await openMyTimecard(myTcEmp);return;} // nothing to pull back
   myTcBusy=true;
   const btn=document.getElementById('mytc-retract-btn');if(btn)btn.disabled=true;
-  // Reset every one of this employee's site-rows for the period back to open.
-  const results=await Promise.all(fresh.map(r=>setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.OPEN,r.jobsite)));
+  const results=await Promise.all(pullable.map(r=>setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.OPEN,r.jobsite)));
   myTcBusy=false;
   const failed=results.filter(r=>!r.ok);
   if(failed.length){showCustomAlert('Could not pull back','There was a problem: '+(failed[0].error?.message||'unknown error')+'. Please try again.');return;}
-  showNotif('✓','Timecard pulled back','You can make changes now','#c47f17',2400);
+  const siteList=pullable.map(r=>r.jobsite).sort().join(', ');
+  showNotif('✓','Pulled back',`${siteList} — you can make changes now`,'#c47f17',2400);
   await openMyTimecard(myTcEmp);
 }
 
@@ -1165,6 +1191,7 @@ function closeMyTimecard(){
   myTcEmp=null;myTcPunches=[];myTcPeriod=null;myTcLocked=false;
   myTcStatusRows=[];myTcBusy=false;myTcEditable=true;
   myTcPeriodOffset=0;myTcCatchupNeeded=false;myTcCatchupPeriod=null;
+  myTcSiteStageMap={}; // v47.0
   showScreen('screen-kiosk');
 }
 
@@ -1175,14 +1202,22 @@ function renderMyTcList(){
     list.innerHTML=`<p style="text-align:center;color:var(--txt2);padding:24px 10px;font-size:13px;">${msg}</p>`;
     return;
   }
+  const isSupEmp=myTcEmp&&myTcEmp.dept==='Supervisor';
+  const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
   list.innerHTML=myTcPunches.map(e=>{
+    // v47.0: per-punch editability based on its own site's stage
+    const punchStage=myTcSiteStageMap[e.jobsite]||TC_STAGE.OPEN;
+    const punchEditable=(punchStage===TC_STAGE.OPEN);
+    const punchLocked=stageAtLeast(punchStage,lockThreshold);
     const stillIn=!e.out;
     const badges=[
       stillIn?'<span class="badge b-in">In</span>':'',
       e.manualEntry?'<span class="badge b-amber">✎ Manual</span>':'',
-      e.autoClocked?'<span class="badge" style="background:#3a1f1f;color:#e08585;">Auto-clocked</span>':''
+      e.autoClocked?'<span class="badge" style="background:#3a1f1f;color:#e08585;">Auto-clocked</span>':'',
+      punchLocked?'<span class="badge" style="background:var(--bg3);color:var(--txt3);font-size:9px;">🔒</span>':'',
+      (!punchEditable&&!punchLocked)?'<span class="badge" style="background:var(--amber-l);color:var(--amber);font-size:9px;">Submitted</span>':''
     ].filter(Boolean).join(' ');
-    return `<div class="card" style="margin-bottom:10px;">
+    return `<div class="card" style="margin-bottom:10px;${punchLocked?'opacity:0.65;':''}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
         <div>
           <div style="font-weight:600;font-size:13px;color:var(--txt);">${fmtDt(e.in)}</div>
@@ -1194,39 +1229,46 @@ function renderMyTcList(){
         </div>
         <div style="text-align:right;">${badges}</div>
       </div>
-      ${myTcEditable?`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`:''}
+      ${punchEditable?`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`:''}
     </div>`;
   }).join('');
-  // If submitted (but not supervisor-locked), remind them to pull back to edit.
-  if(!myTcEditable&&!myTcLocked){
-    list.insertAdjacentHTML('afterbegin',
-      `<p style="text-align:center;color:var(--txt3);font-size:11px;margin:0 0 10px;line-height:1.4;">Your timecard is submitted. Pull it back above to make changes.</p>`);
-  }
 }
 
 /* Add a missed punch — simplified flow, scoped to self + current period only */
 function openMyTcAdd(){
-  if(!myTcEditable)return;
+  // v47.0: per-site — only open if at least one site is open; offer only open sites
+  const openSites=JOBSITES.filter(j=>(myTcSiteStageMap[j]||TC_STAGE.OPEN)===TC_STAGE.OPEN);
+  if(!openSites.length)return;
   myTcAdding=true;myTcEditingDbId=null;myTcEditActs=new Set();
   document.getElementById('mytc-edit-title').textContent='Add a missed punch';
   document.getElementById('mytc-edit-in').value='';
   document.getElementById('mytc-edit-out').value='';
-  document.getElementById('mytc-edit-jobsite').innerHTML=JOBSITES.map(j=>`<option>${j}</option>`).join('');
+  document.getElementById('mytc-edit-jobsite').innerHTML=openSites.map(j=>`<option>${j}</option>`).join('');
   buildMyTcActGrid();
+  // v47.0: show add-mode quick-set buttons
+  document.getElementById('mytc-in-quickset-add').style.display='flex';
+  document.getElementById('mytc-out-quickset-add').style.display='flex';
+  document.getElementById('mytc-out-quickset-edit').style.display='none';
   document.getElementById('mytc-edit-err').textContent='';
   document.getElementById('mytc-edit-modal-bg').style.display='flex';
 }
 
 function openMyTcEdit(dbId){
-  if(!myTcEditable)return;
+  // v47.0: per-site editability — check this punch's site stage
   const e=myTcPunches.find(p=>String(p.dbId)===String(dbId));
   if(!e)return;
+  const punchStage=myTcSiteStageMap[e.jobsite]||TC_STAGE.OPEN;
+  if(punchStage!==TC_STAGE.OPEN)return; // locked at this site
   myTcAdding=false;myTcEditingDbId=dbId;myTcEditActs=new Set(e.activity||[]);
   document.getElementById('mytc-edit-title').textContent='Edit my punch';
   document.getElementById('mytc-edit-in').value=toLocal(e.in);
   document.getElementById('mytc-edit-out').value=e.out?toLocal(e.out):'';
   document.getElementById('mytc-edit-jobsite').innerHTML=JOBSITES.map(j=>`<option${e.jobsite===j?' selected':''}>${j}</option>`).join('');
   buildMyTcActGrid();
+  // v47.0: show edit-mode quick-set buttons (out only, on same date as clock-in)
+  document.getElementById('mytc-in-quickset-add').style.display='none';
+  document.getElementById('mytc-out-quickset-add').style.display='none';
+  document.getElementById('mytc-out-quickset-edit').style.display='flex';
   document.getElementById('mytc-edit-err').textContent='';
   document.getElementById('mytc-edit-modal-bg').style.display='flex';
 }
@@ -1770,6 +1812,12 @@ async function refreshSupLog(){
     const forceBtn=openSupSites.length
       ? `<button class="btn-sm" onclick="event.stopPropagation();forceSubmitEmployee('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--amber-l);color:var(--amber);border:0.5px solid var(--amber);margin-left:6px;">Force submit</button>`
       : '';
+    // v47.0: supervisor "Send back to employee" — available for sites at sup_submitted (sent
+    // to office but not yet exported). Sends back to open at this supervisor's own sites only.
+    const sentBackSites=mySiteRows.filter(r=>r.stage===TC_STAGE.SUP&&!allRows.some(ar=>ar.stage===TC_STAGE.EXPORTED));
+    const sendBackBtn=sentBackSites.length
+      ? `<button class="btn-sm" onclick="event.stopPropagation();supSendBackToEmployee('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--bg2);color:var(--txt2);border:0.5px solid var(--bdr2);margin-left:6px;">Send back</button>`
+      : '';
     const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${oos?` · <span style="color:#e07070;font-weight:600;">${oos} ⚠️ after submit</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
@@ -1801,7 +1849,7 @@ async function refreshSupLog(){
         <div>
           <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${data.name}
             <span class="badge" style="background:${chip.bg};color:${chip.color};margin-left:6px;font-size:10px;vertical-align:middle;">${chip.label}</span>
-            ${forceBtn}
+            ${forceBtn}${sendBackBtn}
           </p>
           <p class="emp-summary">${summary}</p>
         </div>
@@ -1912,6 +1960,44 @@ async function doSubmitSiteToOffice(readyPairs,period,periodLabel){
     showNotif('✓','Site submitted',`${readyPairs.length} timecard${readyPairs.length!==1?'s':''} sent for ${periodLabel}`,'#2f7d31',2800);
   }
   refreshSupLog(); // repaint stage colours → submitted employees flip to "Sent to office"
+}
+
+/* ─── Supervisor: Send back to employee (v47.0) ────────────────────────────────
+   Undoes the supervisor's "send to office" for this employee at the supervisor's own
+   sites — resets sup_submitted → open so the employee can edit and re-submit.
+   Only available until any site is exported; once exported, only the admin can act. */
+async function supSendBackToEmployee(empId,empName){
+  if(!activeSup)return;
+  const sites=activeSup.jobsites||[];
+  const period=supStatusPeriod();
+  // Fresh status check — only retract sites at sup_submitted under this supervisor
+  const statusMap=await getAllStatusForPeriod(period.start);
+  const allRows=statusMap[empId]||[];
+  // Block if any site is already exported
+  if(allRows.some(r=>r.stage===TC_STAGE.EXPORTED)){
+    showCustomAlert('Already exported','This employee\u2019s timecard has already been exported to head office. Only the GM/admin can send it back now.');
+    refreshSupLog();
+    return;
+  }
+  const retractable=allRows.filter(r=>sites.includes(r.jobsite)&&r.stage===TC_STAGE.SUP);
+  if(!retractable.length){
+    showCustomAlert('Nothing to send back',`${empName} has no timecards at your sites that are sent to office and eligible for return.`);
+    refreshSupLog();
+    return;
+  }
+  const siteList=retractable.map(r=>r.jobsite).sort().join(', ');
+  showCustomConfirm(
+    `Send ${empName}\u2019s timecard back?`,
+    `This returns ${empName}\u2019s timecard at ${siteList} to them so they can make changes and re-submit. They\u2019ll need to submit again, then you\u2019ll need to re-send to office.`,
+    '',
+    'Send back','var(--amber)',
+    async()=>{
+      const results=await Promise.all(retractable.map(r=>setTimecardStage(empId,period,TC_STAGE.OPEN,r.jobsite)));
+      const failed=results.filter(r=>!r.ok).length;
+      if(failed){showCustomAlert('Problem','Some sites could not be sent back. Try again.');return;}
+      showNotif('✓','Sent back',`${empName}\u2019s timecard returned at ${siteList}`,'#c47f17',2800);
+      refreshSupLog();
+    });
 }
 
 /* ─── Supervisor: Force Submit on an employee's behalf (v44.0 Build 3) ───────────────
@@ -2787,17 +2873,15 @@ function generateMasterPDF(){
   (ALL_ACTIVITIES||ACTIVITIES||[]).forEach(a=>{if(a.code)actCodeMap[a.name]=a.code;});
   function formatTaskCode(actName){const code=actCodeMap[actName];return code?`${code} (${actName})`:actName;}
 
-  // ── Group by jobsite, then by employee within each jobsite ──
-  const siteOrder=[];
-  const siteMap={};
+  // ── v47.0: Group by employee (consolidated — one card per employee, all sites) ──
+  const empMap={};
   logs.forEach(l=>{
-    const site=l.jobsite||'—';
-    if(!siteMap[site]){siteMap[site]={};siteOrder.push(site);}
     const empId=l.empId||l.name;
-    if(!siteMap[site][empId])siteMap[site][empId]={name:l.name,dept:l.dept,punches:[]};
-    siteMap[site][empId].punches.push(l);
+    if(!empMap[empId])empMap[empId]={name:l.name,dept:l.dept,punches:[],sites:new Set()};
+    empMap[empId].punches.push(l);
+    if(l.jobsite)empMap[empId].sites.add(l.jobsite);
   });
-  siteOrder.sort();
+  const empIds=Object.keys(empMap).sort((a,b)=>empMap[a].name.localeCompare(empMap[b].name));
 
   // ── Consolidate: group by date+jobsite, variable-height rows ──
   function consolidate(punches){
@@ -2844,15 +2928,12 @@ function generateMasterPDF(){
 
   let pageIdx=0;
 
-  siteOrder.forEach(site=>{
-    const empMap=siteMap[site];
-    const empIds=Object.keys(empMap).sort((a,b)=>empMap[a].name.localeCompare(empMap[b].name));
-
-    empIds.forEach(empId=>{
+  empIds.forEach(empId=>{
       if(pageIdx>0)doc.addPage();
       pageIdx++;
       const emp=empMap[empId];
       const rows=consolidate(emp.punches);
+      const allSites=[...emp.sites].sort().join(', ');
       let y=MT;
 
       // ── HEADER BAND ──
@@ -2876,12 +2957,12 @@ function generateMasterPDF(){
       doc.text('TIME CARD',PW/2,y+6,{align:'center'});
       y+=11;
 
-      // ── Employee info block ──
+      // ── Employee info block (v47.0: JOBSITE(S) lists all worked sites) ──
       doc.setFontSize(8.5);
       doc.setFont('helvetica','bold');doc.text('NAME:',ML,y+3.5);
       doc.setFont('helvetica','normal');doc.text(emp.name,ML+16,y+3.5);
-      doc.setFont('helvetica','bold');doc.text('JOBSITE:',ML+CW*0.52,y+3.5);
-      doc.setFont('helvetica','normal');doc.text(site,ML+CW*0.52+18,y+3.5);
+      doc.setFont('helvetica','bold');doc.text('JOBSITE(S):',ML+CW*0.52,y+3.5);
+      doc.setFont('helvetica','normal');doc.text(allSites,ML+CW*0.52+24,y+3.5);
       y+=6;
       doc.setFont('helvetica','bold');doc.text('DEPARTMENT:',ML,y+3.5);
       doc.setFont('helvetica','normal');doc.text(emp.dept||'—',ML+27,y+3.5);
@@ -2913,7 +2994,7 @@ function generateMasterPDF(){
           doc.addPage();y=MT;
           doc.setFillColor(...GREEN);doc.rect(ML,y,CW,7,'F');
           doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...WHITE);
-          doc.text(`${emp.name} (${site}) \u2014 continued`,ML+3,y+5);
+          doc.text(`${emp.name} \u2014 continued`,ML+3,y+5);
           y+=9;
           doc.setFillColor(...TAN);doc.rect(ML,y,CW,ROW_H,'F');
           doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
@@ -2980,15 +3061,13 @@ function generateMasterPDF(){
       doc.text('Master admin approval',ML,sigY+4);
       doc.line(ML+CW-50,sigY,ML+CW,sigY);
       doc.text('Date',ML+CW-50,sigY+4);
-    });
   });
 
   // ── Save ──
   const now=new Date();
   doc.save(`PanoramaTrack_MasterReport_${toDateStr(now)}.pdf`);
   closeMasterFormatModal();
-  const totalCards=siteOrder.reduce((s,site)=>s+Object.keys(siteMap[site]).length,0);
-  showNotif('✓','PDF generated',`${totalCards} time card${totalCards!==1?'s':''} downloaded`,'#1D9E75',3500);
+  showNotif('✓','PDF generated',`${empIds.length} time card${empIds.length!==1?'s':''} downloaded`,'#1D9E75',3500);
   // v44.0 Build 3: if this export came from the admin Submissions panel, stamp stage='exported'.
   if(_pendingExportStampFn){const fn=_pendingExportStampFn;_pendingExportStampFn=null;fn();}
 }
@@ -3078,6 +3157,14 @@ function quickSetEditOut(hh,mm){
   const base=inV?new Date(inV):(_editEntry&&_editEntry.in instanceof Date?new Date(_editEntry.in):new Date());
   base.setHours(hh,mm,0,0);
   document.getElementById('edit-out').value=toLocal(base);
+}
+/* v47.0: My Timecard edit modal's clock-out quick-set — same logic as quickSetEditOut
+   but reads/writes the mytc-edit-in / mytc-edit-out fields. */
+function quickSetMyTcEditOut(hh,mm){
+  const inV=document.getElementById('mytc-edit-in').value;
+  const base=inV?new Date(inV):(myTcEditingDbId?(() => {const e=myTcPunches.find(p=>String(p.dbId)===String(myTcEditingDbId));return e&&e.in instanceof Date?new Date(e.in):new Date();})():new Date());
+  base.setHours(hh,mm,0,0);
+  document.getElementById('mytc-edit-out').value=toLocal(base);
 }
 /* ─── Lunch waive decision in edit modal (v42.0) ───
    _editWaiveDecision: the pending decision to write on save.
@@ -4147,6 +4234,10 @@ async function refreshSubmissionsPanel(){
       } else if(!ready&&blocked){
         actionHtml=`<span style="font-size:10px;color:var(--txt3);margin-left:6px;">Fix punches first</span>`;
       }
+      // v47.0: admin send-back button for exported employees — returns to sup_submitted
+      if(exported&&!actionHtml){
+        actionHtml=`<button class="btn-sm" onclick="event.stopPropagation();adminSendBack('${empId}','${site.replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}')" style="background:var(--bg2);color:var(--txt2);border:0.5px solid var(--bdr2);margin-left:6px;">Send back</button>`;
+      }
       const statusHtml=exported
         ? '<span class="badge" style="background:var(--blue-l,#dbeafe);color:var(--blue-d,#1e40af);font-size:10px;margin-left:6px;">✓ Exported</span>'
         : ready?'<span style="color:var(--green);font-weight:700;margin-left:6px;">✓</span>':'';
@@ -4222,6 +4313,25 @@ async function adminOverrideSite(empId,jobsite,empName){
       const {ok,error:err}=await setTimecardStage(empId,period,TC_STAGE.SUP,jobsite);
       if(!ok){showCustomAlert('Could not override','There was a problem: '+(err?.message||'unknown error'));return;}
       showNotif('✓','Overridden',`${empName} at ${jobsite} is ready for export`,'#c47f17',2600);
+      refreshSubmissionsPanel();
+    });
+}
+
+/* ─── Admin: Send back an exported timecard (v47.0) ─────────────────────────────
+   Returns an exported employee's site row from 'exported' → 'sup_submitted', so the
+   supervisor can decide whether to send it back further to the employee or re-submit
+   to office. Only the admin/GM can do this once exported. */
+async function adminSendBack(empId,jobsite,empName){
+  const period=subStatusPeriod();
+  showCustomConfirm(
+    `Send back ${empName} at ${jobsite}?`,
+    `This returns the exported timecard to the supervisor for review. The supervisor can then send it back to the employee or re-submit to office. You\u2019ll need to re-export after any corrections.`,
+    '',
+    'Send back to supervisor','var(--amber)',
+    async()=>{
+      const {ok,error}=await setTimecardStage(empId,period,TC_STAGE.SUP,jobsite);
+      if(!ok){showCustomAlert('Could not send back','There was a problem: '+(error?.message||'unknown error'));return;}
+      showNotif('✓','Sent back',`${empName} at ${jobsite} returned to supervisor`,'#c47f17',2600);
       refreshSubmissionsPanel();
     });
 }
@@ -4449,7 +4559,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v46.2',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

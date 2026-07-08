@@ -1,7 +1,69 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v46.2 *(pull-back regression fix — Edit/Add buttons + stale reminder)*
-**Last Updated:** July 7, 2026
+**Current Version:** v47.0 *(per-site lifecycle rework + master PDF consolidation + My Timecard quick-set buttons)*
+**Last Updated:** July 8, 2026
+
+---
+
+## ✅ v47.0 — Per-site lifecycle rework, master PDF consolidation, My Timecard quick-set
+
+Three fixes shipped together as a whole-number bump due to the structural nature of Fix 2.
+
+### Fix 1: Master admin PDF — one card per employee, all sites consolidated
+
+Previously `generateMasterPDF` grouped by jobsite → then by employee within each site, producing one timecard page per jobsite per employee. A multi-site employee like Ben (Bluevale + Kings) would appear on two separate pages. Now aligns with `generatePDF` (supervisor preview):
+
+- Groups by employee only. One consolidated timecard per employee.
+- Header field changed from `JOBSITE:` (single site) to `JOBSITE(S):` with all worked sites listed alphabetically.
+- Continued-page header changed from `${name} (${site}) — continued` to `${name} — continued`.
+- Page order: alphabetical by employee name across all sites (Option A).
+- Toast count: `empIds.length` (employee count, not site×employee).
+- Excel Pack and supervisor preview PDF unchanged.
+
+### Fix 2: Per-site timecard lifecycle rework
+
+Replaces the all-or-nothing lock model with a per-site model throughout My Timecard. Naturally resolves the v46.2 known multi-site lock edge case.
+
+**Employee My Timecard changes:**
+- New `myTcSiteStageMap` variable: `{jobsite: stage}` built from status rows each time `openMyTimecard` loads.
+- `renderMyTcList`: each punch gets per-site editability — Edit button only appears if that punch's site is at `open`. Locked punches show a 🔒 badge and reduced opacity. Submitted-but-pullable punches show a "Submitted" badge.
+- `openMyTcEdit`: guards against editing a locked-site punch (checks `myTcSiteStageMap`).
+- `openMyTcAdd`: only offers sites that are still `open` in the jobsite dropdown. If no sites are open, the button is hidden.
+- `renderMyTcSubmitBar`: handles mixed states — shows Submit button for open sites, Pull Back button for pullable sites, and locked note for locked sites, all simultaneously if needed. Site names shown when partial.
+- `submitMyTimecard`: only submits sites still at `open` (filters `allJobsites` to `openJobsites`).
+- `retractMyTimecard`: only retracts sites at the pullable stage (`emp_submitted` for regular, `sup_submitted` for supervisors). Locked sites left untouched. Notif shows which sites were pulled back.
+- `refreshMyTcCatchupState`: per-site — shows catch-up banner if ANY site is still open or pullable (no longer blocked by a locked site elsewhere).
+- `closeMyTimecard`: clears `myTcSiteStageMap`.
+
+**Supervisor "Send back to employee" (new):**
+- `supSendBackToEmployee(empId, empName)` — resets `sup_submitted → open` at the supervisor's own sites for this employee. Blocked if any of the employee's sites is already `exported`.
+- Button appears on the supervisor's employee card when any of their sites are at `sup_submitted` and nothing is exported yet.
+- Confirmation dialog explains the round-trip (employee re-submits → supervisor re-sends to office).
+
+**Admin post-export "Send back" (new):**
+- `adminSendBack(empId, jobsite, empName)` — resets `exported → sup_submitted` for a specific employee at a specific site. Supervisor then decides whether to return to employee or re-send.
+- Button appears on exported employees in the admin Submissions panel (per-site row).
+- Confirmation dialog explains the flow.
+
+### Fix 3: My Timecard edit modal — quick-set time buttons
+
+Added matching quick-set button rows to `#mytc-edit-modal-bg` for parity with the shared edit/add modal:
+
+- **Add mode:** Today/Yesterday 7:00 AM on clock-in, Today/Yesterday 3:15/3:30 PM on clock-out.
+- **Edit mode:** 3:15/3:30 PM on clock-out (same-date-as-clock-in, matching `quickSetEditOut` behavior).
+- New `quickSetMyTcEditOut(hh,mm)` function reads from `mytc-edit-in` and writes to `mytc-edit-out` (the shared modal's `quickSetEditOut` is hard-coded to its own field IDs).
+- `quickSetAddTime` already accepts a field ID, so no refactor needed — just pointed at `mytc-edit-in` / `mytc-edit-out`.
+- Delete and lunch waive controls remain intentionally off the employee modal (unchanged).
+
+**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change, no migration needed.
+
+---
+
+### Known issues / open items
+
+- **Supervisor punch list scope** — cross-site punches still visible to all supervisors where an employee has punched. Decision deferred (discussed, not actioned in v47.0). May revisit with an awareness-note approach (Option B from discussion).
+- **RLS security pass** — still parked.
+- **Manual clock-out cleanup** — still parked.
 
 ---
 

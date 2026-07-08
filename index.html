@@ -94,8 +94,23 @@
 <div id="mytc-edit-modal-bg" class="modal-bg" style="display:none;">
   <div class="modal">
     <h3 id="mytc-edit-title">Edit my punch</h3>
-    <div class="field"><label>Clock in</label><input type="datetime-local" id="mytc-edit-in"/></div>
+    <div class="field"><label>Clock in</label><input type="datetime-local" id="mytc-edit-in"/>
+      <div id="mytc-in-quickset-add" style="display:none;margin-top:6px;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="btn-sm" onclick="quickSetAddTime('mytc-edit-in','today',7,0)">Today 7:00 AM</button>
+        <button type="button" class="btn-sm" onclick="quickSetAddTime('mytc-edit-in','yesterday',7,0)">Yesterday 7:00 AM</button>
+      </div>
+    </div>
     <div class="field"><label>Clock out</label><input type="datetime-local" id="mytc-edit-out"/>
+      <div id="mytc-out-quickset-edit" style="display:none;margin-top:6px;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="btn-sm" onclick="quickSetMyTcEditOut(15,15)">3:15 PM</button>
+        <button type="button" class="btn-sm" onclick="quickSetMyTcEditOut(15,30)">3:30 PM</button>
+      </div>
+      <div id="mytc-out-quickset-add" style="display:none;margin-top:6px;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="btn-sm" onclick="quickSetAddTime('mytc-edit-out','today',15,15)">Today 3:15 PM</button>
+        <button type="button" class="btn-sm" onclick="quickSetAddTime('mytc-edit-out','today',15,30)">Today 3:30 PM</button>
+        <button type="button" class="btn-sm" onclick="quickSetAddTime('mytc-edit-out','yesterday',15,15)">Yesterday 3:15 PM</button>
+        <button type="button" class="btn-sm" onclick="quickSetAddTime('mytc-edit-out','yesterday',15,30)">Yesterday 3:30 PM</button>
+      </div>
       <p style="font-size:10px;color:var(--txt2);margin-top:4px;">Leave blank if you haven't clocked out yet.</p>
     </div>
     <div class="field"><label>Jobsite</label><select id="mytc-edit-jobsite"></select></div>
