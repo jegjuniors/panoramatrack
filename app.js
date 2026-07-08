@@ -35,11 +35,15 @@ let lunchWaiveRequested=false; // v42.0 — employee's "worked through lunch" ti
 let selectedActs=new Set();
 let editingIdx=null; // index into timeLog array
 let addingPunch=false;   // true while the shared edit modal is in manual-add mode (v37.0)
-let addPunchCtx='master';// which log opened the add modal ('sup' | 'master') so we refresh the right one
+let addPunchCtx='master';// which log opened the add modal ('sup' | 'master' | 'subcorrect') so we refresh the right one
 let editActs=new Set();
 let editingSupId=null;
 let editingEmpId=null;
 let activeSup=null;
+// v46.0: admin correction modal (tap a name in the Submissions panel to view/edit that
+// employee's punches inline, no separate supervisor review needed).
+let _adminCorrectEmpId=null;
+let _adminCorrectEmpName=null;
 let exportRange={from:null,to:null};
 let empModalContext='master';
 let ARCHIVED_JOBSITES=[];
@@ -908,10 +912,17 @@ async function openMyTimecard(emp,offset){
   // jobsite they worked — fetch ALL of them and use the aggregate). Locked to view-only once
   // ANY site's supervisor has submitted (maxStage >= sup_submitted); the employee's own
   // submission does NOT lock them (they can still pull it back, as long as no site has advanced).
+  // v46.0: a supervisor's own timecard already goes straight to sup_submitted on self-submit
+  // (see submitMyTimecard), so that threshold would lock them out immediately. Supervisors lock
+  // only once actually exported — same status, later trigger.
   myTcStatusRows=await getEmployeeStatusRows(emp.id,myTcPeriod.start);
   const stage=maxStage(myTcStatusRows);
-  myTcLocked=stageAtLeast(stage,TC_STAGE.SUP);       // hard-locked once any site is sent to office
+  const isSupEmp=emp.dept==='Supervisor'; // v46.0
+  myTcLocked=stageAtLeast(stage,isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP);
   myTcEditable=(myTcStatusRows.length===0);          // editable only before the first submit (pull back first otherwise)
+  document.getElementById('mytc-locked-note').textContent=isSupEmp
+    ? 'This pay period has already been exported to head office. Contact your GM for any corrections.'
+    : 'This pay period has already been submitted. Contact your supervisor for corrections.';
   document.getElementById('mytc-locked-note').style.display=myTcLocked?'block':'none';
   document.getElementById('mytc-add-btn').style.display=myTcEditable?'block':'none';
 
@@ -1017,23 +1028,27 @@ function renderMyTcSubmitBar(){
   const bar=document.getElementById('mytc-submit-bar');
   if(!bar)return;
   const stage=maxStage(myTcStatusRows); // v44.0 Build 3: aggregate across this employee's site-rows
+  const isSupEmp=myTcEmp&&myTcEmp.dept==='Supervisor'; // v46.0
 
-  // Locked (supervisor already submitted) — show a static status line, no actions.
-  if(stageAtLeast(stage,TC_STAGE.SUP)){
+  // Locked, no actions — supervisors: not until exported (their own submit already carries
+  // supervisor authority, see submitMyTimecard). Regular employees: once any site is sent to office.
+  if(stageAtLeast(stage,isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP)){
     bar.innerHTML=`<div style="background:var(--bg2);border:0.5px solid var(--bdr2);border-radius:var(--radius);padding:11px 13px;">
         <span style="font-size:13px;font-weight:600;color:var(--txt);">✓ Submitted &amp; locked</span>
-        <div style="font-size:11px;color:var(--txt2);margin-top:3px;">Your supervisor has submitted this pay period. Contact them for any corrections.</div>
+        <div style="font-size:11px;color:var(--txt2);margin-top:3px;">${isSupEmp?'This pay period has been exported to head office. Contact your GM for any corrections.':'Your supervisor has submitted this pay period. Contact them for any corrections.'}</div>
       </div>`;
     return;
   }
 
-  // Employee has submitted (but supervisor hasn't) — allow pull-back.
-  if(stage===TC_STAGE.EMP){
+  // Submitted, pull-back still available. Regular employees: emp_submitted, waiting on a
+  // supervisor. Supervisors: sup_submitted (their own submit goes straight there — v46.0),
+  // waiting on nothing but still correctable until export.
+  if(stage===TC_STAGE.EMP||(isSupEmp&&stage===TC_STAGE.SUP)){
     bar.innerHTML=`<div style="background:#173a17;border:0.5px solid #2f7d31;border-radius:var(--radius);padding:11px 13px;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
           <div>
             <span style="font-size:13px;font-weight:600;color:#8fe08f;">✓ Timecard submitted</span>
-            <div style="font-size:11px;color:#a9cba9;margin-top:3px;">Handed in to your supervisor. You can pull it back to make changes until they submit.</div>
+            <div style="font-size:11px;color:#a9cba9;margin-top:3px;">${isSupEmp?'Sent straight to the office. You can pull it back to make changes until it\u2019s exported.':'Handed in to your supervisor. You can pull it back to make changes until they submit.'}</div>
           </div>
           <button class="btn-sm" id="mytc-retract-btn" onclick="retractMyTimecard()" style="flex-shrink:0;background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">Pull back</button>
         </div>
@@ -1043,8 +1058,11 @@ function renderMyTcSubmitBar(){
 
   // Open — show the submit button.
   const isCatchup=myTcPeriodOffset===1;
+  const openNote=isCatchup
+    ? 'This is your last pay period — review your punches below, then submit to hand it to your supervisor.'
+    : (isSupEmp?'As a supervisor, this goes straight to the office once you submit — no need to wait on anyone else.':'Review your punches below, then submit to hand your timecard to your supervisor.');
   bar.innerHTML=`<button class="btn" id="mytc-submit-btn" onclick="submitMyTimecard()" style="width:100%;background:var(--green);color:#fff;font-weight:600;">Submit my timecard →</button>
-    <div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">${isCatchup?'This is your last pay period — review your punches below, then submit to hand it to your supervisor.':'Review your punches below, then submit to hand your timecard to your supervisor.'}</div>`;
+    <div style="font-size:11px;color:var(--txt3);margin-top:5px;line-height:1.4;">${openNote}</div>`;
 }
 
 /* Employee submits their timecard (v44.0).
@@ -1052,6 +1070,7 @@ function renderMyTcSubmitBar(){
    Warns if submitting before the pay period has ended; clean submit after. */
 async function submitMyTimecard(){
   if(myTcBusy||myTcLocked)return;
+  const isSupEmp=myTcEmp&&myTcEmp.dept==='Supervisor'; // v46.0
   // Auto-clock gate — block and point them at the offending punch(es).
   const autos=myTcPunches.filter(p=>p.autoClocked&&!p.editedAfterAuto);
   if(autos.length){
@@ -1069,7 +1088,12 @@ async function submitMyTimecard(){
     // get a row per site — each site's supervisor submits/tracks their own independently).
     const jobsites=[...new Set(myTcPunches.map(p=>p.jobsite).filter(Boolean))];
     if(!jobsites.length){myTcBusy=false;showCustomAlert('Nothing to submit','No jobsite found on your punches this period. Contact your supervisor.');return;}
-    const results=await Promise.all(jobsites.map(js=>setTimecardStage(myTcEmp.id,myTcPeriod,TC_STAGE.EMP,js)));
+    // v46.0: a supervisor submitting their own timecard doesn't need another supervisor's
+    // review — it goes straight to sup_submitted at every site they worked, not just ones
+    // they personally supervise (closes the gap where off-site work sat waiting on whichever
+    // supervisor DID cover that site).
+    const targetStage=isSupEmp?TC_STAGE.SUP:TC_STAGE.EMP;
+    const results=await Promise.all(jobsites.map(js=>setTimecardStage(myTcEmp.id,myTcPeriod,targetStage,js)));
     myTcBusy=false;
     const failed=results.filter(r=>!r.ok);
     if(failed.length){showCustomAlert('Could not submit','There was a problem submitting your timecard: '+(failed[0].error?.message||'unknown error')+'. Please try again.');return;}
@@ -1080,7 +1104,7 @@ async function submitMyTimecard(){
       showNotif('✓','Last period submitted','You\u2019re all caught up','#2f7d31',2600);
       await openMyTimecard(myTcEmp,0);
     } else {
-      showNotif('✓','Timecard submitted','Handed in to your supervisor','#2f7d31',2600);
+      showNotif('✓','Timecard submitted',isSupEmp?'Sent straight to the office':'Handed in to your supervisor','#2f7d31',2600);
       await openMyTimecard(myTcEmp); // reload → shows submitted state + pull-back
     }
   };
@@ -1088,7 +1112,7 @@ async function submitMyTimecard(){
     showCustomConfirm(
       'Submit before the period ends?',
       'The current pay period hasn\u2019t ended yet. If you have more shifts coming up this period, wait until after your last punch. Submit anyway?',
-      'You can still pull your timecard back until your supervisor submits.',
+      isSupEmp?'You can still pull your timecard back until it\u2019s exported.':'You can still pull your timecard back until your supervisor submits.',
       'Submit anyway','var(--amber)',doSubmit);
   } else {
     doSubmit();
@@ -1099,10 +1123,14 @@ async function submitMyTimecard(){
    hasn't submitted (stage still emp_submitted). Returns the card to 'open'. */
 async function retractMyTimecard(){
   if(myTcBusy)return;
-  // Guard: re-check ALL site-rows against the DB in case a supervisor just submitted one.
+  const isSupEmp=myTcEmp&&myTcEmp.dept==='Supervisor'; // v46.0
+  const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
+  // Guard: re-check ALL site-rows against the DB in case things moved since this screen loaded.
   const fresh=await getEmployeeStatusRows(myTcEmp.id,myTcPeriod.start);
-  if(stageAtLeast(maxStage(fresh),TC_STAGE.SUP)){
-    showCustomAlert('Too late to pull back','Your supervisor has already submitted this pay period. Contact them for any corrections.');
+  if(stageAtLeast(maxStage(fresh),lockThreshold)){
+    showCustomAlert('Too late to pull back',
+      isSupEmp?'This pay period has already been exported to head office. Contact your GM for any corrections.'
+               :'Your supervisor has already submitted this pay period. Contact them for any corrections.');
     await openMyTimecard(myTcEmp);
     return;
   }
@@ -2990,10 +3018,10 @@ async function openEditModal(ref){
   document.getElementById('edit-modal-bg').style.display='flex';
 }
 // Manual punch entry (v37.0) — reuses the edit modal in add mode.
-// For an employee who forgot to clock in/out entirely. ctx = 'sup' | 'master'.
+// For an employee who forgot to clock in/out entirely. ctx = 'sup' | 'master' | 'subcorrect'.
 function openAddPunchModal(ctx){
   addingPunch=true;
-  addPunchCtx=(ctx==='sup')?'sup':'master';
+  addPunchCtx=(ctx==='sup')?'sup':(ctx==='subcorrect'?'subcorrect':'master');
   _editEntry=null;editingIdx=null;
   editActs=new Set();
   document.getElementById('edit-modal-title').textContent='Add manual punch';
@@ -3007,6 +3035,9 @@ function openAddPunchModal(ctx){
   // Employee dropdown — full active roster, alphabetical
   const roster=employees.filter(e=>e.active).slice().sort((a,b)=>a.name.localeCompare(b.name));
   document.getElementById('add-emp-select').innerHTML='<option value="">— select employee —</option>'+roster.map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
+  // v46.0: opened from the admin correction modal for a specific employee — pre-select them
+  // (still changeable, but saves a step since we already know who this punch is for).
+  if(ctx==='subcorrect'&&_adminCorrectEmpId)document.getElementById('add-emp-select').value=_adminCorrectEmpId;
   document.getElementById('edit-in').value='';
   document.getElementById('edit-out').value='';
   document.getElementById('edit-jobsite').innerHTML=JOBSITES.map(j=>`<option>${j}</option>`).join('');
@@ -3103,6 +3134,7 @@ async function deletePunch(e){
   showNotif('✓','Punch deleted','Record permanently removed','#c47f17',2400);
   if(document.getElementById('spanel-log')?.style.display!=='none')refreshSupLog();
   if(document.getElementById('mpanel-log')?.style.display!=='none')refreshMasterLog();
+  if(document.getElementById('admin-correct-modal-bg')?.style.display==='flex'){refreshAdminEmpCorrect();refreshSubmissionsPanel();}
 }
 async function saveEdit(){
   const err=document.getElementById('edit-err');
@@ -3129,7 +3161,9 @@ async function saveEdit(){
     const ctx=addPunchCtx;
     closeEditModal();
     showNotif('✓','Punch added',emp.name+' — '+fmtDt(aIn),'#2f7d31',2600);
-    if(ctx==='sup')refreshSupLog();else refreshMasterLog();
+    if(ctx==='sup')refreshSupLog();
+    else if(ctx==='subcorrect'){refreshAdminEmpCorrect();refreshSubmissionsPanel();}
+    else refreshMasterLog();
     return;
   }
   const inV=document.getElementById('edit-in').value;const outV=document.getElementById('edit-out').value;
@@ -3158,6 +3192,9 @@ async function saveEdit(){
   closeEditModal();
   if(document.getElementById('spanel-log')?.style.display!=='none')refreshSupLog();
   if(document.getElementById('mpanel-log')?.style.display!=='none')refreshMasterLog();
+  // v46.0: admin correction modal (Submissions panel → tap a name) isn't a full-screen
+  // panel, so it's not caught by the two checks above — check its own visibility instead.
+  if(document.getElementById('admin-correct-modal-bg')?.style.display==='flex'){refreshAdminEmpCorrect();refreshSubmissionsPanel();}
 }
 
 /* ─── Supervisor modal ─── */
@@ -3953,6 +3990,57 @@ function setSubPeriod(mode){
   refreshSubmissionsPanel();
 }
 
+/* ─── Admin correction modal (v46.0) ───────────────────────────────────────────
+   Tap any employee's name in the Submissions panel to view/edit their punches inline —
+   covers the case where a timecard reached sup_submitted without genuine back-and-forth
+   review (Force Submit, Admin Override) and admin/GM needs the final look, but works for
+   any employee row, not just those. Shows punches across every site they worked in the
+   period currently in view (matches how the row's hours total already spans all sites).
+   Reuses the existing shared edit-punch modal (openEditModal/openAddPunchModal) rather
+   than a separate editor — see saveEdit()/deletePunch()'s refresh hooks for the tie-back. */
+async function openAdminEmpCorrect(empId,empName){
+  _adminCorrectEmpId=empId;
+  _adminCorrectEmpName=empName;
+  document.getElementById('admin-correct-name').textContent=empName;
+  document.getElementById('admin-correct-list').innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">Loading…</p>';
+  document.getElementById('admin-correct-modal-bg').style.display='flex';
+  await refreshAdminEmpCorrect();
+}
+
+async function refreshAdminEmpCorrect(){
+  if(!_adminCorrectEmpId)return;
+  const period=subStatusPeriod(); // same Current/Last toggle as the panel underneath
+  document.getElementById('admin-correct-period').textContent=
+    `${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+  const {data,error}=await sb.from('punches').select('*')
+    .eq('employee_id',_adminCorrectEmpId)
+    .gte('clock_in',period.start.toISOString())
+    .lte('clock_in',period.end.toISOString())
+    .order('clock_in',{ascending:false});
+  const list=document.getElementById('admin-correct-list');
+  if(error){list.innerHTML='<p style="text-align:center;color:var(--red);padding:20px;font-size:13px;">Could not load punches — check connection.</p>';return;}
+  const entries=(data||[]).map(dbRowToEntry);
+  if(!entries.length){list.innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">No punches recorded for this period.</p>';return;}
+  list.innerHTML=entries.map(e=>{
+    const hrs=paidHours(e);
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
+      <div style="min-width:0;">
+        <span style="font-size:13px;color:var(--txt);font-weight:600;">${e.jobsite||'—'}</span>
+        <div style="font-size:11px;color:var(--txt2);margin-top:2px;">${fmtDt(e.in)} – ${e.out?fmtDt(e.out):'still clocked in'}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+        <span style="font-size:12px;color:var(--txt2);">${hrs!=null?hrs.toFixed(2)+'h':'—'}</span>
+        <button class="btn-sm" onclick="openEditModal('db:${e.dbId}')" style="background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">Edit</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function closeAdminEmpCorrect(){
+  document.getElementById('admin-correct-modal-bg').style.display='none';
+  _adminCorrectEmpId=null;_adminCorrectEmpName=null;
+}
+
 async function refreshSubmissionsPanel(){
   const container=document.getElementById('submissions-list');
   container.innerHTML='<p style="color:var(--txt2);font-size:13px;padding:12px 0;">Loading…</p>';
@@ -4050,7 +4138,7 @@ async function refreshSubmissionsPanel(){
 
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
         <div style="min-width:0;">
-          <span style="font-size:13px;color:var(--txt);font-weight:600;">${name}</span>${statusHtml}
+          <span onclick="openAdminEmpCorrect('${empId}','${name.replace(/'/g,"\\'")}')" style="font-size:13px;color:var(--blue-d);font-weight:600;cursor:pointer;text-decoration:underline;text-decoration-color:var(--bdr2);">${name}</span>${statusHtml}
           ${hasFlag?`<div style="font-size:11px;color:${blocked?'#e07070':'var(--amber)'};margin-top:2px;">⚠️ ${flagParts.join(' · ')}</div>`:''}
         </div>
         <div style="display:flex;align-items:center;flex-shrink:0;">
@@ -4346,7 +4434,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v45.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v46.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
