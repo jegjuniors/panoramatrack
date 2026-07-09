@@ -1,7 +1,68 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.1 *(admin Timecards: "waiting on:" inline note beside ✓)*
-**Last Updated:** July 8, 2026
+**Current Version:** v47.2 *(three send-back / force-submit fixes; version badge implementation)*
+**Last Updated:** July 9, 2026
+
+---
+
+## ✅ v47.2 — Three post-v47.0 bugs: admin send-back visibility, Force Submit filter alignment, stale-row cleanup
+
+Three related issues surfaced once v47.0 (per-site lifecycle rework) hit real use, plus the version badge itself — which Julio noticed the app was still displaying `V46.2` because the whole v47.x line hadn't been deployed yet. All four addressed in a single contained bump.
+
+### Fix 1: Admin send-back now resets to `open`, not `sup_submitted`
+
+**The problem:** v47.0's `adminSendBack` targeted `sup_submitted` (per the original "send back to supervisor" design decision). But `sup_submitted` on the supervisor's UI reads as **"sent to office"** — identical to the state before admin sent it back. Supervisor had no visual signal that anything happened, and no clear action path.
+
+**The fix:** Change `adminSendBack` target from `TC_STAGE.SUP` → `TC_STAGE.OPEN` (~line 4352). Result on supervisor side: chip flips to "not submitted", Force Submit button appears, Send Back button disappears (row no longer at `sup_submitted`). Enables the "quickly review, edit, force submit, done" workflow — no employee involvement needed, useful for departed workers. Confirmation dialog wording updated to reflect the new destination.
+
+This reverses the v47.0 Q&A design decision. The original reasoning ("supervisor decides next") stands — it's just that "supervisor decides next" requires a state that visually signals action is needed, and `sup_submitted` didn't do that.
+
+### Fix 2: Force Submit no longer fails after supervisor send-back with "already submitted"
+
+**Root cause:** A v44.2 half-fix. Back in v44.2, the Force Submit **button visibility** on the supervisor card was widened from `!r` (missing row only) to `!r || r.stage === TC_STAGE.OPEN` (missing OR at open) — the comment at line 1800-1805 explicitly documents this. But the **click handler** (`forceSubmitEmployee` line 2026) was never aligned with the wider filter:
+
+```js
+// Line 2026 before v47.2:
+const openSites = [...new Set(punches.map(p=>p.jobsite))]
+  .filter(s => sites.includes(s) && !rowsBySite[s]);
+```
+
+Result: after supervisor send-back (v47.0) set a row to `open`, the button correctly appeared, but clicking it hit the "already submitted" alert because `rowsBySite[s]` was truthy.
+
+**The fix:** One-line alignment. Change line 2026's filter to match the button-visibility filter:
+
+```js
+.filter(s => sites.includes(s) && (!rowsBySite[s] || rowsBySite[s].stage === TC_STAGE.OPEN));
+```
+
+After Fix 1 (admin send-back → `open`), this same fix now also enables the immediate Force Submit path after admin send-back, which is the whole point of Fix 1's design.
+
+### Fix 3: "Waiting on:" note and stale rows for sites the employee no longer works
+
+**Scenario:** Employee worked 4 sites, submitted, exported. Admin sent back the exported timecards (Fix 1 makes this reset to `open`). Employee opened My Timecard, deleted their punches at 2 of the 4 sites (they no longer work there), resubmitted the 2 sites they still work. Rows for the removed sites 3 & 4 sat at `open` in the DB — the employee had no punches at those sites so `submitMyTimecard`'s `allJobsites` filter (built from `myTcPunches.map(p=>p.jobsite)`) never touched them.
+
+**Two symptoms of the same underlying problem:**
+- (a) `blockingSites` calculation in `refreshSubmissionsPanel` computed "other sites" from the union of `sitesWorkedByEmp[empId]` (actual punches) AND `rows.map(r=>r.jobsite)` (all rows). Stale rows for the abandoned sites polluted the calc, showing them in the `waiting on:` note beside the ✓.
+- (b) `siteEmpSet` was built from the union of `allPunches` AND all `statusMap` rows. Stale rows caused the abandoned sites to appear as separate "Never submitted" rows in the admin panel — misleading, since the employee had no current-period punches there.
+
+**The fix — filter at the panel level (kills both symptoms in one place):**
+
+```js
+// Line 4183-4185: before v47.2 unioned punches + rows
+const siteEmpSet = {};
+allPunches.forEach(p => addToSite(p.jobsite, p.empId));
+// (Object.values(statusMap).forEach(...) line removed)
+```
+
+Now only employees with actual current-period punches at a site are included at that site in the admin panel. Also updated the `blockingSites` calc (~line 4223) to use `sitesWorkedByEmp[empId]` directly as belt-and-suspenders in case a future code path reintroduces orphan rows.
+
+Comment blocks at both locations explain the rationale so this doesn't get "helpfully" widened again.
+
+### Fix 4: Version badge now reflects v47.2
+
+Julio noticed the app UI was still displaying `V46.2` — this was because the whole v47.x line (v47.0, v47.1) hadn't been deployed yet. The badge text in `index.html` (line 220) and the `app_version` string in the Supabase backup payload (`app.js` line 4582) were both updated to `v47.2`. Once these files are deployed, the badge will read correctly.
+
+**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change.
 
 ---
 

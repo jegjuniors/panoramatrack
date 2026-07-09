@@ -2020,10 +2020,14 @@ async function forceSubmitEmployee(empId,empName){
   const punches=(data||[]).map(dbRowToEntry);
   if(!punches.length){showCustomAlert('Nothing to submit',`${empName} has no punches at your sites for ${periodLabel}.`);return;}
 
-  // Which of the supervisor's sites does this employee have punches at, but no status row yet?
+  // Which of the supervisor's sites does this employee have punches at but no valid submission?
+  // v47.2: matches the button-visibility filter in the supervisor card (widened v44.2 there,
+  // but this action-side filter was never updated — button appeared, click failed with
+  // "already submitted" even when the row was legitimately at 'open' after a pull-back or
+  // an admin send-back).
   const rows=await getEmployeeStatusRows(empId,period.start);
   const rowsBySite={};rows.forEach(r=>{rowsBySite[r.jobsite]=r;});
-  const openSites=[...new Set(punches.map(p=>p.jobsite))].filter(s=>sites.includes(s)&&!rowsBySite[s]);
+  const openSites=[...new Set(punches.map(p=>p.jobsite))].filter(s=>sites.includes(s)&&(!rowsBySite[s]||rowsBySite[s].stage===TC_STAGE.OPEN));
   if(!openSites.length){showCustomAlert('Already submitted',`${empName} has already submitted for your site(s) this period.`);return;}
 
   // Gate: unresolved auto-clocks / pending waives among punches at the sites being forced.
@@ -4169,11 +4173,16 @@ async function refreshSubmissionsPanel(){
     (sitesWorkedByEmp[p.empId]=sitesWorkedByEmp[p.empId]||new Set()).add(p.jobsite);
   });
 
-  // Jobsite → set of employee IDs (union of who punched there + who has a status row there).
+  // Jobsite → set of employee IDs. v47.2: only includes employees who have actual
+  // current-period punches at that site. Previously this was the union of "who punched
+  // there" ∪ "who has a status row there" — which meant stale rows (e.g. left over after
+  // an employee removed their punches following an admin/supervisor send-back) rendered
+  // as "Never submitted" rows for sites the employee doesn't work at anymore. Filtering
+  // to punch presence kills that display artifact AND the matching "waiting on:" note
+  // in the blockingSites calc below.
   const siteEmpSet={};
   const addToSite=(site,empId)=>{if(!site)return;(siteEmpSet[site]=siteEmpSet[site]||new Set()).add(String(empId));};
   allPunches.forEach(p=>addToSite(p.jobsite,p.empId));
-  Object.values(statusMap).forEach(rows=>rows.forEach(r=>addToSite(r.jobsite,r.employee_id)));
   const sitesOrdered=[...new Set([...JOBSITES.filter(j=>siteEmpSet[j]),...Object.keys(siteEmpSet).filter(j=>!JOBSITES.includes(j))])];
 
   const empNameById={};(employees||[]).forEach(e=>{empNameById[e.id]=e.name;});
@@ -4202,16 +4211,16 @@ async function refreshSubmissionsPanel(){
       const neverSubmitted=stage===TC_STAGE.OPEN&&periodEnded;
       const stuckEmp=stage===TC_STAGE.EMP;
 
-      // v47.1: cross-site blocker note — this site's row is done (or exported), but the
-      // employee worked another site that isn't at sup_submitted+ yet, so the all-or-nothing
-      // export is held up. Now shown for both current and last-period views (v45.1 gated to
-      // last-period only, but "why isn't this exportable" is the same question in both cases
-      // — mid-period is arguably when the admin most wants the answer). Rendered inline as
-      // subtle gray text beside the ✓ badge (see statusHtml below), not in the amber warning
-      // row — it's an info note, not an actionable flag.
+      // v47.2: cross-site blocker note — this site's row is done, but the employee worked
+      // another site that isn't at sup_submitted+ yet. Only counts sites where the employee
+      // has actual current-period punches (was previously union of sitesWorkedByEmp AND
+      // status-row jobsites — stale rows for sites the employee no longer works at could
+      // pollute the waiting-on list). The panel-level filter above now also prevents stale
+      // sites from rendering, so this is belt-and-suspenders — safe against future paths
+      // that might reintroduce orphan rows.
       let blockingSites=[];
       if(ready){
-        const otherSites=new Set([...(sitesWorkedByEmp[empId]||[]),...rows.map(r=>r.jobsite)]);
+        const otherSites=new Set(sitesWorkedByEmp[empId]||[]);
         otherSites.delete(site);
         blockingSites=[...otherSites].filter(s=>{
           const r=rows.find(rr=>rr.jobsite===s);
@@ -4324,19 +4333,23 @@ async function adminOverrideSite(empId,jobsite,empName){
     });
 }
 
-/* ─── Admin: Send back an exported timecard (v47.0) ─────────────────────────────
-   Returns an exported employee's site row from 'exported' → 'sup_submitted', so the
-   supervisor can decide whether to send it back further to the employee or re-submit
-   to office. Only the admin/GM can do this once exported. */
+/* ─── Admin: Send back an exported timecard (v47.0, revised v47.2) ─────────────
+   Returns an exported employee's site row from 'exported' → 'open'. Originally v47.0
+   sent back to 'sup_submitted', but that reads as "sent to office" on the supervisor's
+   card — no visual change, no signal to the supervisor that anything happened. Sending
+   to 'open' gives the supervisor the "not submitted" chip + Force Submit button, so
+   they can review/correct/force-submit without needing the employee to be involved
+   (useful for departed employees). If the supervisor decides the employee should redo
+   it, they can use their own Send Back action to notify the employee. */
 async function adminSendBack(empId,jobsite,empName){
   const period=subStatusPeriod();
   showCustomConfirm(
     `Send back ${empName} at ${jobsite}?`,
-    `This returns the exported timecard to the supervisor for review. The supervisor can then send it back to the employee or re-submit to office. You\u2019ll need to re-export after any corrections.`,
+    `This returns the exported timecard to the supervisor as not-yet-submitted. The supervisor can then review, edit punches, and Force Submit to re-send to office — or forward it back to the employee for changes. You\u2019ll need to re-export after any corrections.`,
     '',
     'Send back to supervisor','var(--amber)',
     async()=>{
-      const {ok,error}=await setTimecardStage(empId,period,TC_STAGE.SUP,jobsite);
+      const {ok,error}=await setTimecardStage(empId,period,TC_STAGE.OPEN,jobsite);
       if(!ok){showCustomAlert('Could not send back','There was a problem: '+(error?.message||'unknown error'));return;}
       showNotif('✓','Sent back',`${empName} at ${jobsite} returned to supervisor`,'#c47f17',2600);
       refreshSubmissionsPanel();
@@ -4566,7 +4579,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.1',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.2',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
