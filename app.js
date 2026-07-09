@@ -251,6 +251,46 @@ async function setTimecardStage(empId,period,stage,jobsite){
   return {ok:true};
 }
 
+// v47.4: which pay period does a given date fall in? Walks a handful of offsets
+// (current + several past). Used by the orphan-row cleanup below to target the
+// OLD punch's period even when an edit moved its date. Falls back to current.
+function periodContaining(date){
+  if(!(date instanceof Date)||isNaN(date))return getPeriodByOffset(0);
+  for(let off=0;off<=6;off++){
+    const p=getPeriodByOffset(off);
+    if(date>=p.start&&date<=p.end)return p;
+  }
+  return getPeriodByOffset(0);
+}
+
+// v47.4: data hygiene. When a punch's jobsite is edited away (or a punch is deleted)
+// such that the employee no longer has ANY punch at (jobsite) in (period), the
+// pt_timecard_status row for that now-unworked site is orphaned. Left in place it
+// poisons every consumer that derives "sites worked" from status rows instead of
+// punches — the My Timecard submit bar (phantom "Submit" site), the supervisor chip
+// (minStage dragged down → "Not submitted" beside a live "Send to office"), and
+// isFullyReadyForExport (a stray 'open' row blocks export forever). This deletes the
+// orphan at the source so all three self-correct with no changes to them.
+// SAFETY: only 'open'/'emp_submitted' rows are removed — a row a supervisor or the
+// office has already acted on (sup_submitted/exported) is never touched.
+async function cleanupOrphanStatusRow(empId,jobsite,period){
+  if(empId==null||jobsite==null||!period)return;
+  // Still worked here? A single surviving punch keeps the row.
+  const {data:remain,error:remErr}=await sb.from('punches').select('id')
+    .eq('employee_id',empId).eq('jobsite',jobsite)
+    .gte('clock_in',period.start.toISOString())
+    .lte('clock_in',period.end.toISOString()).limit(1);
+  if(remErr){console.warn('cleanupOrphanStatusRow punch-check error:',remErr.message);return;}
+  if(remain&&remain.length)return; // still worked at this site — keep the row
+  // Fetch the status row; no row = nothing to clean (already open-by-absence).
+  const row=await getTimecardStatus(empId,period.start,jobsite);
+  if(!row)return;
+  if(row.stage!==TC_STAGE.OPEN&&row.stage!==TC_STAGE.EMP)return; // never touch sup_submitted/exported
+  const {error:delErr}=await sb.from('pt_timecard_status').delete()
+    .eq('employee_id',empId).eq('period_start',toDateStr(period.start)).eq('jobsite',jobsite);
+  if(delErr)console.warn('cleanupOrphanStatusRow delete error:',delErr.message);
+}
+
 // Convenience: which stage is this status row at? (null row = open)
 function stageOf(statusRow){return statusRow?statusRow.stage:TC_STAGE.OPEN;}
 // Is a stage at or past a target? e.g. stageAtLeast(row, TC_STAGE.SUP)
@@ -1318,6 +1358,7 @@ async function saveMyTcEdit(){
   } else {
     const e=myTcPunches.find(p=>String(p.dbId)===String(myTcEditingDbId));
     if(!e){err.textContent='Punch not found — reopen and try again.';return}
+    const oldJobsite=e.jobsite,oldIn=e.in; // v47.4: capture pre-edit site/date for orphan cleanup
     const wasAuto=e.autoClocked;
     const editedAfterAuto=wasAuto&&!!newOut;
     const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true};
@@ -1332,6 +1373,8 @@ async function saveMyTcEdit(){
       if(editedAfterAuto){memEntry.autoClocked=false;memEntry.editedAfterAuto=true;}
       if(newOut){const idx=timeLog.indexOf(memEntry);if(idx>=0)timeLog.splice(idx,1);}
     }
+    // v47.4: if this edit left the OLD site with no punches this period, drop its stale status row
+    await cleanupOrphanStatusRow(emp.id,oldJobsite,periodContaining(oldIn));
     closeMyTcEditModal();
     showNotif('✓','Punch updated','Saved to your timecard','#2f7d31',2600);
   }
@@ -3309,6 +3352,8 @@ async function deletePunch(e){
   // Remove from memory if present
   const memIdx=timeLog.findIndex(l=>l===e||(e.dbId&&l.dbId===e.dbId));
   if(memIdx>=0)timeLog.splice(memIdx,1);
+  // v47.4: if deleting this punch left the site with no punches this period, drop its stale status row
+  await cleanupOrphanStatusRow(e.empId,e.jobsite,periodContaining(e.in));
   closeEditModal();
   showNotif('✓','Punch deleted','Record permanently removed','#c47f17',2400);
   if(document.getElementById('spanel-log')?.style.display!=='none')refreshSupLog();
@@ -3350,6 +3395,7 @@ async function saveEdit(){
   const newIn=new Date(inV);const newOut=outV?new Date(outV):null;
   if(newOut&&newOut<=newIn){err.textContent='Clock out must be after clock in.';return}
   const e=_editEntry||timeLog[editingIdx];
+  const oldJobsite=e.jobsite,oldIn=e.in,oldEmpId=e.empId; // v47.4: pre-edit values for orphan cleanup
   const newJobsite=document.getElementById('edit-jobsite').value;
   const newActs=[...editActs];
   const wasAuto=e.autoClocked;
@@ -3368,6 +3414,8 @@ async function saveEdit(){
   e.in=newIn;e.out=newOut;e.jobsite=newJobsite;e.activity=newActs;
   if(editedAfterAuto){e.autoClocked=false;e.editedAfterAuto=true;}
   if(_editWaiveDecision!==null)e.lunchWaived=_editWaiveDecision;
+  // v47.4: if this edit left the OLD site with no punches this period, drop its stale status row
+  await cleanupOrphanStatusRow(oldEmpId,oldJobsite,periodContaining(oldIn));
   closeEditModal();
   if(document.getElementById('spanel-log')?.style.display!=='none')refreshSupLog();
   if(document.getElementById('mpanel-log')?.style.display!=='none')refreshMasterLog();
@@ -4652,7 +4700,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.3',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.4',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

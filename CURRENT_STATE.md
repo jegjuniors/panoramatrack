@@ -1,7 +1,44 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.3 *(overview tiles reworked; per-employee "Send to office" button)*
+**Current Version:** v47.4 *(orphaned timecard-status row cleanup — phantom sites on submit bar / supervisor chip)*
 **Last Updated:** July 9, 2026
+
+---
+
+## ✅ v47.4 — Orphaned `pt_timecard_status` rows: phantom sites everywhere they're read
+
+Two bugs reported from live testing (screenshots), same root cause, plus a third latent one they were masking.
+
+### Symptoms
+1. **Employee My Timecard submit bar offered sites the employee has no punches at.** Anthony's card showed "✓ Submitted (Bluevale, Francesco)" *and* a live "Submit my timecard (Block 22, T1 Conversion) →" button — but his only actual punches were at Bluevale and Francesco.
+2. **Supervisor Time log showed "Not submitted" *and* a live "Send to office" button on the same employee row simultaneously.** Loc (supervising Francesco · T1 Conversion) saw Anthony as "Not submitted" with a green "Send to office" — contradictory.
+3. **(Latent, not yet hit)** `isFullyReadyForExport` would have blocked Anthony from *ever* being exportable, because a stray `open` row for a site he doesn't work counts against the all-sites-ready check forever.
+
+### Root cause
+`pt_timecard_status` is keyed `(employee_id, period_start, jobsite)` — one row per site worked, written on submit. When a punch's **jobsite is edited away** (or the punch is deleted) so the employee no longer has any punch at the old site, that site's status row was **never cleaned up**. It lingered (usually at `open`, e.g. left behind by a pull-back before the punches were moved). Every consumer that derives "sites worked" from **status rows** instead of **actual punches** then picked up the ghost:
+- `renderMyTcSubmitBar` (`app.js` ~1082) explicitly folds status-row sites into `workedSites` even with no punches → ghost `open` rows became phantom "Submit" sites.
+- `refreshSupLog` (`app.js` ~1832) builds the per-employee chip from `minStage(mySiteRows)` (status rows scoped to the supervisor's sites) → a ghost `open` row dragged the chip to "Not submitted" while a real `emp_submitted` row still lit the "Send to office" button.
+- `isFullyReadyForExport` (`app.js` ~278) unions worked-sites with row-sites → a ghost `open` row fails the "every site at sup_submitted" test permanently.
+
+Force Submit was already immune — it derives its sites from `recordSites` (actual punches), which is the correct pattern the other three didn't follow.
+
+### The fix — clean at the source (data hygiene)
+Rather than patch three consumers (whack-a-mole, and the export union deliberately includes row-sites), the orphan row is deleted the moment it's created, so all three self-correct untouched.
+
+- **New `cleanupOrphanStatusRow(empId, jobsite, period)`** (near `setTimecardStage`, `app.js` ~276): if the employee has **zero** punches at `jobsite` in `period`, delete that status row. **Guarded to `open`/`emp_submitted` only** — never touches `sup_submitted`/`exported` (a row a supervisor or the office already acted on is left alone; a stray `sup_submitted` ghost carries 0 hrs and doesn't block export, so it's harmless).
+- **New `periodContaining(date)`** (`app.js` ~257): walks `getPeriodByOffset(0..6)` to find the period a punch's clock-in falls in (needed so cleanup targets the *old* punch's period even if a date edit moved it; falls back to current period on invalid/out-of-range).
+- **Three call sites**, each capturing the pre-edit site/date **before** it's overwritten and running cleanup **before** the refresh/reload:
+  - `saveMyTcEdit()` edit branch — before `openMyTimecard(emp)` reloads.
+  - `saveEdit()` edit branch — after the DB write, before the panel refreshes.
+  - `deletePunch()` — after the delete succeeds.
+  - Add/insert paths get nothing (adding work can't orphan a site). Cleanup runs on **every** edit (not just jobsite-change) — one indexed query, idempotent — so it also sweeps the rarer "date edit moved a punch to another period" orphan for free.
+
+### Existing bad rows
+A one-time SQL script (`cleanup_orphan_status_v47_4.sql`) removes rows already sitting in the DB (Anthony's and any others). **Preview SELECT first, DELETE commented out** — run the SELECT, eyeball the list, then uncomment/run the DELETE. Padded ±1 day on the punch-exists check so no timezone edge case removes a legitimate row.
+
+**Verified:** `node --check` clean; 9-assertion logic harness green (stage guard deletes open/emp_submitted, preserves sup_submitted/exported; `periodContaining` maps current/last/ancient/invalid/null correctly).
+
+**Files touched:** `app.js`, `index.html` (version badge), `CURRENT_STATE.md`, `cleanup_orphan_status_v47_4.sql` (new, run once in Supabase). No schema change.
 
 ---
 
@@ -834,6 +871,7 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | **Admin Submissions/Timecards panel (REWRITTEN, v44.0 Build 3; cross-site note added v45.1; correction modal + rename v46.0)** | `refreshSubmissionsPanel()` — jobsite accordions (reuses `emp-card`/`toggleEmpCard`), "X of Y submitted" headers, per-employee failsafe flags + Override button; `setSubPeriod(mode)`/`subStatusPeriod()` (Current/Last selector); `#mpanel-submissions`/`#submissions-list`/`#subbtn-current`/`#subbtn-last`/`#sub-export-all-btn`/`#sub-period-label` in index.html. Replaces the old `submissions`-table-driven list; that old UI + `deleteSubmission()` were removed entirely. v45.1: row builder now also computes `blockingSites` (Last period only) — other jobsites the employee worked that aren't sup_submitted yet, shown as `Waiting on: <site>`; same-site stuck-at-emp_submitted flag renamed "Needs supervisor review" to avoid clashing with it. v46.0: tab label + panel header renamed "Timecards" (internal IDs unchanged); every row's name is now tappable → `openAdminEmpCorrect(empId,empName)` / `refreshAdminEmpCorrect()` / `closeAdminEmpCorrect()` open `#admin-correct-modal-bg`, listing that employee's punches across all sites worked in the period in view, reusing `openEditModal`/`openAddPunchModal(ctx='subcorrect')` for actual edits — `saveEdit()`/`deletePunch()` gained a matching refresh branch. |
 | **Admin override (NEW, v44.0 Build 3)** | `adminOverrideSite(empId,jobsite,empName)` — same clean-punches gate as Force Submit, pushes one employee's one-site row straight to `sup_submitted` (stands in for both employee + supervisor). No audit marker. |
 | **Admin export → stage stamping (NEW, v44.0 Build 3)** | `openSubmissionsExport(scopeType,jobsite)` — eligibility via `isFullyReadyForExport`, scopes `_masterLogs` + Report-tab date fields to the ready employees' full-period punches, opens the shared `#master-format-modal` picker. `_pendingExportStampFn` global — set here, consumed by `doMasterExcelZip()`/`generateMasterPDF()` right after they finish building the file, stamps `exported` on every included employee's site-rows, then refreshes the panel. The ad-hoc Report-tab export never sets this hook, so it never touches `pt_timecard_status`. |
+| **Orphan status-row cleanup (v47.4)** | `cleanupOrphanStatusRow(empId,jobsite,period)` + `periodContaining(date)` near `setTimecardStage` in app.js — deletes a `pt_timecard_status` row when the employee has zero punches at that site/period (guarded to `open`/`emp_submitted` only). Called from `saveMyTcEdit()` (edit branch, before reload), `saveEdit()` (edit branch, after DB write), and `deletePunch()` (after delete), each capturing pre-edit site/date first. Fixes phantom sites on the My Timecard submit bar, the "Not submitted" + "Send to office" supervisor-chip contradiction, and a latent `isFullyReadyForExport` block. One-time DB cleanup: `cleanup_orphan_status_v47_4.sql`. |
 | Version display | `index.html` version badge `<div>` (top-left of `#screen-kiosk`) and `app.js` backup payload (`app_version`) |
 
 ---
@@ -846,4 +884,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 7, 2026 — v46.2 (pull-back regression fix — Edit/Add buttons + stale reminder)_
+_Last updated: July 9, 2026 — v47.4 (orphaned pt_timecard_status row cleanup — phantom sites on submit bar / supervisor chip / export readiness)_
