@@ -1818,6 +1818,15 @@ async function refreshSupLog(){
     const sendBackBtn=sentBackSites.length
       ? `<button class="btn-sm" onclick="event.stopPropagation();supSendBackToEmployee('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--bg2);color:var(--txt2);border:0.5px solid var(--bdr2);margin-left:6px;">Send back</button>`
       : '';
+    // v47.3: per-employee "Send to office" — counterpart to the batch bar button below.
+    // Available for sites at emp_submitted under this supervisor. Lets a supervisor review
+    // and send one employee at a time instead of firing the whole batch. Coexists with
+    // Force Submit (sites at open) and Send Back (sites at sup_submitted) when the employee
+    // is straddling states across the supervisor's sites.
+    const sendableSites=mySiteRows.filter(r=>sites.includes(r.jobsite)&&r.stage===TC_STAGE.EMP);
+    const sendBtn=sendableSites.length
+      ? `<button class="btn-sm" onclick="event.stopPropagation();supSendEmployeeToOffice('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--green-l,#d8f0d8);color:var(--green,#2f7d31);border:0.5px solid var(--green,#2f7d31);margin-left:6px;">Send to office</button>`
+      : '';
     const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${oos?` · <span style="color:#e07070;font-weight:600;">${oos} ⚠️ after submit</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
@@ -1849,7 +1858,7 @@ async function refreshSupLog(){
         <div>
           <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${data.name}
             <span class="badge" style="background:${chip.bg};color:${chip.color};margin-left:6px;font-size:10px;vertical-align:middle;">${chip.label}</span>
-            ${forceBtn}${sendBackBtn}
+            ${forceBtn}${sendBtn}${sendBackBtn}
           </p>
           <p class="emp-summary">${summary}</p>
         </div>
@@ -1996,6 +2005,40 @@ async function supSendBackToEmployee(empId,empName){
       const failed=results.filter(r=>!r.ok).length;
       if(failed){showCustomAlert('Problem','Some sites could not be sent back. Try again.');return;}
       showNotif('✓','Sent back',`${empName}\u2019s timecard returned at ${siteList}`,'#c47f17',2800);
+      refreshSupLog();
+    });
+}
+
+/* ─── Supervisor: Send one employee's timecard to office (v47.3) ────────────────────
+   Per-employee counterpart to the batch "Send all Timecards to office" button. Reviews
+   and sends this one employee's emp_submitted rows at THIS supervisor's sites to
+   sup_submitted, so a supervisor can review + send one-by-one instead of firing the
+   whole batch. Batch button (submitSiteToOffice) still works the same and picks up
+   whoever's left at emp_submitted. */
+async function supSendEmployeeToOffice(empId,empName){
+  if(!activeSup)return;
+  const sites=activeSup.jobsites||[];
+  const period=supStatusPeriod();
+  const periodLabel=`${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} \u2013 ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+  const statusMap=await getAllStatusForPeriod(period.start);
+  const allRows=statusMap[empId]||[];
+  const sendable=allRows.filter(r=>sites.includes(r.jobsite)&&r.stage===TC_STAGE.EMP);
+  if(!sendable.length){
+    showCustomAlert('Nothing to send',`${empName} has no submitted timecards at your sites that are ready to send to office.`);
+    refreshSupLog();
+    return;
+  }
+  const siteList=sendable.map(r=>r.jobsite).sort().join(', ');
+  showCustomConfirm(
+    `Send ${empName}\u2019s timecard to office?`,
+    `This sends ${empName}\u2019s submitted timecard at ${siteList} (${periodLabel}) to head office and locks it. Review their punches above before sending.`,
+    'This can\u2019t be undone from here \u2014 you\u2019d need to use Send back if they need to make changes.',
+    'Send to office','var(--green)',
+    async()=>{
+      const results=await Promise.all(sendable.map(r=>setTimecardStage(empId,period,TC_STAGE.SUP,r.jobsite)));
+      const failed=results.filter(r=>!r.ok).length;
+      if(failed){showCustomAlert('Problem',`Some sites could not be sent. ${sendable.length-failed} of ${sendable.length} succeeded.`);return;}
+      showNotif('\u2713','Sent to office',`${empName}\u2019s timecard sent at ${siteList}`,'#2f7d31',2600);
       refreshSupLog();
     });
 }
@@ -2391,16 +2434,46 @@ async function toggleActivityActive(id,activate,name){
 /* ─── Master: Overview ─── */
 async function refreshMasterOverview(){
   await checkAutoServer();
-  const today=new Date();today.setHours(0,0,0,0);
   document.getElementById('m-stat-in').textContent=timeLog.filter(l=>!l.out).length;
   document.getElementById('m-stat-emps').textContent=employees.filter(e=>e.active).length;
-  document.getElementById('m-stat-punches').textContent=timeLog.filter(l=>l.in>=today).length;
-  // Query DB for auto-clocked count — memory only holds open punches so this must hit the DB
+
+  // v47.3: current-period boundaries drive both the Needs Review tile and the Ready-to-Export tile.
+  const period=getPeriodByOffset(0);
+
+  // v47.3: Needs Review — scoped to the current pay period only. Prior periods should already be
+  // resolved (via admin correction / override / send-back flows) so counting them as still-flagged
+  // was noisy and misleading — the number never dropped to zero even when nothing current was flagged.
   const {count:flagCount}=await sb.from('punches')
     .select('*',{count:'exact',head:true})
     .eq('auto_clocked',true)
-    .eq('edited_after_auto',false);
+    .eq('edited_after_auto',false)
+    .gte('clock_in',period.start.toISOString())
+    .lte('clock_in',period.end.toISOString());
   document.getElementById('m-stat-flags').textContent=flagCount||0;
+
+  // v47.3: Timecards Ready to Export — replaces the old "Today punches" tile.
+  // Count = employees whose EVERY current-period worked site is at sup_submitted (fully ready) and
+  // nothing yet exported. Matches what Brad's Export button actually picks up. Drops when admin or
+  // supervisor sends a row back to 'open'; increments when a supervisor sends the last outstanding
+  // site to office. Live-ness comes from refreshMasterOverview being called on overview tab switch
+  // (switchMasterTab in the 'overview' branch below), so returning to the tile always shows current
+  // state — no realtime subscription needed.
+  const [statusMap,punchRes]=await Promise.all([
+    getAllStatusForPeriod(period.start),
+    sb.from('punches').select('employee_id,jobsite')
+      .gte('clock_in',period.start.toISOString())
+      .lte('clock_in',period.end.toISOString())
+  ]);
+  let readyCount=0;
+  if(!punchRes.error){
+    const sitesWorkedByEmp={};
+    (punchRes.data||[]).forEach(p=>{
+      if(!p.employee_id)return;
+      (sitesWorkedByEmp[p.employee_id]=sitesWorkedByEmp[p.employee_id]||new Set()).add(p.jobsite);
+    });
+    readyCount=Object.keys(statusMap).filter(id=>isFullyReadyForExport(statusMap[id],[...(sitesWorkedByEmp[id]||[])])).length;
+  }
+  document.getElementById('m-stat-ready').textContent=readyCount;
   const div=document.getElementById('m-site-overview');
   div.innerHTML=JOBSITES.map((site,si)=>{
     const color=getSiteColor(si);
@@ -4579,7 +4652,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.2',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.3',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

@@ -1,7 +1,60 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.2 *(three send-back / force-submit fixes; version badge implementation)*
+**Current Version:** v47.3 *(overview tiles reworked; per-employee "Send to office" button)*
 **Last Updated:** July 9, 2026
+
+---
+
+## ✅ v47.3 — Admin overview tiles reworked + supervisor per-employee "Send to office"
+
+Three small UX asks bundled together — two on the admin overview panel, one on the supervisor Time log — plus the batch send button rename.
+
+### Fix 1: "Needs Review" tile now scoped to current pay period only
+
+**The problem:** the tile hit `punches WHERE auto_clocked=true AND edited_after_auto=false` with no period filter. Prior-period auto-clocks that never got resolved (or never *needed* resolving) piled up in the count forever. Julio noticed the tile showing a higher number than the current period actually tracks.
+
+**The fix:** added `.gte('clock_in', period.start)` and `.lte('clock_in', period.end)` to the query, where `period = getPeriodByOffset(0)` (current). Prior periods should already be resolved (via admin override, correction, or supervisor send-back flows), so scoping out is cleaner than counting the historical residue.
+
+### Fix 2: "Today punches" tile replaced with "Timecards Ready to Export"
+
+**The problem:** the old tile just counted `timeLog.filter(l => l.in >= today).length` — a raw punch count that told nobody anything actionable. Not what Brad (payroll) or the admin needs to see at a glance.
+
+**The new tile — "Timecards Ready to Export":**
+- **Count = employees whose EVERY current-period worked site is at `sup_submitted` and nothing yet exported.** That's exactly what `isFullyReadyForExport` returns, and exactly what Brad's Export button picks up.
+- **Behavior with send-backs (this is the "live" part Julio asked for):**
+  - Admin send-back moves a row `exported → open` → employee drops out of the count (no longer fully ready)
+  - Supervisor send-back to employee moves a row `sup_submitted → open` → drops out
+  - Supervisor sends the last outstanding site → adds to the count
+  - Once exported → drops out (no longer waiting)
+- **Live-ness scope (Option A from the discussion):** the count is accurate whenever you look at the overview tab, because `switchMasterTab('overview')` calls `refreshMasterOverview()`. No realtime subscription needed — going to another tab and coming back always shows current state, and any admin action that changes state (send-back, override, export) already leaves the overview.
+- **Clickable:** jumps to the Timecards tab (`switchMasterTab('submissions')`) so the admin can act on whoever's ready.
+- **Colour:** `var(--green)` — matches the "ready to act" affordance of the Export button.
+- **ID renamed:** `m-stat-punches` → `m-stat-ready` (the old ID leaks the old meaning; the new ID is honest about what it holds).
+
+### Fix 3: Per-employee "Send to office" button on the supervisor Time log
+
+**The workflow Julio wants:** review one employee at a time and send just that one, without needing to fire the batch. Especially useful for employees at multiple sites where the supervisor wants to hand off one at a time.
+
+**Implementation:**
+- New button `Send to office` on each employee's header row on the supervisor card, in green (matches the batch button below).
+- Shows when the employee has any sites at `emp_submitted` at THIS supervisor's own sites.
+- Action: sets those `emp_submitted` rows → `sup_submitted`. Same DB write as the batch button, just scoped to one employee's rows.
+- New function `supSendEmployeeToOffice(empId, empName)` alongside the existing `supSendBackToEmployee` and `forceSubmitEmployee`. Loads fresh status rows, filters to sendable ones, presents a confirmation dialog listing the sites and period, fires the writes on confirm.
+- **Coexists with the other two per-employee buttons.** All three can appear on the same employee when their sites straddle states:
+  - Force Submit → shown for sites at `open` where the employee has punches (never submitted)
+  - Send to office → shown for sites at `emp_submitted` (this v47.3 addition)
+  - Send back → shown for sites at `sup_submitted` with nothing exported
+- The mixed-state case (say, 2 sites at emp_submitted, 1 at sup_submitted) now surfaces both Send to office AND Send back on the same header — the supervisor sees the state without any extra explanatory UI.
+
+### Fix 4: Batch button relabelled
+
+`Submit site to office` → `Send all Timecards to office`. Behaviour is unchanged — it still only picks up `emp_submitted` rows for this supervisor's sites and fires them all to `sup_submitted` at once. The rename just aligns the wording with the new per-employee button ("Send to office"): batch = all, per-employee = one.
+
+### Version badge bumped
+
+`index.html` line 220 and `app.js` app_version string both moved to `v47.3`.
+
+**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change.
 
 ---
 
