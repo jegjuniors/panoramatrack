@@ -1,7 +1,41 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.4 *(orphaned timecard-status row cleanup — phantom sites on submit bar / supervisor chip)*
+**Current Version:** v47.5 *(send-back windows widened both directions + iPhone Dynamic Island safe-area fix)*
 **Last Updated:** July 9, 2026
+
+---
+
+## ✅ v47.5 — Send-back available in both windows + My Timecard reachable under the Dynamic Island
+
+Two unrelated changes bundled into one build.
+
+### Change 1 — Send-back windows widened (supervisor + admin)
+Requested: supervisors and admins could each only send a card back in *one* stage window. Widened both so a card can be bounced back before *or* after the next handoff.
+
+**Supervisor "Send back" → employee** (`refreshSupLog` gate ~1862, `supSendBackToEmployee`):
+- Before: only at `sup_submitted` (already sent to office), gone once anything exported.
+- Now: at **`emp_submitted`** (employee handed in, not yet sent to office — bounce for changes) **and** `sup_submitted` (sent to office, not yet exported). Still blocked once any site is exported (admin-only past that point).
+- At `emp_submitted` the supervisor card now shows **both** "Send to office" (accept) and "Send back" (bounce) — the intended review/accept-or-reject pair. Employee's own "Pull back" still coexists; all routes reset to `open`.
+
+**Admin "Send back" → supervisor** (Submissions panel gate ~4377, `adminSendBack`):
+- Before: only at `exported`.
+- Now: at **`sup_submitted`** (sent to office, not yet exported) **and** `exported`. Shows next to the green ✓ ready indicator on a sup_submitted site.
+
+Reset target unchanged for both: still `→ open` (gives the supervisor the "not submitted" chip + Force Submit; the v47.2 rationale for open-vs-sup_submitted still holds). No new stage transitions, no schema change. Confirm/alert copy in both functions generalized so it no longer assumes a specific origin stage ("re-send to office" wording removed from the emp_submitted path; "exported" wording removed from the admin pre-export path).
+
+### Change 2 — iPhone Dynamic Island / safe-area (My Timecard "Close" unreachable)
+An employee on an iPhone 14 Pro (installed PWA) couldn't reach the "✕ Close" link — the top of the My Timecard screen was painted *under* the Dynamic Island, forcing a force-quit to escape.
+
+**Root cause:** viewport is `viewport-fit=cover` (index.html line 5), which draws edge-to-edge and hands safe-area responsibility to the app — but **nothing in the app used `env(safe-area-inset-*)` anywhere**. `#screen-mytc` set its top padding inline to `1.75rem` (~28px); the 14 Pro's top inset is ~59px, so the header (title + Close) sat ~30px up under the island/status bar, hard to see and untappable. Notch-less phones fit under 28px, which is why only this one device hit it.
+
+**Fix (Choice A — targeted, regression-proof):** `#screen-mytc` top padding is now
+`max(1.75rem, calc(env(safe-area-inset-top) + 8px))` — on non-notch devices `env()` = 0 so `max()` keeps the original 1.75rem (zero visual change anywhere else); on the 14 Pro it becomes ~67px, dropping the header cleanly below the island with an 8px gap. Bottom padding left at 40px (clears the ~34px home indicator). No JS, no device detection.
+
+**Known latent (deferred):** the same inline-top-padding pattern exists on every other `.screen` (`#screen-activity`, login screens, etc.) and on fixed-overlay modals. Those aren't yet safe-area-aware. A proper app-wide pass belongs in `styles.css` (not in this session's zip; the per-screen inline paddings would override a class rule, so it needs a small refactor). Ship `styles.css` when ready to do Change 2 globally.
+
+**Verified:** `node --check` clean; 10-assertion send-back gate harness green (supervisor shows at emp/sup, hidden at open and once exported; admin shows at sup/exported, hidden at open/emp).
+
+**Files touched:** `app.js`, `index.html` (safe-area + version badge), `CURRENT_STATE.md`. No schema change, no SQL.
 
 ---
 
@@ -871,6 +905,8 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | **Admin Submissions/Timecards panel (REWRITTEN, v44.0 Build 3; cross-site note added v45.1; correction modal + rename v46.0)** | `refreshSubmissionsPanel()` — jobsite accordions (reuses `emp-card`/`toggleEmpCard`), "X of Y submitted" headers, per-employee failsafe flags + Override button; `setSubPeriod(mode)`/`subStatusPeriod()` (Current/Last selector); `#mpanel-submissions`/`#submissions-list`/`#subbtn-current`/`#subbtn-last`/`#sub-export-all-btn`/`#sub-period-label` in index.html. Replaces the old `submissions`-table-driven list; that old UI + `deleteSubmission()` were removed entirely. v45.1: row builder now also computes `blockingSites` (Last period only) — other jobsites the employee worked that aren't sup_submitted yet, shown as `Waiting on: <site>`; same-site stuck-at-emp_submitted flag renamed "Needs supervisor review" to avoid clashing with it. v46.0: tab label + panel header renamed "Timecards" (internal IDs unchanged); every row's name is now tappable → `openAdminEmpCorrect(empId,empName)` / `refreshAdminEmpCorrect()` / `closeAdminEmpCorrect()` open `#admin-correct-modal-bg`, listing that employee's punches across all sites worked in the period in view, reusing `openEditModal`/`openAddPunchModal(ctx='subcorrect')` for actual edits — `saveEdit()`/`deletePunch()` gained a matching refresh branch. |
 | **Admin override (NEW, v44.0 Build 3)** | `adminOverrideSite(empId,jobsite,empName)` — same clean-punches gate as Force Submit, pushes one employee's one-site row straight to `sup_submitted` (stands in for both employee + supervisor). No audit marker. |
 | **Admin export → stage stamping (NEW, v44.0 Build 3)** | `openSubmissionsExport(scopeType,jobsite)` — eligibility via `isFullyReadyForExport`, scopes `_masterLogs` + Report-tab date fields to the ready employees' full-period punches, opens the shared `#master-format-modal` picker. `_pendingExportStampFn` global — set here, consumed by `doMasterExcelZip()`/`generateMasterPDF()` right after they finish building the file, stamps `exported` on every included employee's site-rows, then refreshes the panel. The ad-hoc Report-tab export never sets this hook, so it never touches `pt_timecard_status`. |
+| **Send-back windows (v47.5)** | Supervisor→employee: gate in `refreshSupLog` (`sentBackSites`, stages `emp_submitted`/`sup_submitted`, blocked if any site exported) + `supSendBackToEmployee()`. Admin→supervisor: gate in Submissions panel (`if(ready&&!actionHtml)`, ready = sup_submitted OR exported) + `adminSendBack()`. Both reset `→ open`. |
+| **Safe-area / notch (v47.5)** | `#screen-mytc` inline top padding uses `max(1.75rem, calc(env(safe-area-inset-top) + 8px))` (index.html). Requires `viewport-fit=cover` (already set line 5). Other screens/modals NOT yet safe-area-aware — app-wide pass deferred to a styles.css refactor. |
 | **Orphan status-row cleanup (v47.4)** | `cleanupOrphanStatusRow(empId,jobsite,period)` + `periodContaining(date)` near `setTimecardStage` in app.js — deletes a `pt_timecard_status` row when the employee has zero punches at that site/period (guarded to `open`/`emp_submitted` only). Called from `saveMyTcEdit()` (edit branch, before reload), `saveEdit()` (edit branch, after DB write), and `deletePunch()` (after delete), each capturing pre-edit site/date first. Fixes phantom sites on the My Timecard submit bar, the "Not submitted" + "Send to office" supervisor-chip contradiction, and a latent `isFullyReadyForExport` block. One-time DB cleanup: `cleanup_orphan_status_v47_4.sql`. |
 | Version display | `index.html` version badge `<div>` (top-left of `#screen-kiosk`) and `app.js` backup payload (`app_version`) |
 
@@ -884,4 +920,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 9, 2026 — v47.4 (orphaned pt_timecard_status row cleanup — phantom sites on submit bar / supervisor chip / export readiness)_
+_Last updated: July 9, 2026 — v47.5 (send-back windows widened both directions + iPhone Dynamic Island safe-area fix)_

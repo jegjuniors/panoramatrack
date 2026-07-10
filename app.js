@@ -1855,9 +1855,11 @@ async function refreshSupLog(){
     const forceBtn=openSupSites.length
       ? `<button class="btn-sm" onclick="event.stopPropagation();forceSubmitEmployee('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--amber-l);color:var(--amber);border:0.5px solid var(--amber);margin-left:6px;">Force submit</button>`
       : '';
-    // v47.0: supervisor "Send back to employee" — available for sites at sup_submitted (sent
-    // to office but not yet exported). Sends back to open at this supervisor's own sites only.
-    const sentBackSites=mySiteRows.filter(r=>r.stage===TC_STAGE.SUP&&!allRows.some(ar=>ar.stage===TC_STAGE.EXPORTED));
+    // v47.0: supervisor "Send back to employee" — sends the card back to the employee (→ open)
+    // at this supervisor's own sites. v47.5: available at BOTH emp_submitted (employee handed in,
+    // not yet sent to office — bounce for changes) AND sup_submitted (already sent to office, not
+    // yet exported). Still blocked once any site is exported (only admin can act then).
+    const sentBackSites=mySiteRows.filter(r=>(r.stage===TC_STAGE.EMP||r.stage===TC_STAGE.SUP)&&!allRows.some(ar=>ar.stage===TC_STAGE.EXPORTED));
     const sendBackBtn=sentBackSites.length
       ? `<button class="btn-sm" onclick="event.stopPropagation();supSendBackToEmployee('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--bg2);color:var(--txt2);border:0.5px solid var(--bdr2);margin-left:6px;">Send back</button>`
       : '';
@@ -2014,15 +2016,16 @@ async function doSubmitSiteToOffice(readyPairs,period,periodLabel){
   refreshSupLog(); // repaint stage colours → submitted employees flip to "Sent to office"
 }
 
-/* ─── Supervisor: Send back to employee (v47.0) ────────────────────────────────
-   Undoes the supervisor's "send to office" for this employee at the supervisor's own
-   sites — resets sup_submitted → open so the employee can edit and re-submit.
+/* ─── Supervisor: Send back to employee (v47.0; widened v47.5) ──────────────────
+   Returns the employee's card to them (→ open) at this supervisor's own sites so they
+   can edit and re-submit. v47.5: works whether the card is at emp_submitted (handed in,
+   not yet sent to office) or sup_submitted (sent to office, not yet exported).
    Only available until any site is exported; once exported, only the admin can act. */
 async function supSendBackToEmployee(empId,empName){
   if(!activeSup)return;
   const sites=activeSup.jobsites||[];
   const period=supStatusPeriod();
-  // Fresh status check — only retract sites at sup_submitted under this supervisor
+  // Fresh status check — retract sites at emp_submitted or sup_submitted under this supervisor
   const statusMap=await getAllStatusForPeriod(period.start);
   const allRows=statusMap[empId]||[];
   // Block if any site is already exported
@@ -2031,16 +2034,16 @@ async function supSendBackToEmployee(empId,empName){
     refreshSupLog();
     return;
   }
-  const retractable=allRows.filter(r=>sites.includes(r.jobsite)&&r.stage===TC_STAGE.SUP);
+  const retractable=allRows.filter(r=>sites.includes(r.jobsite)&&(r.stage===TC_STAGE.EMP||r.stage===TC_STAGE.SUP));
   if(!retractable.length){
-    showCustomAlert('Nothing to send back',`${empName} has no timecards at your sites that are sent to office and eligible for return.`);
+    showCustomAlert('Nothing to send back',`${empName} has no submitted timecards at your sites that are eligible for return.`);
     refreshSupLog();
     return;
   }
   const siteList=retractable.map(r=>r.jobsite).sort().join(', ');
   showCustomConfirm(
     `Send ${empName}\u2019s timecard back?`,
-    `This returns ${empName}\u2019s timecard at ${siteList} to them so they can make changes and re-submit. They\u2019ll need to submit again, then you\u2019ll need to re-send to office.`,
+    `This returns ${empName}\u2019s timecard at ${siteList} to them so they can make changes and re-submit. They\u2019ll need to submit again before it can go to the office.`,
     '',
     'Send back','var(--amber)',
     async()=>{
@@ -4366,8 +4369,12 @@ async function refreshSubmissionsPanel(){
       } else if(!ready&&blocked){
         actionHtml=`<span style="font-size:10px;color:var(--txt3);margin-left:6px;">Fix punches first</span>`;
       }
-      // v47.0: admin send-back button for exported employees — returns to sup_submitted
-      if(exported&&!actionHtml){
+      // Admin send-back button — returns a site to the supervisor (→ open). v47.0 offered this
+      // only for exported sites; v47.5 also offers it at sup_submitted (sent to office, not yet
+      // exported), so the admin can bounce a card back before OR after export. ready === stage is
+      // sup_submitted OR exported, and neither of the !ready branches above fires for those, so
+      // !actionHtml is always true here for a ready site.
+      if(ready&&!actionHtml){
         actionHtml=`<button class="btn-sm" onclick="event.stopPropagation();adminSendBack('${empId}','${site.replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}')" style="background:var(--bg2);color:var(--txt2);border:0.5px solid var(--bdr2);margin-left:6px;">Send back</button>`;
       }
       // v47.1: blocking-sites note rendered inline beside ✓ (subtle gray, so it reads
@@ -4454,19 +4461,18 @@ async function adminOverrideSite(empId,jobsite,empName){
     });
 }
 
-/* ─── Admin: Send back an exported timecard (v47.0, revised v47.2) ─────────────
-   Returns an exported employee's site row from 'exported' → 'open'. Originally v47.0
-   sent back to 'sup_submitted', but that reads as "sent to office" on the supervisor's
-   card — no visual change, no signal to the supervisor that anything happened. Sending
-   to 'open' gives the supervisor the "not submitted" chip + Force Submit button, so
-   they can review/correct/force-submit without needing the employee to be involved
-   (useful for departed employees). If the supervisor decides the employee should redo
-   it, they can use their own Send Back action to notify the employee. */
+/* ─── Admin: Send back a timecard to the supervisor (v47.0; widened v47.5) ─────
+   Returns a site row to 'open' so the supervisor gets the "not submitted" chip +
+   Force Submit — they can review, edit punches, and re-send to office (or forward it
+   to the employee via their own Send Back). v47.5: available both before export
+   (sup_submitted → open) and after (exported → open). Resetting to 'open' rather than
+   sup_submitted is deliberate: sup_submitted reads as "sent to office" on the
+   supervisor's card with no visible change, so it wouldn't signal that anything happened. */
 async function adminSendBack(empId,jobsite,empName){
   const period=subStatusPeriod();
   showCustomConfirm(
     `Send back ${empName} at ${jobsite}?`,
-    `This returns the exported timecard to the supervisor as not-yet-submitted. The supervisor can then review, edit punches, and Force Submit to re-send to office — or forward it back to the employee for changes. You\u2019ll need to re-export after any corrections.`,
+    `This returns the timecard to the supervisor as not-yet-submitted. The supervisor can review, edit punches, and Force Submit to re-send to office — or forward it to the employee for changes. If it was already exported, you\u2019ll need to re-export after any corrections.`,
     '',
     'Send back to supervisor','var(--amber)',
     async()=>{
@@ -4700,7 +4706,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.4',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.5',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
