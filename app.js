@@ -2724,6 +2724,18 @@ async function getMasterLogFiltered(){
   let from=null,to=null;
   if(fromV){const[fy,fm,fd]=fromV.split('-').map(Number);from=new Date(fy,fm-1,fd,0,0,0,0);}
   if(toV){const[ty,tm,td]=toV.split('-').map(Number);to=new Date(ty,tm-1,td,23,59,59,999);}
+  // v47.8: never issue a fully unbounded punches query. A missing "to" is fine (naturally capped
+  // by "no punches exist in the future"), but a missing "from" — e.g. someone manually clears the
+  // date field's native browser control — would otherwise fetch the entire table every time this
+  // runs, growing forever as punches accumulate. Falls back to a 1-year lookback and writes it
+  // back into the visible fields so the report honestly reflects what's actually being queried,
+  // instead of showing blank dates while silently limiting results.
+  if(!from){
+    const base=to||new Date();
+    from=new Date(base);from.setFullYear(from.getFullYear()-1);from.setHours(0,0,0,0);
+    document.getElementById('m-log-from').value=toDateStr(from);
+    if(!to){document.getElementById('m-log-to').value=toDateStr(base);}
+  }
   let query=sb.from('punches').select('*').order('clock_in',{ascending:false});
   if(from)query=query.gte('clock_in',from.toISOString());
   if(to)query=query.lte('clock_in',to.toISOString());
@@ -4729,10 +4741,98 @@ function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,peri
    follow-ups once the table list / restore semantics are settled (see CURRENT_STATE.md). */
 function openDbMaintModal(){
   document.getElementById('backup-status').textContent='';
+  document.getElementById('archive-status').textContent='';
+  document.getElementById('archive-cutoff-date').value='';
+  document.getElementById('archive-cutoff-date').max=toDateStr(archiveMinCutoff());
   document.getElementById('dbmaint-modal-bg').style.display='flex';
 }
 function closeDbMaintModal(){
   document.getElementById('dbmaint-modal-bg').style.display='none';
+}
+
+/* ─── Archive old punches (v47.8) — replaces the earlier "wipe punches" idea from the DB
+   maintenance discussion. Downloads punches older than a chosen cutoff as a JSON file (same
+   shape as backup), then deletes just those rows from the live table once the download has
+   fired — keeps the app fast (Report tab query) and the database lean (Supabase free tier) by
+   moving old data out of the live table rather than destroying it. Employees/jobsites/
+   departments/activities are intentionally NOT part of this — they don't grow meaningfully and
+   aren't part of what this tool is solving for. */
+const ARCHIVE_MIN_MONTHS_AGO=6; // safety floor — cutoff can't be more recent than this, so a
+                                 // fat-fingered date can't sweep up punches still mid-workflow
+function archiveMinCutoff(){
+  const d=new Date();d.setMonth(d.getMonth()-ARCHIVE_MIN_MONTHS_AGO);return d;
+}
+async function archiveOldPunches(){
+  const status=document.getElementById('archive-status');
+  const btn=document.getElementById('archive-btn');
+  status.textContent='';status.style.color='var(--txt2)';
+  const dateV=document.getElementById('archive-cutoff-date').value;
+  if(!dateV){status.textContent='Pick a cutoff date first.';status.style.color='var(--red)';return;}
+  const [y,m,d]=dateV.split('-').map(Number);
+  const cutoff=new Date(y,m-1,d,0,0,0,0);
+  if(cutoff>archiveMinCutoff()){
+    status.textContent=`Cutoff must be at least ${ARCHIVE_MIN_MONTHS_AGO} months in the past — too recent risks archiving punches still mid-submission.`;
+    status.style.color='var(--red)';
+    return;
+  }
+  btn.disabled=true;status.textContent='Checking…';
+  try{
+    const {data,error}=await sb.from('punches').select('*').lt('clock_in',cutoff.toISOString()).order('clock_in',{ascending:false});
+    if(error)throw new Error(error.message);
+    const rows=data||[];
+    if(!rows.length){
+      status.textContent='No punches found before this date — nothing to archive.';
+      status.style.color='var(--txt2)';
+      return;
+    }
+    showCustomConfirm(
+      'Archive old punches',
+      `This will download ${rows.length} punch${rows.length!==1?'es':''} from before ${cutoff.toLocaleDateString()} as a JSON file, then permanently remove them from the live database.`,
+      'Make sure the file finishes saving before continuing — the downloaded file is the only copy after this runs. This cannot be undone from within the app.',
+      `Archive ${rows.length} punch${rows.length!==1?'es':''}`,
+      'var(--amber)',
+      ()=>doArchivePunches(rows,cutoff)
+    );
+  }catch(e){
+    status.textContent='Error: '+e.message;
+    status.style.color='var(--red)';
+  }finally{
+    btn.disabled=false;
+  }
+}
+async function doArchivePunches(rows,cutoff){
+  const status=document.getElementById('archive-status');
+  const btn=document.getElementById('archive-btn');
+  btn.disabled=true;
+  status.textContent='Downloading…';status.style.color='var(--txt2)';
+  try{
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v47.8',tables:{punches:rows}};
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    const stamp=new Date().toISOString().slice(0,10);
+    a.href=url;a.download=`PanoramaTrack_Archive_${stamp}.json`;
+    document.body.appendChild(a);a.click();
+    document.body.removeChild(a);URL.revokeObjectURL(url);
+
+    status.textContent='Removing from live database…';
+    const ids=rows.map(r=>r.id);
+    const CHUNK=500; // batched deletes so a large archive doesn't send one oversized request
+    for(let i=0;i<ids.length;i+=CHUNK){
+      const slice=ids.slice(i,i+CHUNK);
+      const {error}=await sb.from('punches').delete().in('id',slice);
+      if(error)throw new Error(error.message);
+      status.textContent=`Removing from live database… ${Math.min(i+CHUNK,ids.length)} of ${ids.length}`;
+    }
+    status.textContent=`✓ Archived and removed ${rows.length} punch${rows.length!==1?'es':''} from before ${cutoff.toLocaleDateString()}.`;
+    status.style.color='var(--green)';
+    document.getElementById('archive-cutoff-date').value='';
+  }catch(e){
+    status.textContent='Error during archive — some punches may not have been removed: '+e.message;
+    status.style.color='var(--red)';
+  }finally{
+    btn.disabled=false;
+  }
 }
 
 /* ─── Database backup ─── */
@@ -4755,7 +4855,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.7',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.8',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

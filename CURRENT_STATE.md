@@ -1,15 +1,76 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.7 *(Database Maintenance modal shell — backup relocated from Overview to Settings)*
+**Current Version:** v47.8 *(Report tab query bounded + Archive old punches tool)*
 **Last Updated:** July 13, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
 > actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5–v47.7 entries below are current; v44.1–v47.4 history isn't backfilled.
+> this session). The v47.5–v47.8 entries below are current; v44.1–v47.4 history isn't backfilled.
 
 ---
 
-## ✅ v47.7 — Database Maintenance modal (Part A of a 4-part feature)
+## ✅ v47.8 — Report tab query bound + Archive old punches (Part C, reframed)
+
+**Context:** Julio's underlying goal for "database wipe" (from the original 4-part Database
+Maintenance request) was keeping the DB small enough for Supabase's free tier and keeping the app
+fast — not a general-purpose nuke-any-table tool. Investigated both goals before building:
+
+- **Supabase free tier (verified July 2026): 500 MB total database size**, shared across the
+  whole project — and this project already shares its budget with at least one unrelated app (the
+  `orders` table found during the FK constraint check isn't part of PanoramaTrack's schema, same
+  pattern as the earlier `pt_settings` naming collision).
+- **Growth math:** `employees`/`jobsites`/`departments`/`activities` are static — a few hundred
+  rows total, ever. They don't meaningfully affect size and were dropped from this effort
+  entirely. `punches` is the only table with real compounding growth (~50-100 employees × ~2
+  punches/day × ~250 workdays ≈ 25-50k rows/year, roughly 10-15 MB/year) — years away from being
+  an emergency at this employee count, but the actual lever worth building.
+- **Found a real, already-existing performance issue** unrelated to total data volume:
+  `getMasterLogFiltered()` (the Report tab query) had no fallback when its date fields were empty
+  — an admin manually clearing the native date-input controls would trigger a full unfiltered
+  `punches` fetch, every time, regardless of table size. This was the more direct threat to "bog
+  down loading of the app" than data volume itself.
+
+**What shipped:**
+- **`getMasterLogFiltered()`** — if the "from" date is missing (to being missing is fine, it's
+  naturally bounded by "no future punches exist"), falls back to a 1-year lookback instead of
+  fetching the entire table, and writes the fallback dates back into the visible `#m-log-from` /
+  `#m-log-to` fields so the UI honestly reflects what's being queried rather than showing blank
+  dates with silently-limited results.
+- **Archive old punches** (`archiveOldPunches()` / `doArchivePunches()`, new section in the
+  Database Maintenance modal, below Backup) — replaces the earlier "wipe Punches" checkbox idea.
+  Pick a cutoff date → previews the count → `showCustomConfirm()` (existing app-wide confirm
+  pattern, matches convention rather than a bespoke type-to-confirm) → downloads matching punches
+  as JSON (same shape as backup) → deletes them from `punches` in chunks of 500 once the download
+  has fired. History is moved to a file, not destroyed — keeps the payroll-record-retention
+  concern from the earlier wipe discussion satisfied.
+  - **Safety floor:** cutoff can't be more recent than 6 months ago (`ARCHIVE_MIN_MONTHS_AGO`,
+    both a JS validation check and the date input's `max` attribute) — prevents accidentally
+    archiving punches still mid-submission/export. Arbitrary but conservative default; easy to
+    adjust (one constant) if Julio wants a different threshold.
+  - Known limitation, same as `runBackup()`: there's no browser callback confirming a download
+    actually completed/saved before the delete proceeds — this mirrors an existing accepted
+    limitation elsewhere in the app rather than introducing a new one.
+- Employees/Jobsites/Departments/Activities wiping **dropped from scope** — they don't
+  meaningfully contribute to database size, so a wipe tool for them doesn't serve this goal. (If
+  a separate "clear test data before go-live" utility for those 4 is wanted later, that's a
+  distinct, smaller ask — not pursued here.)
+- `app_version` in the backup payload synced to v47.8 (same dual-tracked spot as the version
+  badge, noted in the table further down this file).
+
+**Still open / explicitly deferred:**
+- **Part B (backup restore)** — not built this round; got sidelined by the wipe reframing. Still
+  wanted per Julio, semantics already agreed: wipe-and-reinsert (exact match to backup file),
+  scoped to just the current 5 tables.
+- **Part D (audit log)** — untouched, own design pass needed (see v47.7 entry below for the open
+  questions: no per-admin identity exists today, scope of loggable actions, retention policy).
+
+**Verified:** `node --check` on `app.js` + a 12-assertion logic harness covering the report-range
+fallback (both-empty, from-empty-with-to-set, from-set-with-to-empty, both-set) and the archive
+cutoff floor (exact boundary, one day inside it, well past it, today).
+
+---
+
+## ✅ v47.7 — Database Maintenance modal shell (Part A of a 4-part feature)
 
 **Context:** Julio wants a proper "Database Maintenance" area covering backup, backup restore,
 selective database wipe, and a separate audit log feature. Scoped into 4 independently-buildable
