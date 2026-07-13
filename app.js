@@ -4724,6 +4724,17 @@ function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,peri
 }
 
 /* ─── Preliminary reminder banner ─── */
+/* ─── Database Maintenance modal (v47.7) ───
+   Shell for now — backup (below) moved in unchanged. Restore + selective wipe are planned as
+   follow-ups once the table list / restore semantics are settled (see CURRENT_STATE.md). */
+function openDbMaintModal(){
+  document.getElementById('backup-status').textContent='';
+  document.getElementById('dbmaint-modal-bg').style.display='flex';
+}
+function closeDbMaintModal(){
+  document.getElementById('dbmaint-modal-bg').style.display='none';
+}
+
 /* ─── Database backup ─── */
 async function runBackup(){
   const btn=document.getElementById('backup-btn');
@@ -4744,7 +4755,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.4',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.7',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

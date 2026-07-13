@@ -1,12 +1,55 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.6 *(Admin correction modal now flags punches needing attention)*
+**Current Version:** v47.7 *(Database Maintenance modal shell — backup relocated from Overview to Settings)*
 **Last Updated:** July 13, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
 > actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5 and v47.6 entries below are current; v44.1–v47.4 history isn't
-> backfilled here.
+> this session). The v47.5–v47.7 entries below are current; v44.1–v47.4 history isn't backfilled.
+
+---
+
+## ✅ v47.7 — Database Maintenance modal (Part A of a 4-part feature)
+
+**Context:** Julio wants a proper "Database Maintenance" area covering backup, backup restore,
+selective database wipe, and a separate audit log feature. Scoped into 4 independently-buildable
+pieces (see "On the horizon" below for B/C/D — none of that is built yet):
+- **A (this entry):** move the backup button into Settings, wrap it in a new modal shell.
+- **B:** backup restore.
+- **C:** selective database wipe (by table).
+- **D:** audit log (separate design pass — see open questions below).
+
+**What shipped (Part A only):**
+- Backup card removed from the Overview tab.
+- New "Database Maintenance" entry point card added to the bottom of the Settings tab →
+  `openDbMaintModal()` / `closeDbMaintModal()` (`#dbmaint-modal-bg`).
+- `runBackup()` moved into the new modal **unchanged** — same `#backup-btn` / `#backup-status`
+  ids, same logic, just relocated. Backup description copy corrected to accurately describe what
+  it covers today.
+- `app_version` recorded inside the backup payload updated to match this release (was stale at
+  v47.4 — this is the second of the two version-bump spots noted in the table below).
+
+**Findings from investigating current backup (relevant to Parts B/C):**
+- Backup covers 5 tables only: `employees`, `jobsites`, `departments`, `activities`, `punches`
+  (capped to the last 90 days). It does **not** include `pt_settings`, `pt_timecard_status`, or
+  the legacy `submissions` table (still live — used by the PDF export's duplicate-check, not
+  fully retired despite the v44.0 rewrite).
+- Table names are inconsistent with the "`pt_` prefix" convention — only `pt_settings` and
+  `pt_timecard_status` actually carry it; `employees`/`jobsites`/`departments`/`activities`/
+  `punches`/`submissions` predate that convention and were never renamed.
+
+**Open questions before B/C/D can be built:**
+- **B (restore):** wipe-and-reinsert per table (Claude's lean) vs. merge/upsert? Scope restore to
+  only the tables present in the backup file being loaded?
+- **C (wipe):** exact table list, plus how to handle dependents — e.g. wiping `employees` orphans
+  `punches` and `pt_timecard_status` rows unless those are wiped together. Needs a hard
+  confirmation step given how destructive this is.
+- **D (audit log):** biggest open item — **no per-admin identity exists today** (Master/GM panel
+  is a single shared password, not individual logins), so admin-level actions could only be
+  attributed generically as "Admin" unless individual admin accounts are added first (a feature of
+  its own). Also needs: which actions get logged (punch edits are obvious; employee/activity/
+  jobsite/settings changes and force-submit/override/send-back are open), and a retention policy
+  (manual "Clear" only vs. auto-purge by age).
 
 ---
 
