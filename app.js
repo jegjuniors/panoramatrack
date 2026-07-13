@@ -26,6 +26,8 @@ let employees=[];
 let APP_SETTINGS={  // pay rules — loaded from Supabase `pt_settings` row on boot (v36.1, lunch added v36.2)
   roundingEnabled:false, roundingMinutes:15,
   schedEndEnabled:false, schedEndTime:'15:30', schedEndWindow:15,
+  // v48.0: scheduled-start selection — see computeStartTimeOptions()/adjustedTimes()
+  schedStartEnabled:false, schedStartTime:'07:00', schedStartEarly1:'06:30', schedStartEarly2:'06:00', schedStartGrace:5,
   lunchEnabled:false, lunchMinutes:30, lunchThresholdHours:5
 };
 let timeLog=[];      // active punches only cached in memory for speed
@@ -133,6 +135,11 @@ function applySettingsRow(r){
     schedEndEnabled:!!r.sched_end_enabled,
     schedEndTime:r.sched_end_time||'15:30',
     schedEndWindow:(r.sched_end_window!=null?r.sched_end_window:15),
+    schedStartEnabled:!!r.sched_start_enabled,
+    schedStartTime:r.sched_start_time||'07:00',
+    schedStartEarly1:r.sched_start_early1||'06:30',
+    schedStartEarly2:r.sched_start_early2||'06:00',
+    schedStartGrace:(r.sched_start_grace!=null?r.sched_start_grace:5),
     lunchEnabled:!!r.lunch_enabled,
     lunchMinutes:(r.lunch_minutes!=null?r.lunch_minutes:30),
     lunchThresholdHours:(r.lunch_threshold_hours!=null?r.lunch_threshold_hours:5)
@@ -157,13 +164,44 @@ function applySchedEnd(inT,outT){
   if(outT>=winStart&&outT<sched)return sched;
   return outT;
 }
+// v48.0: scheduled-start selection. Unlike the scheduled-end credit (one fixed time, applied
+// silently to everyone), mornings have multiple legitimately-approved start times, so this asks
+// the employee rather than guessing. Returns an ascending array of HH:MM option strings to offer
+// (always ending in the standard start), or null if no popup should show — feature disabled, or
+// punch-in already at/after the standard start.
+function computeStartTimeOptions(punchIn){
+  if(!APP_SETTINGS.schedStartEnabled)return null;
+  const mins=hhmm=>{const[h,m]=hhmm.split(':').map(Number);return h*60+m;};
+  const punchMins=punchIn.getHours()*60+punchIn.getMinutes();
+  const standard=APP_SETTINGS.schedStartTime||'07:00';
+  const standardMins=mins(standard);
+  if(punchMins>=standardMins)return null;
+  const grace=APP_SETTINGS.schedStartGrace!=null?APP_SETTINGS.schedStartGrace:5;
+  const early=[APP_SETTINGS.schedStartEarly2,APP_SETTINGS.schedStartEarly1]
+    .filter(Boolean)
+    .map(t=>({t,m:mins(t)}))
+    .filter(x=>x.m<standardMins) // ignore a misconfigured early time that isn't actually earlier
+    .sort((a,b)=>a.m-b.m);
+  // Each early time stays offered through "grace" minutes past its own mark, inclusive — e.g.
+  // grace=5 means 6:00 is offered through 6:05 and drops at 6:06, while 6:30 stays offered
+  // through 6:35 and drops at 6:36. Inclusive (<=) so the exact checkpoint minute is always
+  // covered even at grace=0 — landing exactly on time is never itself "late".
+  const offered=early.filter(x=>punchMins<=x.m+grace).map(x=>x.t);
+  offered.push(standard);
+  return offered;
+}
 // Effective {in,out} after applying enabled rules. Synthetic punches untouched.
 function adjustedTimes(entry){
-  let inT=entry.in,outT=entry.out;
+  let inT=entry.declaredStart||entry.in,outT=entry.out;
   if(!outT)return {in:inT,out:null};
   if(entry.autoClocked||entry.estimatedOut)return {in:inT,out:outT};
   if(APP_SETTINGS.schedEndEnabled)outT=applySchedEnd(inT,outT);
-  if(APP_SETTINGS.roundingEnabled){inT=roundTime(inT,APP_SETTINGS.roundingMinutes);outT=roundTime(outT,APP_SETTINGS.roundingMinutes);}
+  if(APP_SETTINGS.roundingEnabled){
+    // A declared start (v48.0) is already a clean, deliberately-chosen mark (6:00/6:30/7:00) —
+    // don't re-round it, only round the raw "in" when no declared start was made.
+    if(!entry.declaredStart)inT=roundTime(inT,APP_SETTINGS.roundingMinutes);
+    outT=roundTime(outT,APP_SETTINGS.roundingMinutes);
+  }
   return {in:inT,out:outT};
 }
 // Paid hours for a punch (null if still open). Used everywhere hours are totalled.
@@ -474,7 +512,9 @@ function dbRowToEntry(r){
     // Lunch waive (v42.0) — request = employee's ask at clock-out (bool);
     // waived = supervisor's decision (nullable: null pending / true approved / false denied).
     lunchWaiveRequested:r.lunch_waive_requested||false,
-    lunchWaived:(r.lunch_waived===true||r.lunch_waived===false)?r.lunch_waived:null
+    lunchWaived:(r.lunch_waived===true||r.lunch_waived===false)?r.lunch_waived:null,
+    // v48.0: employee's confirmed actual start time (scheduled-start selection popup), if any.
+    declaredStart:r.declared_start_time?new Date(r.declared_start_time):null
   };
 }
 
@@ -912,7 +952,11 @@ async function submitPin(){
     document.getElementById('kiosk-other-wrap').style.display='none';
     document.getElementById('kiosk-other-spacer').style.display='block';
     showNotif('✓',emp.name,`Punched in at ${fmt(now)} — ${site}`,'#1D9E75');
-    setTimeout(()=>showCorfixReminder(site),600);
+    setTimeout(()=>{
+      const opts=computeStartTimeOptions(now);
+      if(opts&&opts.length){showStartTimeModal(entry,site,opts);}
+      else{showCorfixReminder(site);}
+    },600);
   }
 }
 
@@ -1379,7 +1423,7 @@ async function saveMyTcEdit(){
     const oldJobsite=e.jobsite,oldIn=e.in; // v47.4: capture pre-edit site/date for orphan cleanup
     const wasAuto=e.autoClocked;
     const editedAfterAuto=wasAuto&&!!newOut;
-    const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true};
+    const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true,declared_start_time:null};
     upd.clock_out=newOut?newOut.toISOString():null;
     if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
     const {error}=await sb.from('punches').update(upd).eq('id',e.dbId);
@@ -1387,7 +1431,7 @@ async function saveMyTcEdit(){
     // Keep the in-memory open-punch cache consistent for this device too
     const memEntry=timeLog.find(l=>l.dbId===e.dbId);
     if(memEntry){
-      memEntry.in=newIn;memEntry.out=newOut;memEntry.jobsite=jobsite;memEntry.activity=acts;memEntry.manualEntry=true;
+      memEntry.in=newIn;memEntry.out=newOut;memEntry.jobsite=jobsite;memEntry.activity=acts;memEntry.manualEntry=true;memEntry.declaredStart=null;
       if(editedAfterAuto){memEntry.autoClocked=false;memEntry.editedAfterAuto=true;}
       if(newOut){const idx=timeLog.indexOf(memEntry);if(idx>=0)timeLog.splice(idx,1);}
     }
@@ -1482,6 +1526,20 @@ function scrollActivityBy(dir){
 window.addEventListener('scroll',updateActScroll,{passive:true});
 window.addEventListener('resize',updateActScroll,{passive:true});
 
+/* ─── Clock-out credited-time popup (v48.0) ───
+   Shown instead of the small toast, only when the credited/rounded clock-out time (schedule
+   credit + rounding) actually differs from the raw punch — closes the gap where the old toast
+   always showed the raw time, giving no warning that paid hours would reflect something else. */
+function showClockoutTimeModal(name,credited,raw){
+  document.getElementById('clockout-time-name').textContent=name;
+  document.getElementById('clockout-time-big').textContent=fmt(credited);
+  document.getElementById('clockout-time-sub').textContent=`Recorded punch: ${fmt(raw)}`;
+  document.getElementById('clockout-time-modal-bg').style.display='flex';
+}
+function closeClockoutTimeModal(){
+  document.getElementById('clockout-time-modal-bg').style.display='none';
+}
+
 async function confirmClockOut(){
   if(selectedActs.size===0){document.getElementById('activity-error').textContent='Please select at least one activity.';return}
   const now=new Date();
@@ -1500,10 +1558,54 @@ async function confirmClockOut(){
     if(error){showNotif('✗','Error','Could not save clock-out — check connection','#E24B4A');return}
   }
   pendingClockOut=null;
-  showScreen('screen-kiosk');showNotif('✓',name,`Punched out at ${fmt(now)}`,'#2d7a2d');
+  showScreen('screen-kiosk');
+  // v48.0: show the credited/rounded clock-out time instead of the plain toast, but only when
+  // it actually differs from the raw punch — otherwise it's a needless extra tap with nothing
+  // new to say. 60s threshold avoids noise from millisecond/rounding artifacts.
+  const credited=adjustedTimes(entry).out;
+  if(credited&&Math.abs(credited-now)>=60000){
+    showClockoutTimeModal(name,credited,now);
+  } else {
+    showNotif('✓',name,`Punched out at ${fmt(now)}`,'#2d7a2d');
+  }
 }
 function cancelClockOut(){pendingClockOut=null;showScreen('screen-kiosk')}
 
+
+/* ─── Scheduled-start selection popup (v48.0) ───
+   Shown right after clock-in, before the Corfix safety reminder, when computeStartTimeOptions()
+   returns a non-null list. Forced choice (no dismiss) — this is payroll data, not a courtesy
+   notice. Selecting an option writes declared_start_time on the punch and only then continues
+   into the safety reminder, preserving the existing post-clock-in flow order. */
+function fmtHHMM(hhmm){
+  const [h,m]=hhmm.split(':').map(Number);
+  const d=new Date();d.setHours(h,m,0,0);
+  return fmt(d);
+}
+let _startTimeCtx=null;
+function showStartTimeModal(entry,site,opts){
+  _startTimeCtx={entry,site};
+  document.getElementById('start-time-options').innerHTML=opts.map(t=>
+    `<button onclick="selectStartTime('${t}')" style="padding:18px;font-size:20px;font-weight:700;background:var(--bg2);color:var(--txt);border:1.5px solid var(--bdr2);border-radius:var(--radius);cursor:pointer;font-family:inherit;">${fmtHHMM(t)}</button>`
+  ).join('');
+  document.getElementById('start-time-modal-bg').style.display='flex';
+}
+async function selectStartTime(hhmm){
+  if(!_startTimeCtx)return;
+  const {entry,site}=_startTimeCtx;
+  const [h,m]=hhmm.split(':').map(Number);
+  const declared=new Date(entry.in);declared.setHours(h,m,0,0);
+  entry.declaredStart=declared;
+  if(entry.dbId){
+    // Non-fatal if this fails — the employee has already made their choice and shouldn't be
+    // blocked from continuing; worst case the credited time just won't reflect it until an
+    // admin/supervisor edit resaves the punch.
+    await sb.from('punches').update({declared_start_time:declared.toISOString()}).eq('id',entry.dbId);
+  }
+  document.getElementById('start-time-modal-bg').style.display='none';
+  _startTimeCtx=null;
+  showCorfixReminder(site);
+}
 
 /* ─── Corfix safety reminder ─── */
 let _corfixUrl='';
@@ -2193,6 +2295,11 @@ function refreshSettingsPanel(){
   document.getElementById('set-sched-enabled').checked=APP_SETTINGS.schedEndEnabled;
   document.getElementById('set-sched-time').value=APP_SETTINGS.schedEndTime||'15:30';
   document.getElementById('set-sched-window').value=APP_SETTINGS.schedEndWindow||15;
+  document.getElementById('set-start-enabled').checked=APP_SETTINGS.schedStartEnabled;
+  document.getElementById('set-start-standard').value=APP_SETTINGS.schedStartTime||'07:00';
+  document.getElementById('set-start-grace').value=String(APP_SETTINGS.schedStartGrace!=null?APP_SETTINGS.schedStartGrace:5);
+  document.getElementById('set-start-early1').value=APP_SETTINGS.schedStartEarly1||'06:30';
+  document.getElementById('set-start-early2').value=APP_SETTINGS.schedStartEarly2||'06:00';
   document.getElementById('set-lunch-enabled').checked=APP_SETTINGS.lunchEnabled;
   document.getElementById('set-lunch-minutes').value=String(APP_SETTINGS.lunchMinutes||30);
   document.getElementById('set-lunch-threshold').value=String(APP_SETTINGS.lunchThresholdHours||5);
@@ -2208,6 +2315,11 @@ async function saveSettings(){
   if(isNaN(lunchMinutes)||lunchMinutes<0)lunchMinutes=30;
   let lunchThreshold=parseFloat(document.getElementById('set-lunch-threshold').value);
   if(isNaN(lunchThreshold)||lunchThreshold<0)lunchThreshold=5;
+  const startTime=document.getElementById('set-start-standard').value||'07:00';
+  const startEarly1=document.getElementById('set-start-early1').value||'06:30';
+  const startEarly2=document.getElementById('set-start-early2').value||'06:00';
+  let startGrace=parseInt(document.getElementById('set-start-grace').value,10);
+  if(isNaN(startGrace)||startGrace<0)startGrace=5;
   const row={
     id:1,
     rounding_enabled:document.getElementById('set-rounding-enabled').checked,
@@ -2215,6 +2327,11 @@ async function saveSettings(){
     sched_end_enabled:document.getElementById('set-sched-enabled').checked,
     sched_end_time:schedTime,
     sched_end_window:schedWindow,
+    sched_start_enabled:document.getElementById('set-start-enabled').checked,
+    sched_start_time:startTime,
+    sched_start_early1:startEarly1,
+    sched_start_early2:startEarly2,
+    sched_start_grace:startGrace,
     lunch_enabled:document.getElementById('set-lunch-enabled').checked,
     lunch_minutes:lunchMinutes,
     lunch_threshold_hours:lunchThreshold,
@@ -3427,7 +3544,7 @@ async function saveEdit(){
   const editedAfterAuto=wasAuto&&!!newOut;
   // Write to DB
   if(e.dbId){
-    const upd={clock_in:newIn.toISOString(),jobsite:newJobsite,activities:newActs};
+    const upd={clock_in:newIn.toISOString(),jobsite:newJobsite,activities:newActs,declared_start_time:null};
     if(newOut)upd.clock_out=newOut.toISOString();else upd.clock_out=null;
     if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
     // Lunch waive decision (v42.0) — only write when a decision was made this session
@@ -3436,7 +3553,7 @@ async function saveEdit(){
     if(error){err.textContent='DB error: '+error.message;return}
   }
   // Update memory
-  e.in=newIn;e.out=newOut;e.jobsite=newJobsite;e.activity=newActs;
+  e.in=newIn;e.out=newOut;e.jobsite=newJobsite;e.activity=newActs;e.declaredStart=null;
   if(editedAfterAuto){e.autoClocked=false;e.editedAfterAuto=true;}
   if(_editWaiveDecision!==null)e.lunchWaived=_editWaiveDecision;
   // v47.4: if this edit left the OLD site with no punches this period, drop its stale status row
@@ -4806,7 +4923,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v47.8',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v48.0',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -4855,7 +4972,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v47.8',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v48.0',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

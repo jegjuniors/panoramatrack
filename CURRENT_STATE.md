@@ -1,11 +1,93 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.8 *(Report tab query bounded + Archive old punches tool)*
+**Current Version:** v48.0 *(Scheduled-start selection popup + clock-out credited-time popup)*
 **Last Updated:** July 13, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
 > actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5–v47.8 entries below are current; v44.1–v47.4 history isn't backfilled.
+> this session). The v47.5–v48.0 entries below are current; v44.1–v47.4 history isn't backfilled.
+
+> **Migration required:** run `migration_v48_start_time.sql` in the Supabase SQL editor before
+> deploying this version — adds `punches.declared_start_time` and 5 new `pt_settings` columns.
+
+---
+
+## ✅ v48.0 — Scheduled-start selection + clock-out credited-time popup
+
+**Context:** GM/Julio edge-case discussion — ~95% of employees have a 7:00 AM standard start, but
+routinely punch in earlier while waiting around before their shift actually begins. A few
+employees are supervisor-approved to genuinely start at 6:00 or 6:30. Unlike the existing
+scheduled-**end** credit (one fixed time, applied silently to everyone), mornings have multiple
+legitimately-valid start times, so this asks the employee rather than guessing.
+
+**Scheduled-start selection popup:**
+- New pay-rule engine piece: `computeStartTimeOptions(punchIn)` (`app.js`, next to
+  `adjustedTimes`) — returns the ascending list of start-time options to offer, or `null` if no
+  popup should show. Confirmed exact bands (grace=5, inclusive boundary — see harness below):
+  - Before 6:06 AM → `[06:00, 06:30, 07:00]`
+  - 6:06 AM – 6:35 AM → `[06:30, 07:00]`
+  - 6:36 AM – 6:59 AM → `[07:00]`
+  - 7:00 AM or later → no popup
+  - Each early time independently drops off `grace` minutes after its own mark — not a single
+    global cutoff.
+- Configurable via new **Scheduled-start selection** Settings section (mirrors the existing
+  Scheduled-end credit section): enabled toggle, standard start time, two early option times,
+  grace period in minutes. Defaults match the confirmed bands (7:00 / 6:30 / 6:00 / 5 min grace)
+  but nothing is hardcoded — Julio can retune later without a code change.
+- **Flow (`submitPin()`):** clock-in → (if options returned) **"What time are you starting
+  work?"** modal, large buttons, forced choice (no dismiss — this is payroll data) → selecting an
+  option writes `declared_start_time` on the punch (raw `clock_in` is never touched, same
+  principle as the lunch deduction) → **then** the Corfix safety reminder fires. If no popup is
+  needed, flow is unchanged (straight to Corfix, same as before).
+- **Explicitly reordered per Julio's call:** safety reminder now always comes *after* the
+  start-time question, not simultaneously.
+- `adjustedTimes()` now uses `entry.declaredStart||entry.in` for the "in" side, and — when a
+  declared start exists — **skips rounding it** (it's already a clean, deliberately-chosen mark,
+  not a raw punch needing normalization). A declared start is honored even on an otherwise
+  auto-clocked entry (auto-clock only means the *out* side was synthetic; the declared start is
+  still real data from the employee's actual clock-in).
+- `dbRowToEntry()` maps the new `declared_start_time` column → `entry.declaredStart` everywhere
+  punches are loaded (Master Log, Supervisor Log, My Timecard, admin correction modal, exports —
+  all flow through `paidHours()`/`adjustedTimes()` automatically).
+- **Staleness guard:** editing a punch's raw clock-in via the admin/supervisor edit modal
+  (`saveEdit()`) or an employee's own My Timecard edit (`saveMyTcEdit()`) now clears
+  `declared_start_time` — prevents a stale declared value from silently overriding a legitimate
+  correction to the raw time.
+
+**Clock-out credited-time popup:**
+- Found the underlying gap while discussing this: `confirmClockOut()`'s toast showed the **raw**
+  punch-out time, never what the employee would actually be paid to after rounding/schedule
+  credit — e.g. a 3:07 PM punch showed "Punched out at 3:07 PM" even though paid hours reflected
+  3:00 PM, with zero indication of the discrepancy.
+- `confirmClockOut()` now compares `adjustedTimes(entry).out` (credited) against the raw punch,
+  and only when they differ by ≥60 seconds (avoids noise from sub-minute artifacts), shows a new
+  modal — large text, "You're clocked out at [credited time]", with the raw punch time noted
+  smaller underneath — instead of the plain toast. When they match, the existing toast is
+  unchanged (no new information to add, no extra tap).
+- Deliberately **not** a selection popup like the morning one — there's only one scheduled end
+  time (no per-employee exceptions the way mornings have), so there's nothing to choose between;
+  this is purely informational.
+
+**Verified:** `node --check` on `app.js` + two logic harnesses (28 assertions total):
+- 19 assertions on `computeStartTimeOptions()` covering every confirmed band boundary
+  (including the exact 6:06/6:36 transition minutes), the disabled-feature case, and a
+  zero-grace edge case that caught a real off-by-one (see below).
+- 9 assertions on `adjustedTimes()` covering declared-start bypassing rounding, an auto-clocked
+  entry still honoring a real declared start, an open punch with no declared start, and the
+  clock-out popup's difference threshold (rounds-down case, exact-match case, sub-minute noise
+  case).
+
+**Bug caught during testing (fixed before delivery):** the first implementation used a strict `<`
+comparison with a 6-minute grace default. Testing a grace=0 edge case exposed that this excluded
+the exact checkpoint minute itself (punching in at *exactly* 6:00 would have shown the popup
+without 6:00 as an option) — a real off-by-one, not just an edge-case curiosity. Fixed by
+switching to an inclusive `<=` comparison with grace=5 (matching Julio's own "5 min grace"
+wording) — produces the identical confirmed band boundaries while correctly treating landing
+exactly on time as never "late," even at zero grace.
+
+**Not built:** per-employee approval enforcement for the early options — Julio explicitly chose
+the simpler approach (all employees see the same bands based on punch-in time, honor system for
+who's actually authorized to be there early), not a per-employee allow-list.
 
 ---
 
