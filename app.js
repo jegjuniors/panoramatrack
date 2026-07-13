@@ -192,16 +192,20 @@ function computeStartTimeOptions(punchIn){
 }
 // Effective {in,out} after applying enabled rules. Synthetic punches untouched.
 function adjustedTimes(entry){
-  let inT=entry.declaredStart||entry.in,outT=entry.out;
-  if(!outT)return {in:inT,out:null};
-  if(entry.autoClocked||entry.estimatedOut)return {in:inT,out:outT};
-  if(APP_SETTINGS.schedEndEnabled)outT=applySchedEnd(inT,outT);
-  if(APP_SETTINGS.roundingEnabled){
-    // A declared start (v48.0) is already a clean, deliberately-chosen mark (6:00/6:30/7:00) —
-    // don't re-round it, only round the raw "in" when no declared start was made.
-    if(!entry.declaredStart)inT=roundTime(inT,APP_SETTINGS.roundingMinutes);
-    outT=roundTime(outT,APP_SETTINGS.roundingMinutes);
+  let inT=entry.declaredStart||entry.in;
+  const skipRounding=entry.autoClocked||entry.estimatedOut; // synthetic — leave exact, in & out both
+  // v48.1: the "in" side is resolved up front — declared start honored, or rounded — independent
+  // of whether the punch has a clock-out yet. Previously this only happened once outT existed, so
+  // an open punch's in-time stayed raw until it closed. Now My Timecard's "Paid" line can show the
+  // settled start time immediately; only the out side is genuinely still pending.
+  if(!entry.declaredStart&&!skipRounding&&APP_SETTINGS.roundingEnabled){
+    inT=roundTime(inT,APP_SETTINGS.roundingMinutes);
   }
+  if(!entry.out)return {in:inT,out:null};
+  let outT=entry.out;
+  if(skipRounding)return {in:inT,out:outT};
+  if(APP_SETTINGS.schedEndEnabled)outT=applySchedEnd(inT,outT);
+  if(APP_SETTINGS.roundingEnabled)outT=roundTime(outT,APP_SETTINGS.roundingMinutes);
   return {in:inT,out:outT};
 }
 // Paid hours for a punch (null if still open). Used everywhere hours are totalled.
@@ -409,6 +413,32 @@ function myTcRunningHours(punches){
     }
   });
   return {hours:total,pendingWaiveCount:pendingWaives};
+}
+
+// v48.1: per-day paid/raw hour totals for the My Timecard day-group headers.
+// raw = adjusted elapsed time BEFORE the lunch deduction; paid = AFTER. The difference is
+// exactly the lunch minutes taken that day, shown as a small note next to the day total.
+// Pending lunch-waive punches are counted as-if-approved, mirroring myTcRunningHours, so the
+// day total stays consistent with the period total shown above the list.
+function myTcDayHours(punches){
+  let paid=0,raw=0,pendingWaives=0,anyOpen=false;
+  (punches||[]).forEach(e=>{
+    if(!e.out){anyOpen=true;return;} // still clocked in — not part of any total yet
+    const a=adjustedTimes(e);
+    raw+=Math.max(0,(a.out-a.in)/3600000);
+    if(isPendingWaive(e)){
+      pendingWaives++;
+      const orig=e.lunchWaived;
+      e.lunchWaived=true;
+      const ph=paidHours(e);
+      e.lunchWaived=orig; // restore — never mutate the real record
+      if(ph!=null)paid+=ph;
+    } else {
+      const ph=paidHours(e);
+      if(ph!=null)paid+=ph;
+    }
+  });
+  return {paid,raw,pendingWaives,anyOpen};
 }
 
 function updateClock(){
@@ -1306,33 +1336,60 @@ function renderMyTcList(){
   }
   const isSupEmp=myTcEmp&&myTcEmp.dept==='Supervisor';
   const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
-  list.innerHTML=myTcPunches.map(e=>{
-    // v47.0: per-punch editability based on its own site's stage
-    const punchStage=myTcSiteStageMap[e.jobsite]||TC_STAGE.OPEN;
-    const punchEditable=(punchStage===TC_STAGE.OPEN);
-    const punchLocked=stageAtLeast(punchStage,lockThreshold);
-    const stillIn=!e.out;
-    const badges=[
-      stillIn?'<span class="badge b-in">In</span>':'',
-      e.manualEntry?'<span class="badge b-amber">✎ Manual</span>':'',
-      e.autoClocked?'<span class="badge" style="background:#3a1f1f;color:#e08585;">Auto-clocked</span>':'',
-      punchLocked?'<span class="badge" style="background:var(--bg3);color:var(--txt3);font-size:9px;">🔒</span>':'',
-      (!punchEditable&&!punchLocked)?'<span class="badge" style="background:var(--amber-l);color:var(--amber);font-size:9px;">Submitted</span>':''
-    ].filter(Boolean).join(' ');
-    return `<div class="card" style="margin-bottom:10px;${punchLocked?'opacity:0.65;':''}">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-        <div>
-          <div style="font-weight:600;font-size:13px;color:var(--txt);">${fmtDt(e.in)}</div>
-          <div style="font-size:12px;color:var(--txt2);margin-top:2px;">${e.jobsite||'—'}</div>
-          <div style="font-size:12px;color:var(--txt2);margin-top:2px;">
-            In: ${fmt(e.in)} &nbsp;→&nbsp; Out: ${e.out?fmt(e.out):'—'}
-          </div>
-          ${(e.activity&&e.activity.length)?`<div style="font-size:11px;color:var(--txt3);margin-top:4px;">${e.activity.join(', ')}</div>`:''}
-        </div>
-        <div style="text-align:right;">${badges}</div>
-      </div>
-      ${punchEditable?`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`:''}
+
+  // v48.1: group into calendar-day buckets. myTcPunches is fetched ordered by clock_in
+  // descending, so same-day punches are always contiguous — a single pass is enough.
+  const groups=[];
+  myTcPunches.forEach(e=>{
+    const key=toDateStr(e.in);
+    const g=groups[groups.length-1];
+    if(!g||g.key!==key)groups.push({key,date:e.in,entries:[e]});
+    else g.entries.push(e);
+  });
+
+  list.innerHTML=groups.map((g,gi)=>{
+    const {paid,raw,anyOpen}=myTcDayHours(g.entries);
+    const lunchMin=Math.round((raw-paid)*60);
+    const totalParts=[`${paid.toFixed(2)}h`];
+    if(lunchMin>=1)totalParts.push(`−${lunchMin}m lunch`);
+    if(anyOpen)totalParts.push('still open');
+    const header=`<div style="display:flex;justify-content:space-between;align-items:baseline;margin:${gi===0?'0':'18px'} 0 8px;padding-bottom:4px;border-bottom:0.5px solid var(--bdr2);">
+      <span style="font-size:12px;font-weight:600;color:var(--txt2);">${g.date.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})}</span>
+      <span style="font-size:12px;font-weight:700;color:var(--txt);">${totalParts.join(' · ')}</span>
     </div>`;
+    const cards=g.entries.map(e=>{
+      // v47.0: per-punch editability based on its own site's stage
+      const punchStage=myTcSiteStageMap[e.jobsite]||TC_STAGE.OPEN;
+      const punchEditable=(punchStage===TC_STAGE.OPEN);
+      const punchLocked=stageAtLeast(punchStage,lockThreshold);
+      const stillIn=!e.out;
+      const a=adjustedTimes(e); // v48.1: {in,out} used for the bold "Paid" line below
+      const paidHrs=paidHours(e);
+      const badges=[
+        stillIn?'<span class="badge b-in">In</span>':'',
+        e.manualEntry?'<span class="badge b-amber">✎ Manual</span>':'',
+        e.autoClocked?'<span class="badge" style="background:#3a1f1f;color:#e08585;">Auto-clocked</span>':'',
+        punchLocked?'<span class="badge" style="background:var(--bg3);color:var(--txt3);font-size:9px;">🔒</span>':'',
+        (!punchEditable&&!punchLocked)?'<span class="badge" style="background:var(--amber-l);color:var(--amber);font-size:9px;">Submitted</span>':''
+      ].filter(Boolean).join(' ');
+      return `<div class="card" style="margin-bottom:10px;${punchLocked?'opacity:0.65;':''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+          <div style="flex:1;">
+            <div style="font-size:12px;color:var(--txt2);">${e.jobsite||'—'}</div>
+            <div style="font-size:13px;font-weight:700;color:var(--txt);margin-top:3px;">
+              Paid: ${fmt(a.in)} &nbsp;→&nbsp; ${a.out?fmt(a.out):'—'}${paidHrs!=null?` · ${paidHrs.toFixed(2)}h`:''}
+            </div>
+            <div style="font-size:11px;color:var(--txt3);margin-top:2px;">
+              Actual: ${fmt(e.in)} &nbsp;→&nbsp; ${e.out?fmt(e.out):'—'}
+            </div>
+            ${(e.activity&&e.activity.length)?`<div style="font-size:11px;color:var(--txt3);margin-top:4px;">${e.activity.join(', ')}</div>`:''}
+          </div>
+          <div style="text-align:right;flex-shrink:0;">${badges}</div>
+        </div>
+        ${punchEditable?`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`:''}
+      </div>`;
+    }).join('');
+    return header+cards;
   }).join('');
 }
 

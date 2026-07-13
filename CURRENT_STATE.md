@@ -1,6 +1,6 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v48.0 *(Scheduled-start selection popup + clock-out credited-time popup)*
+**Current Version:** v48.1 *(My Timecard transparency: day-grouped Paid vs Actual times)*
 **Last Updated:** July 13, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
@@ -9,6 +9,67 @@
 
 > **Migration required:** run `migration_v48_start_time.sql` in the Supabase SQL editor before
 > deploying this version — adds `punches.declared_start_time` and 5 new `pt_settings` columns.
+> (Carried over from v48.0 — unchanged by v48.1.)
+
+---
+
+## ✅ v48.1 — My Timecard transparency: day-grouped Paid vs Actual times
+
+**Context:** Julio's ask — employees should be able to see both their actual clocked in/out
+times and the rounded/credited/selected times used to calculate paid hours, side by side, with
+the calculated time bolder and the actual time visually secondary, plus a daily total so the
+picture is grouped by day rather than a flat punch list. Confirmed design choices (asked as
+numbered options, Julio picked per-item):
+1. Show both Paid and Actual lines always, even when identical — consistent UX over minimalism.
+2. Show a day total even on single-punch days — consistent grouped-by-day layout.
+3. Show the lunch deduction as a note next to the day total when it applies.
+4. An open punch (not yet clocked out) should already show what its rounded/declared-start time
+   will settle to on the Paid line — only the out side is genuinely still pending.
+
+**Bug found and fixed along the way:** `adjustedTimes()` only resolved (rounded, or honored a
+declared start) the "in" side of a punch *after* confirming a clock-out existed — so an open
+punch's in-time stayed completely raw until the employee clocked out, even though the eventual
+rounded/declared value is already fully determined by the in-punch alone. Restructured so the
+"in" side is resolved up front regardless of whether `out` exists yet; the "out" side is
+unaffected and still `null` until a real clock-out happens. Synthetic (auto-clocked/estimated)
+punches continue to skip all rounding on both sides, unchanged. This is a fix in the shared
+pay-rule engine, so it also cleans up the day-view "clock in" time for an employee's still-open
+punch anywhere else `adjustedTimes()` feeds a per-day rollup (Master Log Report / Excel Pack
+`consolidate()`), not just My Timecard — flagged here since it wasn't the original target but is
+the same underlying computation.
+
+**What shipped (`app.js`):**
+- `adjustedTimes()` reworked (see bug note above) — behavior for closed, non-synthetic punches is
+  unchanged; only the open-punch in-time and the (unused elsewhere) synthetic-open case changed.
+- New `myTcDayHours(punches)` helper — per-day paid vs. raw (pre-lunch-deduction) hour totals,
+  plus an `anyOpen` flag. Pending lunch-waive punches are counted as-if-approved, mirroring the
+  existing `myTcRunningHours()` pattern, so the day total stays consistent with the period total
+  shown above the list.
+- `renderMyTcList()` restructured: punches are bucketed into calendar-day groups (single pass,
+  relying on the existing clock_in-descending fetch order so same-day punches are contiguous).
+  Each day gets a header showing the date, the day's paid-hours total, a `−Xm lunch` note when
+  the lunch deduction applied that day, and `still open` when a punch in that day hasn't been
+  clocked out yet. Each punch card now shows a bold **Paid: in → out · X.XXh** line (using
+  `adjustedTimes()` + `paidHours()`) above a smaller, dimmer **Actual: in → out** line (raw
+  `e.in`/`e.out`) — replacing the old single "In: … → Out: …" line and the redundant per-punch
+  date header (now covered by the day-group header instead).
+
+**Verified:** `node --check` on `app.js` + a 27-assertion logic harness covering:
+- `adjustedTimes()`: rounding disabled passthrough (regression), open punch with rounding
+  (new behavior — in gets rounded), open punch with a declared start (declared value used
+  as-is, unrounded), open + synthetic (defensive edge case — stays raw), closed + rounding
+  (regression), closed + declared start (regression), closed + synthetic (regression, both
+  sides raw), sched-end credit still applies normally on a closed punch (regression).
+- `myTcDayHours()`: single punch under lunch threshold (raw===paid), single punch over
+  threshold (30-min gap surfaces correctly), multi-punch day with one open punch (paid total
+  excludes the open one, `anyOpen` true), pending lunch-waive counted as approved without
+  mutating the stored `lunchWaived` flag.
+- Day-grouping bucket logic (extracted standalone): 3 punches spanning 2 calendar days group
+  correctly (2 in today's group, 1 in yesterday's), preserving arrival order within each group.
+
+**Not built / deferred:** "why" explanatory tags next to the Paid line (e.g. "(rounded)",
+"(you selected 7:00 start)") — Julio went with the simpler bold/dim contrast for v1; can add
+later if employees are still confused by the two numbers.
 
 ---
 
