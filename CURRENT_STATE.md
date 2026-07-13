@@ -1,11 +1,44 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.5 *(Overview "Ready to Export" tile now spans current + last period)*
+**Current Version:** v47.6 *(Admin correction modal now flags punches needing attention)*
 **Last Updated:** July 13, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
-> actual app was already at v47.4 per the `index.html` version badge and in-code comments). This
-> entry picks up from the real current state; the v44.1–v47.4 history isn't backfilled here.
+> actual app was already at v47.4 per the `index.html` version badge and in-code comments before
+> this session). The v47.5 and v47.6 entries below are current; v44.1–v47.4 history isn't
+> backfilled here.
+
+---
+
+## ✅ v47.6 — Admin correction modal: per-punch flags
+
+**Problem:** `openAdminEmpCorrect()` / `refreshAdminEmpCorrect()` (the modal that opens when an
+admin clicks an employee's name in the Submissions panel) listed every punch for the period but
+gave no visual indication of which ones were actually flagged — same three categories the
+Submissions panel already rolls up into that employee's row-level "⚠️ ..." summary one screen up
+(unresolved auto-clock, pending lunch waive, punch after submission), just not surfaced per punch
+here. Admin had to open each punch to check.
+
+**Fix (`refreshAdminEmpCorrect()`):**
+- Now also fetches the employee's `pt_timecard_status` rows for the period via
+  `getEmployeeStatusRows()` (needed to evaluate `isOutOfSubmission` per punch, which requires each
+  punch's own jobsite's status row).
+- Per punch: `autoFlag = autoClocked && !editedAfterAuto`, `waiveFlag = isPendingWaive(e)`,
+  `oosFlag = isOutOfSubmission(e,row)` — same helpers used elsewhere, no new logic invented.
+- Flagged punches: hours text turns red + bold; a small red "⚠️ …" label appears under the
+  jobsite/time line naming which reason(s) apply (e.g. "Unresolved auto-clock · Pending lunch
+  waive"), so the admin knows *why* without opening it.
+- Confirmed (no code change needed): the modal's "Edit" button already opens the shared
+  `openEditModal()`, which unconditionally shows the lunch-waive approve/deny block whenever a
+  punch has a pending request — so waive resolution already works from this modal, and the list
+  already auto-refreshes after save.
+- Also confirmed: hours shown in this modal were already `paidHours(e)` — the same fully-adjusted
+  (scheduled-end credit + rounding + lunch deduction) figure used everywhere else hours are
+  totaled, not raw elapsed time.
+
+**Verified:** `node --check` on `app.js` + a 16-assertion logic harness covering all three flag
+types individually, resolved states no longer flagging (edited auto-clock, decided waive), missing
+status row, still-open stage, and a multi-flag punch combining all three reasons.
 
 ---
 

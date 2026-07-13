@@ -4264,24 +4264,43 @@ async function refreshAdminEmpCorrect(){
   const period=subStatusPeriod(); // same Current/Last toggle as the panel underneath
   document.getElementById('admin-correct-period').textContent=
     `${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
-  const {data,error}=await sb.from('punches').select('*')
-    .eq('employee_id',_adminCorrectEmpId)
-    .gte('clock_in',period.start.toISOString())
-    .lte('clock_in',period.end.toISOString())
-    .order('clock_in',{ascending:false});
+  // v47.6: also fetch this employee's status rows so out-of-submission can be checked per punch
+  // (needs each punch's own jobsite's row — same helper the My Timecard panel uses).
+  const [punchRes,statusRows]=await Promise.all([
+    sb.from('punches').select('*')
+      .eq('employee_id',_adminCorrectEmpId)
+      .gte('clock_in',period.start.toISOString())
+      .lte('clock_in',period.end.toISOString())
+      .order('clock_in',{ascending:false}),
+    getEmployeeStatusRows(_adminCorrectEmpId,period.start)
+  ]);
+  const {data,error}=punchRes;
   const list=document.getElementById('admin-correct-list');
   if(error){list.innerHTML='<p style="text-align:center;color:var(--red);padding:20px;font-size:13px;">Could not load punches — check connection.</p>';return;}
   const entries=(data||[]).map(dbRowToEntry);
   if(!entries.length){list.innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">No punches recorded for this period.</p>';return;}
+  // v47.6: per-punch flags — the same three categories the Submissions panel already rolls up
+  // into the employee-level "⚠️ ..." summary one screen up, surfaced per punch here so the admin
+  // can see exactly which record needs attention instead of opening each one to check.
   list.innerHTML=entries.map(e=>{
     const hrs=paidHours(e);
+    const row=statusRows.find(r=>r.jobsite===e.jobsite)||null;
+    const autoFlag=e.autoClocked&&!e.editedAfterAuto;
+    const waiveFlag=isPendingWaive(e);
+    const oosFlag=isOutOfSubmission(e,row);
+    const flagged=autoFlag||waiveFlag||oosFlag;
+    const flagParts=[];
+    if(autoFlag)flagParts.push('Unresolved auto-clock');
+    if(waiveFlag)flagParts.push('Pending lunch waive');
+    if(oosFlag)flagParts.push('Punch after submit');
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
       <div style="min-width:0;">
         <span style="font-size:13px;color:var(--txt);font-weight:600;">${e.jobsite||'—'}</span>
         <div style="font-size:11px;color:var(--txt2);margin-top:2px;">${fmtDt(e.in)} – ${e.out?fmtDt(e.out):'still clocked in'}</div>
+        ${flagged?`<div style="font-size:11px;color:var(--red);margin-top:2px;">⚠️ ${flagParts.join(' · ')}</div>`:''}
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
-        <span style="font-size:12px;color:var(--txt2);">${hrs!=null?hrs.toFixed(2)+'h':'—'}</span>
+        <span style="font-size:12px;color:${flagged?'var(--red)':'var(--txt2)'};font-weight:${flagged?'700':'400'};">${hrs!=null?hrs.toFixed(2)+'h':'—'}</span>
         <button class="btn-sm" onclick="openEditModal('db:${e.dbId}')" style="background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">Edit</button>
       </div>
     </div>`;
