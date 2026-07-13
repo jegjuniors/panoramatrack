@@ -258,7 +258,7 @@
 </div>
 
 <!-- ══ MY TIMECARD (employee self-edit, v41.0) ══ -->
-<div id="screen-mytc" class="screen" style="padding:max(1.75rem, calc(env(safe-area-inset-top) + 8px)) 1rem 40px;max-width:420px;margin:0 auto;">
+<div id="screen-mytc" class="screen" style="padding:1.75rem 1rem 40px;max-width:420px;margin:0 auto;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
     <h2 style="font-size:17px;margin:0;color:var(--txt);" id="mytc-name">My Timecard</h2>
     <button onclick="closeMyTimecard()" style="background:none;border:none;color:var(--txt2);font-size:13px;cursor:pointer;font-family:inherit;">✕ Close</button>
@@ -483,7 +483,7 @@
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-bottom:18px;">
       <div class="stat-card" onclick="goToReport({today:true})" style="cursor:pointer;" title="View today's report"><p style="font-size:10px;color:var(--txt2);margin-bottom:3px;">Clocked in now</p><p style="font-size:28px;font-weight:600;color:var(--txt);" id="m-stat-in">0</p></div>
       <div class="stat-card" onclick="switchMasterTab('employees')" style="cursor:pointer;" title="View employees"><p style="font-size:10px;color:var(--txt2);margin-bottom:3px;">Total employees</p><p style="font-size:28px;font-weight:600;color:var(--txt);" id="m-stat-emps">0</p></div>
-      <div class="stat-card" onclick="switchMasterTab('submissions')" style="cursor:pointer;" title="View timecards ready to export"><p style="font-size:10px;color:var(--txt2);margin-bottom:3px;">Timecards Ready to Export</p><p style="font-size:28px;font-weight:600;color:var(--green);" id="m-stat-ready">0</p></div>
+      <div class="stat-card" onclick="goToReadyExports()" style="cursor:pointer;" title="View timecards ready to export"><p style="font-size:10px;color:var(--txt2);margin-bottom:3px;">Timecards Ready to Export</p><p style="font-size:28px;font-weight:600;color:var(--green);" id="m-stat-ready">0</p></div>
       <div class="stat-card" onclick="goToReport({flags:true})" style="cursor:pointer;" title="View records needing review"><p style="font-size:10px;color:var(--txt2);margin-bottom:3px;">Needs review ⚠️</p><p style="font-size:28px;font-weight:600;color:var(--amber);" id="m-stat-flags">0</p></div>
     </div>
     <p class="label-xs" style="margin-bottom:10px;">Live by jobsite</p>

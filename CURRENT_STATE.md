@@ -1,442 +1,39 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v47.5 *(send-back windows widened both directions + iPhone Dynamic Island safe-area fix)*
-**Last Updated:** July 9, 2026
+**Current Version:** v47.5 *(Overview "Ready to Export" tile now spans current + last period)*
+**Last Updated:** July 13, 2026
+
+> Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
+> actual app was already at v47.4 per the `index.html` version badge and in-code comments). This
+> entry picks up from the real current state; the v44.1–v47.4 history isn't backfilled here.
 
 ---
 
-## ✅ v47.5 — Send-back available in both windows + My Timecard reachable under the Dynamic Island
-
-Two unrelated changes bundled into one build.
-
-### Change 1 — Send-back windows widened (supervisor + admin)
-Requested: supervisors and admins could each only send a card back in *one* stage window. Widened both so a card can be bounced back before *or* after the next handoff.
-
-**Supervisor "Send back" → employee** (`refreshSupLog` gate ~1862, `supSendBackToEmployee`):
-- Before: only at `sup_submitted` (already sent to office), gone once anything exported.
-- Now: at **`emp_submitted`** (employee handed in, not yet sent to office — bounce for changes) **and** `sup_submitted` (sent to office, not yet exported). Still blocked once any site is exported (admin-only past that point).
-- At `emp_submitted` the supervisor card now shows **both** "Send to office" (accept) and "Send back" (bounce) — the intended review/accept-or-reject pair. Employee's own "Pull back" still coexists; all routes reset to `open`.
-
-**Admin "Send back" → supervisor** (Submissions panel gate ~4377, `adminSendBack`):
-- Before: only at `exported`.
-- Now: at **`sup_submitted`** (sent to office, not yet exported) **and** `exported`. Shows next to the green ✓ ready indicator on a sup_submitted site.
-
-Reset target unchanged for both: still `→ open` (gives the supervisor the "not submitted" chip + Force Submit; the v47.2 rationale for open-vs-sup_submitted still holds). No new stage transitions, no schema change. Confirm/alert copy in both functions generalized so it no longer assumes a specific origin stage ("re-send to office" wording removed from the emp_submitted path; "exported" wording removed from the admin pre-export path).
-
-### Change 2 — iPhone Dynamic Island / safe-area (My Timecard "Close" unreachable)
-An employee on an iPhone 14 Pro (installed PWA) couldn't reach the "✕ Close" link — the top of the My Timecard screen was painted *under* the Dynamic Island, forcing a force-quit to escape.
-
-**Root cause:** viewport is `viewport-fit=cover` (index.html line 5), which draws edge-to-edge and hands safe-area responsibility to the app — but **nothing in the app used `env(safe-area-inset-*)` anywhere**. `#screen-mytc` set its top padding inline to `1.75rem` (~28px); the 14 Pro's top inset is ~59px, so the header (title + Close) sat ~30px up under the island/status bar, hard to see and untappable. Notch-less phones fit under 28px, which is why only this one device hit it.
-
-**Fix (Choice A — targeted, regression-proof):** `#screen-mytc` top padding is now
-`max(1.75rem, calc(env(safe-area-inset-top) + 8px))` — on non-notch devices `env()` = 0 so `max()` keeps the original 1.75rem (zero visual change anywhere else); on the 14 Pro it becomes ~67px, dropping the header cleanly below the island with an 8px gap. Bottom padding left at 40px (clears the ~34px home indicator). No JS, no device detection.
-
-**Known latent (deferred):** the same inline-top-padding pattern exists on every other `.screen` (`#screen-activity`, login screens, etc.) and on fixed-overlay modals. Those aren't yet safe-area-aware. A proper app-wide pass belongs in `styles.css` (not in this session's zip; the per-screen inline paddings would override a class rule, so it needs a small refactor). Ship `styles.css` when ready to do Change 2 globally.
-
-**Verified:** `node --check` clean; 10-assertion send-back gate harness green (supervisor shows at emp/sup, hidden at open and once exported; admin shows at sup/exported, hidden at open/emp).
-
-**Files touched:** `app.js`, `index.html` (safe-area + version badge), `CURRENT_STATE.md`. No schema change, no SQL.
-
----
-
-## ✅ v47.4 — Orphaned `pt_timecard_status` rows: phantom sites everywhere they're read
-
-Two bugs reported from live testing (screenshots), same root cause, plus a third latent one they were masking.
-
-### Symptoms
-1. **Employee My Timecard submit bar offered sites the employee has no punches at.** Anthony's card showed "✓ Submitted (Bluevale, Francesco)" *and* a live "Submit my timecard (Block 22, T1 Conversion) →" button — but his only actual punches were at Bluevale and Francesco.
-2. **Supervisor Time log showed "Not submitted" *and* a live "Send to office" button on the same employee row simultaneously.** Loc (supervising Francesco · T1 Conversion) saw Anthony as "Not submitted" with a green "Send to office" — contradictory.
-3. **(Latent, not yet hit)** `isFullyReadyForExport` would have blocked Anthony from *ever* being exportable, because a stray `open` row for a site he doesn't work counts against the all-sites-ready check forever.
-
-### Root cause
-`pt_timecard_status` is keyed `(employee_id, period_start, jobsite)` — one row per site worked, written on submit. When a punch's **jobsite is edited away** (or the punch is deleted) so the employee no longer has any punch at the old site, that site's status row was **never cleaned up**. It lingered (usually at `open`, e.g. left behind by a pull-back before the punches were moved). Every consumer that derives "sites worked" from **status rows** instead of **actual punches** then picked up the ghost:
-- `renderMyTcSubmitBar` (`app.js` ~1082) explicitly folds status-row sites into `workedSites` even with no punches → ghost `open` rows became phantom "Submit" sites.
-- `refreshSupLog` (`app.js` ~1832) builds the per-employee chip from `minStage(mySiteRows)` (status rows scoped to the supervisor's sites) → a ghost `open` row dragged the chip to "Not submitted" while a real `emp_submitted` row still lit the "Send to office" button.
-- `isFullyReadyForExport` (`app.js` ~278) unions worked-sites with row-sites → a ghost `open` row fails the "every site at sup_submitted" test permanently.
-
-Force Submit was already immune — it derives its sites from `recordSites` (actual punches), which is the correct pattern the other three didn't follow.
-
-### The fix — clean at the source (data hygiene)
-Rather than patch three consumers (whack-a-mole, and the export union deliberately includes row-sites), the orphan row is deleted the moment it's created, so all three self-correct untouched.
-
-- **New `cleanupOrphanStatusRow(empId, jobsite, period)`** (near `setTimecardStage`, `app.js` ~276): if the employee has **zero** punches at `jobsite` in `period`, delete that status row. **Guarded to `open`/`emp_submitted` only** — never touches `sup_submitted`/`exported` (a row a supervisor or the office already acted on is left alone; a stray `sup_submitted` ghost carries 0 hrs and doesn't block export, so it's harmless).
-- **New `periodContaining(date)`** (`app.js` ~257): walks `getPeriodByOffset(0..6)` to find the period a punch's clock-in falls in (needed so cleanup targets the *old* punch's period even if a date edit moved it; falls back to current period on invalid/out-of-range).
-- **Three call sites**, each capturing the pre-edit site/date **before** it's overwritten and running cleanup **before** the refresh/reload:
-  - `saveMyTcEdit()` edit branch — before `openMyTimecard(emp)` reloads.
-  - `saveEdit()` edit branch — after the DB write, before the panel refreshes.
-  - `deletePunch()` — after the delete succeeds.
-  - Add/insert paths get nothing (adding work can't orphan a site). Cleanup runs on **every** edit (not just jobsite-change) — one indexed query, idempotent — so it also sweeps the rarer "date edit moved a punch to another period" orphan for free.
-
-### Existing bad rows
-A one-time SQL script (`cleanup_orphan_status_v47_4.sql`) removes rows already sitting in the DB (Anthony's and any others). **Preview SELECT first, DELETE commented out** — run the SELECT, eyeball the list, then uncomment/run the DELETE. Padded ±1 day on the punch-exists check so no timezone edge case removes a legitimate row.
-
-**Verified:** `node --check` clean; 9-assertion logic harness green (stage guard deletes open/emp_submitted, preserves sup_submitted/exported; `periodContaining` maps current/last/ancient/invalid/null correctly).
-
-**Files touched:** `app.js`, `index.html` (version badge), `CURRENT_STATE.md`, `cleanup_orphan_status_v47_4.sql` (new, run once in Supabase). No schema change.
-
----
-
-## ✅ v47.3 — Admin overview tiles reworked + supervisor per-employee "Send to office"
-
-Three small UX asks bundled together — two on the admin overview panel, one on the supervisor Time log — plus the batch send button rename.
-
-### Fix 1: "Needs Review" tile now scoped to current pay period only
-
-**The problem:** the tile hit `punches WHERE auto_clocked=true AND edited_after_auto=false` with no period filter. Prior-period auto-clocks that never got resolved (or never *needed* resolving) piled up in the count forever. Julio noticed the tile showing a higher number than the current period actually tracks.
-
-**The fix:** added `.gte('clock_in', period.start)` and `.lte('clock_in', period.end)` to the query, where `period = getPeriodByOffset(0)` (current). Prior periods should already be resolved (via admin override, correction, or supervisor send-back flows), so scoping out is cleaner than counting the historical residue.
-
-### Fix 2: "Today punches" tile replaced with "Timecards Ready to Export"
-
-**The problem:** the old tile just counted `timeLog.filter(l => l.in >= today).length` — a raw punch count that told nobody anything actionable. Not what Brad (payroll) or the admin needs to see at a glance.
-
-**The new tile — "Timecards Ready to Export":**
-- **Count = employees whose EVERY current-period worked site is at `sup_submitted` and nothing yet exported.** That's exactly what `isFullyReadyForExport` returns, and exactly what Brad's Export button picks up.
-- **Behavior with send-backs (this is the "live" part Julio asked for):**
-  - Admin send-back moves a row `exported → open` → employee drops out of the count (no longer fully ready)
-  - Supervisor send-back to employee moves a row `sup_submitted → open` → drops out
-  - Supervisor sends the last outstanding site → adds to the count
-  - Once exported → drops out (no longer waiting)
-- **Live-ness scope (Option A from the discussion):** the count is accurate whenever you look at the overview tab, because `switchMasterTab('overview')` calls `refreshMasterOverview()`. No realtime subscription needed — going to another tab and coming back always shows current state, and any admin action that changes state (send-back, override, export) already leaves the overview.
-- **Clickable:** jumps to the Timecards tab (`switchMasterTab('submissions')`) so the admin can act on whoever's ready.
-- **Colour:** `var(--green)` — matches the "ready to act" affordance of the Export button.
-- **ID renamed:** `m-stat-punches` → `m-stat-ready` (the old ID leaks the old meaning; the new ID is honest about what it holds).
-
-### Fix 3: Per-employee "Send to office" button on the supervisor Time log
-
-**The workflow Julio wants:** review one employee at a time and send just that one, without needing to fire the batch. Especially useful for employees at multiple sites where the supervisor wants to hand off one at a time.
-
-**Implementation:**
-- New button `Send to office` on each employee's header row on the supervisor card, in green (matches the batch button below).
-- Shows when the employee has any sites at `emp_submitted` at THIS supervisor's own sites.
-- Action: sets those `emp_submitted` rows → `sup_submitted`. Same DB write as the batch button, just scoped to one employee's rows.
-- New function `supSendEmployeeToOffice(empId, empName)` alongside the existing `supSendBackToEmployee` and `forceSubmitEmployee`. Loads fresh status rows, filters to sendable ones, presents a confirmation dialog listing the sites and period, fires the writes on confirm.
-- **Coexists with the other two per-employee buttons.** All three can appear on the same employee when their sites straddle states:
-  - Force Submit → shown for sites at `open` where the employee has punches (never submitted)
-  - Send to office → shown for sites at `emp_submitted` (this v47.3 addition)
-  - Send back → shown for sites at `sup_submitted` with nothing exported
-- The mixed-state case (say, 2 sites at emp_submitted, 1 at sup_submitted) now surfaces both Send to office AND Send back on the same header — the supervisor sees the state without any extra explanatory UI.
-
-### Fix 4: Batch button relabelled
-
-`Submit site to office` → `Send all Timecards to office`. Behaviour is unchanged — it still only picks up `emp_submitted` rows for this supervisor's sites and fires them all to `sup_submitted` at once. The rename just aligns the wording with the new per-employee button ("Send to office"): batch = all, per-employee = one.
-
-### Version badge bumped
-
-`index.html` line 220 and `app.js` app_version string both moved to `v47.3`.
-
-**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change.
-
----
-
-## ✅ v47.2 — Three post-v47.0 bugs: admin send-back visibility, Force Submit filter alignment, stale-row cleanup
-
-Three related issues surfaced once v47.0 (per-site lifecycle rework) hit real use, plus the version badge itself — which Julio noticed the app was still displaying `V46.2` because the whole v47.x line hadn't been deployed yet. All four addressed in a single contained bump.
-
-### Fix 1: Admin send-back now resets to `open`, not `sup_submitted`
-
-**The problem:** v47.0's `adminSendBack` targeted `sup_submitted` (per the original "send back to supervisor" design decision). But `sup_submitted` on the supervisor's UI reads as **"sent to office"** — identical to the state before admin sent it back. Supervisor had no visual signal that anything happened, and no clear action path.
-
-**The fix:** Change `adminSendBack` target from `TC_STAGE.SUP` → `TC_STAGE.OPEN` (~line 4352). Result on supervisor side: chip flips to "not submitted", Force Submit button appears, Send Back button disappears (row no longer at `sup_submitted`). Enables the "quickly review, edit, force submit, done" workflow — no employee involvement needed, useful for departed workers. Confirmation dialog wording updated to reflect the new destination.
-
-This reverses the v47.0 Q&A design decision. The original reasoning ("supervisor decides next") stands — it's just that "supervisor decides next" requires a state that visually signals action is needed, and `sup_submitted` didn't do that.
-
-### Fix 2: Force Submit no longer fails after supervisor send-back with "already submitted"
-
-**Root cause:** A v44.2 half-fix. Back in v44.2, the Force Submit **button visibility** on the supervisor card was widened from `!r` (missing row only) to `!r || r.stage === TC_STAGE.OPEN` (missing OR at open) — the comment at line 1800-1805 explicitly documents this. But the **click handler** (`forceSubmitEmployee` line 2026) was never aligned with the wider filter:
-
-```js
-// Line 2026 before v47.2:
-const openSites = [...new Set(punches.map(p=>p.jobsite))]
-  .filter(s => sites.includes(s) && !rowsBySite[s]);
-```
-
-Result: after supervisor send-back (v47.0) set a row to `open`, the button correctly appeared, but clicking it hit the "already submitted" alert because `rowsBySite[s]` was truthy.
-
-**The fix:** One-line alignment. Change line 2026's filter to match the button-visibility filter:
-
-```js
-.filter(s => sites.includes(s) && (!rowsBySite[s] || rowsBySite[s].stage === TC_STAGE.OPEN));
-```
-
-After Fix 1 (admin send-back → `open`), this same fix now also enables the immediate Force Submit path after admin send-back, which is the whole point of Fix 1's design.
-
-### Fix 3: "Waiting on:" note and stale rows for sites the employee no longer works
-
-**Scenario:** Employee worked 4 sites, submitted, exported. Admin sent back the exported timecards (Fix 1 makes this reset to `open`). Employee opened My Timecard, deleted their punches at 2 of the 4 sites (they no longer work there), resubmitted the 2 sites they still work. Rows for the removed sites 3 & 4 sat at `open` in the DB — the employee had no punches at those sites so `submitMyTimecard`'s `allJobsites` filter (built from `myTcPunches.map(p=>p.jobsite)`) never touched them.
-
-**Two symptoms of the same underlying problem:**
-- (a) `blockingSites` calculation in `refreshSubmissionsPanel` computed "other sites" from the union of `sitesWorkedByEmp[empId]` (actual punches) AND `rows.map(r=>r.jobsite)` (all rows). Stale rows for the abandoned sites polluted the calc, showing them in the `waiting on:` note beside the ✓.
-- (b) `siteEmpSet` was built from the union of `allPunches` AND all `statusMap` rows. Stale rows caused the abandoned sites to appear as separate "Never submitted" rows in the admin panel — misleading, since the employee had no current-period punches there.
-
-**The fix — filter at the panel level (kills both symptoms in one place):**
-
-```js
-// Line 4183-4185: before v47.2 unioned punches + rows
-const siteEmpSet = {};
-allPunches.forEach(p => addToSite(p.jobsite, p.empId));
-// (Object.values(statusMap).forEach(...) line removed)
-```
-
-Now only employees with actual current-period punches at a site are included at that site in the admin panel. Also updated the `blockingSites` calc (~line 4223) to use `sitesWorkedByEmp[empId]` directly as belt-and-suspenders in case a future code path reintroduces orphan rows.
-
-Comment blocks at both locations explain the rationale so this doesn't get "helpfully" widened again.
-
-### Fix 4: Version badge now reflects v47.2
-
-Julio noticed the app UI was still displaying `V46.2` — this was because the whole v47.x line (v47.0, v47.1) hadn't been deployed yet. The badge text in `index.html` (line 220) and the `app_version` string in the Supabase backup payload (`app.js` line 4582) were both updated to `v47.2`. Once these files are deployed, the badge will read correctly.
-
-**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change.
-
----
-
-## ✅ v47.1 — Admin Timecards panel: cross-site blocker note beside the ✓ badge
-
-**Ask:** in the admin Timecards tab, an employee submitted at one site shows a ✓ but isn't exportable because another of their sites hasn't been sent to office yet. Ideally the ✓ should have a note beside it listing which other sites are still outstanding, so the admin can see at a glance who to nudge.
-
-**What was already there:** v45.1 built exactly this calculation (`blockingSites`), but I gated it to `_subPeriodMode==='last'` only and rendered it in the amber warning row *below* the name rather than beside the ✓. The reasoning at the time — "mid-period is noise" — didn't hold up: mid-period is actually when the admin most wants the answer to "why isn't this exportable yet."
-
-**The fix — small, targeted:**
-- Dropped the `_subPeriodMode==='last'` gate. Now shown for both current and last-period views.
-- Removed the `"Waiting on: X"` entry from `flagParts` (the amber warning row).
-- Rendered inline beside the ✓ badge as subtle gray text (`var(--txt3)`, size 11, weight 400) — reads as informational, not a warning:
-  - Before: `Ben ✓` (with amber "Waiting on: Kings" below, only in last-period view)
-  - After: `Ben ✓ waiting on: Kings` (both views, inline, subtle gray)
-- Only shows on `ready` (`sup_submitted` at this site) — not on `exported`. Once exported, the answer to "why" is no longer relevant.
-
-**Files touched:** `app.js`, `CURRENT_STATE.md`. No schema change, no HTML change.
-
----
-
-## ✅ v47.0 — Per-site lifecycle rework, master PDF consolidation, My Timecard quick-set
-
-Three fixes shipped together as a whole-number bump due to the structural nature of Fix 2.
-
-### Fix 1: Master admin PDF — one card per employee, all sites consolidated
-
-Previously `generateMasterPDF` grouped by jobsite → then by employee within each site, producing one timecard page per jobsite per employee. A multi-site employee like Ben (Bluevale + Kings) would appear on two separate pages. Now aligns with `generatePDF` (supervisor preview):
-
-- Groups by employee only. One consolidated timecard per employee.
-- Header field changed from `JOBSITE:` (single site) to `JOBSITE(S):` with all worked sites listed alphabetically.
-- Continued-page header changed from `${name} (${site}) — continued` to `${name} — continued`.
-- Page order: alphabetical by employee name across all sites (Option A).
-- Toast count: `empIds.length` (employee count, not site×employee).
-- Excel Pack and supervisor preview PDF unchanged.
-
-### Fix 2: Per-site timecard lifecycle rework
-
-Replaces the all-or-nothing lock model with a per-site model throughout My Timecard. Naturally resolves the v46.2 known multi-site lock edge case.
-
-**Employee My Timecard changes:**
-- New `myTcSiteStageMap` variable: `{jobsite: stage}` built from status rows each time `openMyTimecard` loads.
-- `renderMyTcList`: each punch gets per-site editability — Edit button only appears if that punch's site is at `open`. Locked punches show a 🔒 badge and reduced opacity. Submitted-but-pullable punches show a "Submitted" badge.
-- `openMyTcEdit`: guards against editing a locked-site punch (checks `myTcSiteStageMap`).
-- `openMyTcAdd`: only offers sites that are still `open` in the jobsite dropdown. If no sites are open, the button is hidden.
-- `renderMyTcSubmitBar`: handles mixed states — shows Submit button for open sites, Pull Back button for pullable sites, and locked note for locked sites, all simultaneously if needed. Site names shown when partial.
-- `submitMyTimecard`: only submits sites still at `open` (filters `allJobsites` to `openJobsites`).
-- `retractMyTimecard`: only retracts sites at the pullable stage (`emp_submitted` for regular, `sup_submitted` for supervisors). Locked sites left untouched. Notif shows which sites were pulled back.
-- `refreshMyTcCatchupState`: per-site — shows catch-up banner if ANY site is still open or pullable (no longer blocked by a locked site elsewhere).
-- `closeMyTimecard`: clears `myTcSiteStageMap`.
-
-**Supervisor "Send back to employee" (new):**
-- `supSendBackToEmployee(empId, empName)` — resets `sup_submitted → open` at the supervisor's own sites for this employee. Blocked if any of the employee's sites is already `exported`.
-- Button appears on the supervisor's employee card when any of their sites are at `sup_submitted` and nothing is exported yet.
-- Confirmation dialog explains the round-trip (employee re-submits → supervisor re-sends to office).
-
-**Admin post-export "Send back" (new):**
-- `adminSendBack(empId, jobsite, empName)` — resets `exported → sup_submitted` for a specific employee at a specific site. Supervisor then decides whether to return to employee or re-send.
-- Button appears on exported employees in the admin Submissions panel (per-site row).
-- Confirmation dialog explains the flow.
-
-### Fix 3: My Timecard edit modal — quick-set time buttons
-
-Added matching quick-set button rows to `#mytc-edit-modal-bg` for parity with the shared edit/add modal:
-
-- **Add mode:** Today/Yesterday 7:00 AM on clock-in, Today/Yesterday 3:15/3:30 PM on clock-out.
-- **Edit mode:** 3:15/3:30 PM on clock-out (same-date-as-clock-in, matching `quickSetEditOut` behavior).
-- New `quickSetMyTcEditOut(hh,mm)` function reads from `mytc-edit-in` and writes to `mytc-edit-out` (the shared modal's `quickSetEditOut` is hard-coded to its own field IDs).
-- `quickSetAddTime` already accepts a field ID, so no refactor needed — just pointed at `mytc-edit-in` / `mytc-edit-out`.
-- Delete and lunch waive controls remain intentionally off the employee modal (unchanged).
-
-**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change, no migration needed.
-
----
-
-### Known issues / open items
-
-- **Supervisor punch list scope** — cross-site punches still visible to all supervisors where an employee has punched. Decision deferred (discussed, not actioned in v47.0). May revisit with an awareness-note approach (Option B from discussion).
-- **RLS security pass** — still parked.
-- **Manual clock-out cleanup** — still parked.
-
----
-
-## ✅ v46.2 — Pull-back regression: Edit/Add buttons missing, stale "pull it back" reminder
-
-**Found during v46.1 testing:** after a supervisor pulled back their submitted timecard, the "Your timecard is submitted. Pull it back above to make changes." reminder still showed — and the per-punch Edit buttons and the "+ Add a missed punch" button were gone. The pull-back succeeded (rows were correctly reset to `open`, `renderMyTcSubmitBar` correctly re-rendered the submit button), but the punch list treated the timecard as still-submitted-but-not-locked. Not a v46.x regression — actually inherited from v44.0 — but only surfaced now because v46.0's supervisor auto-approval made pull-back the routine correction path.
-
-**Root cause:** one line in `openMyTimecard`:
-
-```
-myTcEditable=(myTcStatusRows.length===0);
-```
-
-This decided both whether Edit/Add buttons render and (by negation) whether the "pull it back to edit" reminder shows. It keyed off row *existence*, not row *stage*. `retractMyTimecard` resets each row's stage to `open` but leaves the rows in place — so on the next `openMyTimecard` load `myTcStatusRows.length` was still > 0 and `myTcEditable` came back false, despite every row genuinely being open again.
-
-**The fix — one-line:** `myTcEditable=(stage===TC_STAGE.OPEN)`. Editable whenever no site has advanced past open. Fresh timecards still qualify since `maxStage([])` returns `TC_STAGE.OPEN` by construction, so the no-rows case is preserved. Pulled-back timecards now correctly re-render as editable, which also naturally gates off the reminder (`!myTcEditable && !myTcLocked` becomes false when both are false). Same one-line covers both symptoms Julio flagged.
-
-**Files touched:** `app.js`, `CURRENT_STATE.md`. Version badge bumped for consistency, no other HTML change.
-
----
-
-## ✅ v46.1 — Catch-up threshold fix: supervisor-employees were locked out of their own open sites
-
-**Found during v46.0 testing:** a supervisor had a last-period status row at `open` for one jobsite (three unresolved auto-clocks that never got fixed) but no way to reach it from their own PIN — the admin Timecards panel showed "Never submitted" as expected, but the employee-facing catch-up prompt/banner (v45.0) never fired. Made the timecard genuinely unreachable from every direction: employee locked out despite the row being `open`, admin could edit punches in place via the v46.0 correction modal but couldn't send it back to the employee to actually resubmit.
-
-**Root cause:** `refreshMyTcCatchupState`'s early-return still used a hard-coded `TC_STAGE.SUP` threshold:
-
-```
-if(stageAtLeast(maxStage(rows),TC_STAGE.SUP))return;
-```
-
-This was a v45.0 assumption that pre-dated v46.0's supervisor auto-approval. After v46.0, a supervisor's own submits go straight to `sup_submitted` — so the moment a supervisor self-submits their normal site, `maxStage` returns `sup_submitted`+ and this short-circuit kicks in on every subsequent PIN entry, even if a completely different site is still sitting at `open` with unresolved auto-clocks. The three other spots that check the same lock threshold (`openMyTimecard`, `renderMyTcSubmitBar`, `retractMyTimecard`) all got the `isSupEmp?EXPORTED:SUP` branch in v46.0 — this one was missed.
-
-**The fix — two-line, targeted:** `refreshMyTcCatchupState` now uses the same `isSupEmp?EXPORTED:SUP` split. Supervisor-employees see the catch-up prompt/banner as long as none of their sites has reached `exported`; regular employees behave exactly as before.
-
-**Deliberately not addressed here:** the all-or-nothing "multi-site lock" edge case flagged as known behavior since v45.0 — if a regular employee has one site at `sup_submitted` and another at `open`, the whole card is still locked from their side. Same shape as the fix above but with a bigger blast radius (would need `openMyTimecard`'s lock rendering to become per-site-aware). Julio picked option A (targeted fix) over option B (per-site rework) — that stays as documented behavior for now.
-
-**Files touched:** `app.js`, `CURRENT_STATE.md`. No schema change, no HTML change.
-
----
-
-## ✅ v46.0 — Supervisor self-submit auto-approval + admin correction modal + "Timecards" rename
-
-**Found during testing:** a supervisor is literally an employee record with `department==='Supervisor'` (`supervisors` array is derived straight from `employees.filter(e=>e.dept==='Supervisor')`, same `id`) — there's no separate supervisor entity. A supervisor submitting their own site already self-approves in one click today (the site-wide "Submit to office" button doesn't exclude the supervisor's own record). The actual gap: **off-site work.** If a supervisor picks up a shift at a site they don't personally supervise, that timecard sits at `emp_submitted` forever unless the *actual* supervisor of that other site submits it — a genuinely different person the trusted supervisor-employee shouldn't have to wait on.
-
-**1. Supervisor self-submit skips peer review, everywhere.**
-`submitMyTimecard()` — when the submitting employee is also a supervisor, every jobsite is stamped straight to `sup_submitted` instead of `emp_submitted`, regardless of whether they personally supervise that site. Applies to the last-period catch-up flow (v45.0) too, since it reuses this same function.
-
-**1b. Pull-back window extended to match.**
-A supervisor's own submit now reaches `sup_submitted` immediately, which would have tripped the existing "locked, contact your supervisor" guard on their own timecard — nonsensical when they *are* the supervisor. `retractMyTimecard()`, `renderMyTcSubmitBar()`, and the lock-note in `openMyTimecard()` all now use `TC_STAGE.EXPORTED` as the lock threshold for supervisor-employees (regular employees unchanged, still locked at `sup_submitted`) — so a supervisor can still self-correct their own timecard right up until it's actually exported to head office. Copy throughout ("Contact your GM" vs "Contact your supervisor", "Sent straight to the office" vs "Handed in to your supervisor") branches accordingly.
-
-**2. Admin correction modal — tap a name in the Timecards panel.**
-Every employee row in the Submissions/Timecards panel accordion now has a tappable name (`openAdminEmpCorrect(empId, empName)`). Opens a modal listing that employee's punches across *every* site they worked in the period currently in view (Current/Last — matches how the row's hours total already spans all sites, not just the one under this accordion). Each punch has an Edit button; an "Add a missed punch" button covers punches missed entirely. Both reuse the existing shared edit-punch modal (`openEditModal` / `openAddPunchModal`, new `ctx='subcorrect'`) rather than a new editor — `saveEdit()` and `deletePunch()` gained a third refresh branch so edits made from this modal refresh both the correction list and the panel underneath. Modal given an explicit `z-index:190` (below the shared edit modal's implicit 200) so the edit modal correctly layers on top when opened from within it, regardless of DOM order.
-
-Available on every row, not scoped to only Force Submit / Override cases — simpler single behavior, and admin already has final say via Override regardless of how a timecard got to `sup_submitted`.
-
-**3. Rename.**
-"Submissions" tab → **"Timecards"**. "Pay period submissions" header inside the panel → **"Pay period timecards"**. (Internal IDs like `#mpanel-submissions` / `#submissions-list` / `refreshSubmissionsPanel()` left as-is — not user-facing, renaming them would just be churn.)
-
-**Deliberately not changed:** `forceSubmitEmployee` — a different supervisor stepping in to force-submit someone else's straggler timecard is still genuine outside review, supervisor or not, and stays on the normal path so it's still visible to admin.
-
-**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change, no migration needed.
-
----
-
-## ✅ v45.1 — Submissions panel: cross-site blocker note + flag rename
-
-**Found during v45.0 testing:** two employees showed "✓ Sent to office" in the supervisor's Bluevale log, but stayed stuck in the admin Submissions panel's "waiting on supervisor submission" bucket. Not a bug — the supervisor log's chip is scoped to that supervisor's own jobsites only (`mySiteRows` filtered to `activeSup.jobsites`), while export readiness (`isFullyReadyForExport`) requires every site the employee worked to be sup_submitted. Both employees were multi-site and had a second, unsubmitted site (Kings) — the all-or-nothing export was correctly holding them, but nothing in the UI said which site was the actual blocker.
-
-**The fix:**
-
-- **Cross-site blocker note:** each employee row in the Submissions panel accordion now shows `Waiting on: Kings` under their name when that site's own row is already sup_submitted but another site they worked isn't yet. Computed inline in `refreshSubmissionsPanel`'s row builder from data already being fetched (`statusMap` + `sitesWorkedByEmp`) — no new queries.
-- **Last-period view only:** mid-period, other sites simply haven't had time to submit — showing the note there would just be noise. Gated on `_subPeriodMode==='last'`.
-- **Flag rename to avoid a wording clash:** the existing same-site flag (this site's row stuck at `emp_submitted`, supervisor hasn't reviewed) was also called "Waiting on supervisor" — same phrase, different meaning from the new cross-site note. Renamed to **"Needs supervisor review"**.
-- **Export breakdown popup left as-is:** the earlier plan was to also split the "Nothing to export" popup's bucket wording (never-submitted vs. blocked-by-another-site). Decided against it — the row-level note now explains the "why" right where you're already looking, so the popup's summary count doesn't need the same detail twice.
-
-**Files touched:** `app.js`, `CURRENT_STATE.md`. No schema change, no HTML change.
-
----
-
-## ✅ v45.0 — Employee last-period catch-up (My Timecard)
-
-**The problem:** `openMyTimecard()` always loaded `getPeriodByOffset(0)` — the period containing *today*. The moment a new pay period started, an employee who never tapped Submit before the previous Sunday's cutoff lost all access to that period from the employee side: no banner, no warning, nothing. The "before period ends" confirm only evaluates against whatever period is loaded, so on the new period it silently applied there instead — completely unrelated to the lapsed one. The only recovery path was a supervisor manually switching their log to "Last" period and Force Submitting, with zero visibility on the employee's end that anything was outstanding.
-
-**The fix — prompt on entry + persistent banner + full last-period access (decided: 1C + 2A + 3A):**
-
-- **Detection (`refreshMyTcCatchupState`):** runs every time the current period loads. Computes the jobsites the employee actually worked last period (from punches, not just status rows — same "worked sites" union pattern as `isFullyReadyForExport`) and flags catch-up needed if any of those sites is still at `open` (no row, or an explicit open row). If *any* site for that period has already reached `sup_submitted`+, catch-up is skipped entirely — the whole card is already locked from the employee's side (same all-or-nothing lock the current period uses), so prompting would just dead-end.
-- **PIN-entry prompt:** `submitTimecardPin()` now always opens the current period first, then — if catch-up is needed — shows a confirm modal: "You have an unsubmitted timecard for [dates]. Review and submit it now?" Re-checked fresh every PIN entry, not a one-time dismiss.
-- **Persistent banner:** if the prompt is dismissed ("Cancel"), a new `#mytc-period-bar` amber banner sits above the submit bar on the current-period view, tappable to jump into catch-up mode. Reuses the `--amber`/`--amber-l` warning convention already used for Force Submit / Override buttons.
-- **Last-period mode reuses the whole screen — no parallel code path:** `myTcPeriodOffset` (0 = current, 1 = last) now drives `openMyTimecard(emp, offset)`. The punch list, submit bar, running total, edit modal, and add-punch flow were already generic against `myTcPeriod`, so viewing/editing/submitting last period needed no new UI machinery. Header switches to "Reviewing last pay period: [dates]" with a "← Back to current period" link rendered in the same banner slot (`renderMyTcPeriodBar()`).
-- **Full edit parity, not submit-only:** the auto-clock gate still blocks submission with unresolved auto-clocks, but employees can now fix those punches (Edit) or add a missed one for the catch-up period too — otherwise an unresolved auto-clock in a lapsed period would be a permanent dead end with no one able to act on it but a supervisor.
-- **Clean submit, no false warning:** `submitMyTimecard`'s "before period ends" check (`new Date() < myTcPeriod.end`) naturally evaluates false for a period that's already over, so catch-up submits skip that modal and go straight through.
-- **Auto-return after catch-up submit:** on success the screen jumps back to the current period automatically with a "Last period submitted — you're all caught up" toast, instead of reloading the now-empty catch-up view.
-
-**Scope, deliberately narrow:** only reaches back one period (`getPeriodByOffset(1)`). An employee who's missed two periods running still needs a supervisor Force Submit for the older one — not handled here.
-
-**Known edge case, unchanged from today's behavior:** a multi-site employee whose last period is locked at one site but still open at another still won't get flagged — the lock check is all-or-nothing, same as it already is for the current period.
-
-**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change, no migration needed — reads `pt_timecard_status` rows that already exist.
-
----
-
-## ✅ v44.3 — Admin export buttons: no more silent-fail; state-aware breakdown + re-export
-
-**The problem:** In the admin Submissions panel, the top "Export all sites" button and each per-site "Export [site] →" button were being silently disabled (`.disabled = true` + `opacity:.5`) whenever nothing was eligible for export. On a phone the greyed-out state was easy to miss — from the admin's perspective, the button "just didn't do anything" when tapped. There was also no way to re-export employees who had already been exported this period (needed occasionally for lost files, corrected copies, or forwarding to a different recipient).
-
-**The fix — hybrid design (all option-A picks + wording option 2):**
-
-- **Buttons are never disabled anymore.** Both the top button (`sub-export-all-btn`) and every per-site button stay clickable at all times. When nothing is eligible, the label swaps to **"Nothing to export — details"** — same primary blue styling for the top button, same `btn-sm` styling for per-site buttons. The label swap happens at panel-refresh time via the same `anyFullyReadyAnywhere` / `canExportSite` conditions that used to drive the disabled state.
-
-- **openSubmissionsExport routes to a breakdown popup instead of the old flat "Nothing ready" alert.** When it finds no eligible IDs, it now calls `showExportEmptyBreakdown()`, which computes state buckets and shows the new `#export-breakdown-bg` modal. The old `showCustomAlert('Nothing ready', ...)` line is gone.
-
-- **The popup shows counts only (no names).** Buckets, using the same "worked sites" definition as `isFullyReadyForExport` (union of sites the employee punched at ∪ sites where a status row exists):
-  - **fully exported** — every worked site at `stage='exported'`
-  - **partially exported** — some sites at `exported`, others below (rare edge case: new punch at a new site after export; usually 0)
-  - **not submitted** — no sites at `exported` AND not fully at `sup_submitted` either (covers open/emp_submitted/mixed-below-sup states)
-  - Zero-count lines are omitted entirely; if none of the buckets have anyone, the body reads "No employees with punches this period."
-  - For **per-site scope**, only counts employees who touched that specific jobsite (either punched there or have a status row for it).
-
-- **Wording softener (option 2):** the "not submitted" line reads **"not yet submitted (period still open)"** when viewing the **current** period (mid-period supervisors legitimately can't submit yet, so no blame) and **"waiting on supervisor submission"** when viewing the **last** period (where a delay actually matters). Driven off `_subPeriodMode === 'current'`.
-
-- **Re-export lives inside the popup only.** When `fullyExported > 0`, a blue Re-export button appears in the modal's action row alongside Close. Label reads **"Re-export N already-exported employee(s)"**. Clicking runs `startReExport()`, which filters `statusMap` to employees whose every worked site is at `stage='exported'` (further filtered to the per-site scope's jobsite if applicable), routes the same `_masterLogs` / `masterExportRange` handoff as the initial export, and opens the format picker (`showMasterFormatModal`). **No stages are re-stamped** — the rows are already `exported`, so the assigned `_pendingExportStampFn` is a no-op that only calls `refreshSubmissionsPanel()` for consistency.
-
-**Modal structure (`#export-breakdown-bg`):** mirrors the existing `#custom-alert-bg` pattern but uses `innerHTML` on the body (not `textContent`) so the count lines can render as a bulleted list. Wired identically — `showExportBreakdown(title, bodyHtml, reExportLabel, onReExport)` sets everything up, `closeExportBreakdown()` dismisses, and the Re-export button's click handler is attached once on DOMContentLoaded. A single module-level `_ebReExportCb` holds the callback for the current instance (nulled on close).
-
-**What was NOT touched:**
-- The eligible-export path (`openSubmissionsExport` when `eligibleIds.length > 0`) is unchanged — same stage-stamping, same format picker, same behavior.
-- Per-site export scoping logic is unchanged.
-- Employee accordion rows are unchanged — the individual per-employee flags (⚠️ Never submitted, ⚠️ Waiting on supervisor, ✓ Exported, etc.) still surface there as they did in v44.0 Build 3.
-- No schema changes. No migration needed.
-
-**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`.
-
----
-
-## ✅ v44.2 — Force Submit reappears after pull-back
-
-**Tiny, focused fix.** Surfaced during v44.1 testing: an employee could submit their timecard, then pull it back, and the supervisor's Force Submit button would not reappear — leaving the supervisor with no escalation path if the employee then didn't re-submit.
-
-**Root cause:** `refreshSupLog`'s Force Submit condition was `!mySiteRowsBySite[s]` — it only surfaced when NO status row existed for that (employee, period, jobsite) tuple. But pull-back (`retractMyTimecard`) doesn't delete the row — it resets the row's stage to `'open'`. So the row still existed, just at `open`, and the button stayed hidden.
-
-**Fix (one condition change in `app.js`):** widened the filter to also include rows at `stage === TC_STAGE.OPEN`:
-```js
-const openSupSites = recordSites.filter(s => {
-  const r = mySiteRowsBySite[s];
-  return !r || r.stage === TC_STAGE.OPEN;
-});
-```
-No UI differentiation between never-submitted and pulled-back — the button looks and behaves identically in both cases. The clean-punches gate in `forceSubmitEmployee` still runs (blocks on unresolved auto-clocks or pending waives), so the safety net is unchanged.
-
-**Files touched:** `app.js`, `index.html`, `CURRENT_STATE.md`. No schema change.
-
----
-
-## ✅ v44.1 — Login simplification + uniqueness enforcement
-
-**Small, focused pass** on the login/identity surface — no changes to the submission flow or data model.
-
-**Supervisor login → password-only:**
-- The name dropdown on `#screen-sup-login` is gone; the screen now shows just the password field + Log in button (matches the master admin login pattern). Autofocuses the password on open.
-- `showSupLogin()` no longer builds the `<option>` list. `supLogin()` looks up by password alone: `supervisors.find(s => s.password === pass)`. Empty password shows "Enter your supervisor password."; wrong password shows "Incorrect password."
-- Session persistence (`pt_session` in `localStorage`) still stores `supId` — unchanged, so open supervisor sessions across app restart still restore correctly.
-
-**Password / PIN uniqueness — enforced at both layers:**
-- **App-side (in `saveEmployee`):** the existing PIN uniqueness check is unchanged (it's been there since v37-ish and already worked). New: a matching supervisor password uniqueness check runs right after the "supervisor password is required" check. Both skip the current record so a supervisor editing their own row without changing the password isn't rejected. Both check against the full `employees` array (including inactive records) — so a retired supervisor's password can't be silently recycled either.
-- **DB-side (`migration_v44_1.sql`, run by Julio):** `ALTER TABLE employees ADD CONSTRAINT employees_pin_unique UNIQUE (pin)` and same for `supervisor_password`. `supervisor_password` is NULL for non-supervisors — Postgres treats NULLs as distinct by default, so all the non-supervisor rows coexist without conflict; only actual passwords are checked against each other. **Assumed clean** — no pre-migration audit; if either constraint fails, the migration file has the audit query in a comment right below the failing statement.
-
-**Master admin login:** no change — was already password-only.
-
-**Files touched:** `app.js`, `index.html`, `migration_v44_1.sql` (new), `CURRENT_STATE.md`.
+## ✅ v47.5 — Overview "Ready to Export" tile spans current + last period
+
+**Problem:** the tile (added v47.3) only counted the **current** pay period. On the morning right
+after a period rolls over — exactly when Brad processes payroll — the tile read **0**, because the
+new current period had barely started while the just-closed last period (which actually had ready
+timecards) wasn't counted at all.
+
+**Fix:**
+- `computeReadyCountForPeriod(period)` (new helper, `app.js` — sits next to `isFullyReadyForExport`)
+  factors out the status/punch query + `isFullyReadyForExport` filter so it can be run against any
+  period, not just current.
+- `refreshMasterOverview()` now calls it for **both** `getPeriodByOffset(0)` (current) and
+  `getPeriodByOffset(1)` (last) in parallel and displays the **sum** in `#m-stat-ready`.
+- `_overviewReadyPrefPeriod` (new global) is set each refresh: `'last'` if current is 0 and last
+  has ready employees, otherwise `'current'`.
+- Tile click-through changed from `switchMasterTab('submissions')` directly to a new
+  `goToReadyExports()`, which sets `_subPeriodMode='last'` when `_overviewReadyPrefPeriod==='last'`
+  before calling `switchMasterTab('submissions')` — so clicking the tile lands on whichever period
+  actually has the ready employees, instead of always opening on Current and showing an empty list.
+- `index.html`: tile's `onclick` updated to `goToReadyExports()`; version badge → v47.5.
+
+**Verified:** `node --check` on `app.js` + a 16-assertion logic harness covering
+`isFullyReadyForExport` regression, the period-preference decision, and the click-through routing
+(including the case where an admin had manually left the Submissions panel on "Last" — confirmed
+the new logic doesn't force it back to "Current").
 
 ---
 
@@ -895,19 +492,15 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 | My Timecard — employee self-edit (v41.0) | `submitTimecardPin()` → `openMyTimecard(emp)` / `closeMyTimecard()` / `renderMyTcList()`; edit & add via shared `openMyTcEdit(dbId)` / `openMyTcAdd()` → `saveMyTcEdit()` (`#mytc-edit-modal-bg`, separate from the supervisor/master `#edit-modal-bg`); `buildMyTcActGrid()`/`toggleMyTcAct()`; "My Timecard" button + `#screen-mytc` in index.html; writes `manual_entry=true` (no new flag); period-lock check queries `submissions` for a `final` row overlapping `getPeriodByOffset(0)`
 | Supervisor log filter | `refreshSupLog()` reads `#s-filter-flags` (`''` / `stillin` / `review`) |
 | **Timecard stage — data layer (v44.0, schema+signatures changed in Build 3)** | `pt_timecard_status` table (now one row per employee per period **per jobsite**); `TC_STAGE`/`TC_STAGE_RANK` consts; `getTimecardStatus(empId,periodStart,jobsite)` (one site) / `getEmployeeStatusRows(empId,periodStart)` (all of one employee's site-rows, NEW Build 3) / `getAllStatusForPeriod(periodStart)` (→ `{empId:[rows]}`, array-valued since Build 3) / `setTimecardStage(empId,period,stage,jobsite)` (jobsite now REQUIRED) / `stageOf(row)` / `stageAtLeast(stage,target)` / `minStage(rows)` / `maxStage(rows)` (NEW Build 3 aggregate helpers) / `isFullyReadyForExport(rows,sitesWorked)` (NEW Build 3 — sitesWorked param is what makes a worked-but-unsubmitted site correctly block readiness) / `isOutOfSubmission(entry,statusRow)` — all near `isPendingWaive` in app.js |
-| **My Timecard submit/pull-back (v44.0, retrofit in Build 3; supervisor auto-approval added v46.0; pull-back regression fixed v46.2)** | `renderMyTcSubmitBar()` (3 states off `maxStage(myTcStatusRows)`) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted` **per distinct jobsite worked**, `Promise.all`) + `retractMyTimecard()` (resets **every** site-row → `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=`maxStage`≥`sup_submitted`, `myTcEditable`=`stage===TC_STAGE.OPEN` (v46.2 — was `myTcStatusRows.length===0`, which stayed false after pull-back since rows still existed at open, killing Edit/Add buttons and stranding the "pull back to edit" reminder). State: `myTcStatusRows` (array, was `myTcStatus` single row pre-Build-3) / `myTcBusy` / `myTcEditable`. v46.0: `isSupEmp=myTcEmp.dept==='Supervisor'` checked in all three functions — supervisors write straight to `TC_STAGE.SUP` on submit (skips peer review, any site) and use `TC_STAGE.EXPORTED` as the lock/pull-back threshold instead of `TC_STAGE.SUP` (regular employees unchanged). |
+| **My Timecard submit/pull-back (v44.0, retrofit in Build 3)** | `renderMyTcSubmitBar()` (3 states off `maxStage(myTcStatusRows)`) + `submitMyTimecard()` (auto-clock gate → before/after-period warning → writes `emp_submitted` **per distinct jobsite worked**, `Promise.all`) + `retractMyTimecard()` (resets **every** site-row → `open`); `#mytc-submit-bar` in index.html. Lock in `openMyTimecard()`: `myTcLocked`=`maxStage`≥`sup_submitted`, `myTcEditable`=`myTcStatusRows.length===0`. State: `myTcStatusRows` (array, was `myTcStatus` single row pre-Build-3) / `myTcBusy` / `myTcEditable` |
 | **My Timecard running total (v44.0)** | `myTcRunningHours(punches)` → `{hours,pendingWaiveCount}` (completed punches only, optimistic pending-waive, non-mutating); `renderMyTcTotal()` → `#mytc-total` in index.html (with disclaimer line) |
-| **My Timecard last-period catch-up (NEW, v45.0; threshold fix v46.1)** | `refreshMyTcCatchupState(emp)` (worked-sites-vs-status-rows check against `getPeriodByOffset(1)`) / `switchMyTcPeriod(offset)` / `renderMyTcPeriodBar()`; `myTcPeriodOffset` global (0=current,1=last) now drives `openMyTimecard(emp,offset)` — same screen, same submit/edit/add machinery, reused as-is; PIN-entry prompt added in `submitTimecardPin()`; `#mytc-period-bar` in index.html. v46.1: early-return threshold now uses `isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP` — the same lock-threshold split v46.0 applied to `openMyTimecard`/`renderMyTcSubmitBar`/`retractMyTimecard`. Without this, supervisor-employees hit the short-circuit as soon as any of their sites reached `sup_submitted` (which under v46.0's auto-approval happens on their very first self-submit), leaving them locked out of catch-up on a genuinely still-open other site. |
 | **Supervisor stage colours + out-of-submission (v44.0, scoped to supervisor's own sites in Build 3)** | `supStatusPeriod()` (log mode → stage period) / `supStageChip(stage)` (grey/amber/green pill) in `refreshSupLog`; per-employee chip now driven by `minStage(mySiteRows)` where `mySiteRows` = that employee's status rows filtered to `activeSup.jobsites`; left-border + "⚠️ After submit" row badges via `isOutOfSubmission` matched per-punch to its own site's row; one `getAllStatusForPeriod` call per refresh (Option A), re-guarded by `_supLogSeq` |
 | **Supervisor site-wide submit (v44.0, reworked for per-site pairs in Build 3)** | `submitSiteToOffice()` (period-scoped roster query at `activeSup.jobsites`, builds `{empId,jobsite}` "ready pairs" where that site's row is `emp_submitted`) → confirm → `doSubmitSiteToOffice(readyPairs,...)` (Promise.all `setTimecardStage` per pair); `updateSubmitSummary(empMap,statusMap)` live count (statusMap here is pre-scoped to supervisor's sites, captured as `myStatusMap` during the row-build loop); `#s-submit-site-btn` / `#s-submit-period-label` / `#s-submit-summary` in index.html `#spanel-log` |
 | **Supervisor Force Submit (NEW, v44.0 Build 3)** | `forceSubmitEmployee(empId,empName)` — finds this employee's open sites among the supervisor's own jobsites, gates on unresolved auto-clocks/pending waives (alert+block), confirms, writes `emp_submitted` per open site on the employee's behalf. "Force submit" button rendered inline in `refreshSupLog`'s card header when `openSupSites.length>0`. No audit marker. |
 | **Supervisor PDF export (now a PREVIEW, v44.0)** | Machinery unchanged (`openExportConfirm`/gate/est/dup/`openChecklist`/`generatePDF`/`doExport` + `submissions` writes) — only wording relabelled to "preview/preliminary". Button `#s-export-btn` demoted to outline; labels set in `setSupPeriod`/`openChecklist`/`closeConfirmModal`; chk3/chk4 reworded in index.html |
-| **Admin Submissions/Timecards panel (REWRITTEN, v44.0 Build 3; cross-site note added v45.1; correction modal + rename v46.0)** | `refreshSubmissionsPanel()` — jobsite accordions (reuses `emp-card`/`toggleEmpCard`), "X of Y submitted" headers, per-employee failsafe flags + Override button; `setSubPeriod(mode)`/`subStatusPeriod()` (Current/Last selector); `#mpanel-submissions`/`#submissions-list`/`#subbtn-current`/`#subbtn-last`/`#sub-export-all-btn`/`#sub-period-label` in index.html. Replaces the old `submissions`-table-driven list; that old UI + `deleteSubmission()` were removed entirely. v45.1: row builder now also computes `blockingSites` (Last period only) — other jobsites the employee worked that aren't sup_submitted yet, shown as `Waiting on: <site>`; same-site stuck-at-emp_submitted flag renamed "Needs supervisor review" to avoid clashing with it. v46.0: tab label + panel header renamed "Timecards" (internal IDs unchanged); every row's name is now tappable → `openAdminEmpCorrect(empId,empName)` / `refreshAdminEmpCorrect()` / `closeAdminEmpCorrect()` open `#admin-correct-modal-bg`, listing that employee's punches across all sites worked in the period in view, reusing `openEditModal`/`openAddPunchModal(ctx='subcorrect')` for actual edits — `saveEdit()`/`deletePunch()` gained a matching refresh branch. |
+| **Admin Submissions panel (REWRITTEN, v44.0 Build 3)** | `refreshSubmissionsPanel()` — jobsite accordions (reuses `emp-card`/`toggleEmpCard`), "X of Y submitted" headers, per-employee failsafe flags + Override button; `setSubPeriod(mode)`/`subStatusPeriod()` (Current/Last selector); `#mpanel-submissions`/`#submissions-list`/`#subbtn-current`/`#subbtn-last`/`#sub-export-all-btn`/`#sub-period-label` in index.html. Replaces the old `submissions`-table-driven list; that old UI + `deleteSubmission()` were removed entirely. |
 | **Admin override (NEW, v44.0 Build 3)** | `adminOverrideSite(empId,jobsite,empName)` — same clean-punches gate as Force Submit, pushes one employee's one-site row straight to `sup_submitted` (stands in for both employee + supervisor). No audit marker. |
 | **Admin export → stage stamping (NEW, v44.0 Build 3)** | `openSubmissionsExport(scopeType,jobsite)` — eligibility via `isFullyReadyForExport`, scopes `_masterLogs` + Report-tab date fields to the ready employees' full-period punches, opens the shared `#master-format-modal` picker. `_pendingExportStampFn` global — set here, consumed by `doMasterExcelZip()`/`generateMasterPDF()` right after they finish building the file, stamps `exported` on every included employee's site-rows, then refreshes the panel. The ad-hoc Report-tab export never sets this hook, so it never touches `pt_timecard_status`. |
-| **Send-back windows (v47.5)** | Supervisor→employee: gate in `refreshSupLog` (`sentBackSites`, stages `emp_submitted`/`sup_submitted`, blocked if any site exported) + `supSendBackToEmployee()`. Admin→supervisor: gate in Submissions panel (`if(ready&&!actionHtml)`, ready = sup_submitted OR exported) + `adminSendBack()`. Both reset `→ open`. |
-| **Safe-area / notch (v47.5)** | `#screen-mytc` inline top padding uses `max(1.75rem, calc(env(safe-area-inset-top) + 8px))` (index.html). Requires `viewport-fit=cover` (already set line 5). Other screens/modals NOT yet safe-area-aware — app-wide pass deferred to a styles.css refactor. |
-| **Orphan status-row cleanup (v47.4)** | `cleanupOrphanStatusRow(empId,jobsite,period)` + `periodContaining(date)` near `setTimecardStage` in app.js — deletes a `pt_timecard_status` row when the employee has zero punches at that site/period (guarded to `open`/`emp_submitted` only). Called from `saveMyTcEdit()` (edit branch, before reload), `saveEdit()` (edit branch, after DB write), and `deletePunch()` (after delete), each capturing pre-edit site/date first. Fixes phantom sites on the My Timecard submit bar, the "Not submitted" + "Send to office" supervisor-chip contradiction, and a latent `isFullyReadyForExport` block. One-time DB cleanup: `cleanup_orphan_status_v47_4.sql`. |
 | Version display | `index.html` version badge `<div>` (top-left of `#screen-kiosk`) and `app.js` backup payload (`app_version`) |
 
 ---
@@ -920,4 +513,4 @@ Paste this at the top of your first message:
 
 ---
 
-_Last updated: July 9, 2026 — v47.5 (send-back windows widened both directions + iPhone Dynamic Island safe-area fix)_
+_Last updated: July 2, 2026 — v44.0 (3-tier submission flow complete — all 3 builds delivered)_
