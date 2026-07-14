@@ -315,6 +315,19 @@ async function setTimecardStage(empId,period,stage,jobsite){
   return {ok:true};
 }
 
+// v49.x: fires the submission-notify Edge Function so the office gets emailed whenever a
+// supervisor sends timecards in (batch send, per-employee send, or a supervisor's own
+// self-submission — see CURRENT_STATE.md). Deliberately NOT called from the admin override path.
+// Fire-and-forget: never awaited by callers, and any failure here must never surface to the
+// supervisor or block their actual submission — it's a side effect, not part of the workflow.
+// The Edge Function itself checks submit_notify_enabled/submit_notify_emails, so this is safe
+// to call unconditionally; it's a no-op server-side if notifications are turned off.
+function notifySubmission(items,supervisorName,periodLabel){
+  if(!items||!items.length)return;
+  sb.functions.invoke('submission-notify',{body:{supervisorName,periodLabel,items}})
+    .catch(err=>console.warn('submission-notify call failed (non-blocking):',err));
+}
+
 // v47.4: which pay period does a given date fall in? Walks a handful of offsets
 // (current + several past). Used by the orphan-row cleanup below to target the
 // OLD punch's period even when an edit moved its date. Falls back to current.
@@ -1281,6 +1294,13 @@ async function submitMyTimecard(){
     myTcBusy=false;
     const failed=results.filter(r=>!r.ok);
     if(failed.length){showCustomAlert('Could not submit','There was a problem submitting your timecard: '+(failed[0].error?.message||'unknown error')+'. Please try again.');return;}
+    // v49.x: a supervisor's own submission skips review and lands straight at sup_submitted —
+    // notify the office the same as any other "send to office" action. Regular employees
+    // (targetStage===TC_STAGE.EMP) never reach sup_submitted here, so they never notify.
+    if(isSupEmp){
+      const periodLabel=`${myTcPeriod.start.toLocaleDateString([],{month:'short',day:'numeric'})} \u2013 ${myTcPeriod.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+      notifySubmission(openJobsites.map(js=>({employeeName:myTcEmp.name,jobsite:js})),myTcEmp.name,periodLabel);
+    }
     const wasCatchup=myTcPeriodOffset===1;
     // v47.0: check if ALL sites are now submitted (open ones just submitted + already-submitted ones)
     const remainingOpen=allJobsites.filter(j=>{
@@ -2210,6 +2230,12 @@ async function doSubmitSiteToOffice(readyPairs,period,periodLabel){
   } else {
     showNotif('✓','Site submitted',`${readyPairs.length} timecard${readyPairs.length!==1?'s':''} sent for ${periodLabel}`,'#2f7d31',2800);
   }
+  // v49.x: notify office of whichever pairs actually succeeded (skip any that failed)
+  const sentPairs=readyPairs.filter((p,i)=>results[i].ok);
+  if(sentPairs.length){
+    const items=sentPairs.map(p=>({employeeName:(employees.find(e=>e.id===p.empId)||{}).name||'Unknown',jobsite:p.jobsite}));
+    notifySubmission(items,(activeSup&&activeSup.name)||'A supervisor',periodLabel);
+  }
   refreshSupLog(); // repaint stage colours → submitted employees flip to "Sent to office"
 }
 
@@ -2281,6 +2307,8 @@ async function supSendEmployeeToOffice(empId,empName){
       const failed=results.filter(r=>!r.ok).length;
       if(failed){showCustomAlert('Problem',`Some sites could not be sent. ${sendable.length-failed} of ${sendable.length} succeeded.`);return;}
       showNotif('\u2713','Sent to office',`${empName}\u2019s timecard sent at ${siteList}`,'#2f7d31',2600);
+      // v49.x: only reached on full success (partial failure returns above)
+      notifySubmission(sendable.map(r=>({employeeName:empName,jobsite:r.jobsite})),(activeSup&&activeSup.name)||'A supervisor',periodLabel);
       refreshSupLog();
     });
 }

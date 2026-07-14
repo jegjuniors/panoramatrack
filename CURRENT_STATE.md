@@ -1,23 +1,91 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v49.0 *(Submission notifications — settings foundation; Edge Function still to build)*
+**Current Version:** v49.1 *(Submission notifications — Edge Function + trigger wiring built; deployment is the only step left)*
 **Last Updated:** July 14, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
 > actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5–v49.0 entries below are current; v44.1–v47.4 history isn't backfilled.
+> this session). The v47.5–v49.1 entries below are current; v44.1–v47.4 history isn't backfilled.
 
 > **Migrations required (run in order in the Supabase SQL editor before deploying this version):**
 > 1. `migration_v48_start_time.sql` — adds `punches.declared_start_time` and 5 `pt_settings`
 >    columns for scheduled-start selection. (Carried over from v48.0.)
 > 2. `migration_submit_notify.sql` — adds `pt_settings.submit_notify_enabled` and
->    `pt_settings.submit_notify_emails`. (New this version.)
+>    `pt_settings.submit_notify_emails`. (Carried over from v49.0 — no new migration this version.)
 
-> ⚠️ **v49.0 is a checkpoint, not a finished feature.** The submission-notification feature is
-> mid-build across several sessions — see the design decisions and remaining steps below before
-> continuing. The Settings screen toggle exists and saves correctly, but **no email will actually
-> send yet** — the Edge Function that calls Resend, and the wiring into the three action handlers
-> that should trigger it, haven't been built.
+> ⚠️ **Deployment still needed before this feature is live** — see "Not built yet" at the bottom
+> of the v49.1 entry below. The code is complete; Julio still needs to create the Edge Function
+> in the Supabase Dashboard, paste in the provided code, and set the `RESEND_API_KEY` secret.
+
+---
+
+## 🚧 v49.1 — Submission notifications: Edge Function + trigger wiring (part 2 of the feature)
+
+**Context:** Continuation of v49.0 (settings foundation). This part adds the actual Edge Function
+that sends the email via Resend, and wires it into the three action handlers identified in the
+v49.0 entry. Full design reasoning (trigger choice, batching, why the admin override is
+excluded, the supervisor-self-submit edge case) is documented there — not repeated here.
+
+**What shipped this session:**
+- **`submission-notify-edge-function.ts`** (new file, delivered separately — not part of the app
+  bundle, meant to be pasted into the Supabase Dashboard) — a Deno Edge Function that:
+  - Accepts `{ supervisorName, periodLabel, items: [{employeeName, jobsite}] }` via POST.
+  - Reads `submit_notify_enabled`/`submit_notify_emails` from `pt_settings` on every call (via
+    the auto-injected `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`, using the REST API directly —
+    no supabase-js import needed) — so toggling the setting takes effect immediately, no
+    redeploy required.
+  - No-ops cleanly (200 response, `sent:false`) if disabled, no recipients configured, or an
+    empty items array — never errors out for these expected non-send cases.
+  - Groups items by jobsite, builds a subject line (single site vs "+N more"), and an HTML body
+    listing employees under each jobsite heading. All interpolated values are HTML-escaped.
+  - Sends via `POST https://api.resend.com/emails` using the `RESEND_API_KEY` secret (never
+    hardcoded — must be set directly in Supabase, since this file may end up in GitHub).
+  - From address: `PanoramaTrack <alerts@notify.panoramabuildingsystems.ca>` (the verified Resend
+    sending domain from v49.0).
+  - Handles CORS (OPTIONS preflight) so it can be called directly from the browser via
+    `sb.functions.invoke(...)`.
+  - Genuine failures (missing secrets, Resend API errors, pt_settings read failures) return
+    non-200 so they show up properly in Supabase's function logs; expected no-send cases return
+    200 so they don't look like errors.
+- **`app.js` — new `notifySubmission(items, supervisorName, periodLabel)` helper** (placed right
+  after `setTimecardStage()`), a thin fire-and-forget wrapper around
+  `sb.functions.invoke('submission-notify', {...})`. Never awaited by callers; any failure is
+  caught and only `console.warn`'d — per the agreed rule, a notification failure must never
+  block or surface as an error on the supervisor's actual submission.
+- **Wired into all three trigger points, none into the admin override:**
+  1. `doSubmitSiteToOffice` (supervisor batch send) — builds items only from pairs that actually
+     succeeded (zips `readyPairs` against the `results` array), looks up each employee's name
+     from the `employees` array (falls back to `'Unknown'` rather than crashing if not found),
+     supervisor name from `activeSup.name`.
+  2. `supSendEmployeeToOffice` (supervisor per-employee send) — only reached on full success
+     (partial failure returns earlier, before the notify call, matching the function's existing
+     early-return pattern for partial failures).
+  3. `submitMyTimecard`'s supervisor-self-submit branch — gated on `isSupEmp` so regular
+     employees (who only ever reach `emp_submitted` here, never `sup_submitted`) never trigger a
+     notification; only a supervisor's own bypass-straight-to-office submission does.
+
+**Verified:** `node --check` on `app.js`. The Edge Function was syntax/type-checked with `tsc`
+against a minimal ambient `Deno` global shim (zero errors) — Deno's actual runtime isn't
+available in this environment, so this catches syntax/type mistakes but isn't a substitute for
+testing the deployed function directly. An 8-assertion harness verifies the item-building/
+filtering logic used in all three wiring points (success/failure zipping in the batch path,
+unknown-employee-id fallback, per-employee and self-submit item shapes, and the
+`notifySubmission` empty-array no-op guard) — all against extracted/mirrored logic, since the
+real functions depend on live Supabase and DOM state that can't be exercised outside the app.
+
+**Not built yet — remaining steps, all on Julio's side:**
+1. In the Supabase Dashboard: Edge Functions → New Function → name it `submission-notify` →
+   paste in `submission-notify-edge-function.ts` → Deploy.
+2. Add the `RESEND_API_KEY` secret (Function Secrets, or Project Settings → Edge Functions →
+   Secrets). The key was provided in an earlier session message — not stored in any delivered
+   file.
+3. Turn on "Submission notifications" in the app's Settings screen and enter the GM's (and any
+   other) recipient email(s) — the toggle and field were built in v49.0 but nothing was sending
+   until this session's Edge Function existed to receive the call.
+4. End-to-end test: have a supervisor send a real (or test) timecard to the office and confirm
+   the email arrives. Worth checking the Edge Function's logs in the Supabase Dashboard the
+   first time, in case anything about the deployed environment differs from what was
+   syntax-checked locally.
 
 ---
 
