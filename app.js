@@ -28,7 +28,10 @@ let APP_SETTINGS={  // pay rules — loaded from Supabase `pt_settings` row on b
   schedEndEnabled:false, schedEndTime:'15:30', schedEndWindow:15,
   // v48.0: scheduled-start selection — see computeStartTimeOptions()/adjustedTimes()
   schedStartEnabled:false, schedStartTime:'07:00', schedStartEarly1:'06:30', schedStartEarly2:'06:00', schedStartGrace:5,
-  lunchEnabled:false, lunchMinutes:30, lunchThresholdHours:5
+  lunchEnabled:false, lunchMinutes:30, lunchThresholdHours:5,
+  // v48.x: submission-notification settings (admin/office config, not a pay rule — lives in
+  // the same pt_settings row purely for convenience, read separately by the Edge Function).
+  submitNotifyEnabled:false, submitNotifyEmails:''
 };
 let timeLog=[];      // active punches only cached in memory for speed
 let currentPin='';
@@ -116,6 +119,23 @@ function fmtFull(d){
   return `${day} · ${fmt(d)}`;
 }
 // Compact: "Tue May 6, 8:30 AM"
+// v48.x: parses the comma-separated "recipient emails" settings field. Loose validation only —
+// this is an internal admin setting, not user-facing input, so we clean it up and flag anything
+// that doesn't look like an email rather than hard-blocking the save.
+function parseNotifyEmails(raw){
+  const EMAIL_RE=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const seen=new Set();
+  const clean=[],invalid=[];
+  (raw||'').split(',').map(s=>s.trim()).filter(Boolean).forEach(e=>{
+    const key=e.toLowerCase();
+    if(seen.has(key))return; // dedupe, case-insensitive
+    seen.add(key);
+    if(EMAIL_RE.test(e))clean.push(e);
+    else invalid.push(e);
+  });
+  return {clean,invalid};
+}
+
 function fmtDt(d){
   if(!(d instanceof Date))return '—';
   return d.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})+', '+fmt(d);
@@ -142,7 +162,9 @@ function applySettingsRow(r){
     schedStartGrace:(r.sched_start_grace!=null?r.sched_start_grace:5),
     lunchEnabled:!!r.lunch_enabled,
     lunchMinutes:(r.lunch_minutes!=null?r.lunch_minutes:30),
-    lunchThresholdHours:(r.lunch_threshold_hours!=null?r.lunch_threshold_hours:5)
+    lunchThresholdHours:(r.lunch_threshold_hours!=null?r.lunch_threshold_hours:5),
+    submitNotifyEnabled:!!r.submit_notify_enabled,
+    submitNotifyEmails:r.submit_notify_emails||''
   };
 }
 // Round a Date to the nearest interval using local clock minutes (7/8 breakpoint
@@ -2360,6 +2382,8 @@ function refreshSettingsPanel(){
   document.getElementById('set-lunch-enabled').checked=APP_SETTINGS.lunchEnabled;
   document.getElementById('set-lunch-minutes').value=String(APP_SETTINGS.lunchMinutes||30);
   document.getElementById('set-lunch-threshold').value=String(APP_SETTINGS.lunchThresholdHours||5);
+  document.getElementById('set-notify-enabled').checked=APP_SETTINGS.submitNotifyEnabled;
+  document.getElementById('set-notify-emails').value=APP_SETTINGS.submitNotifyEmails||'';
   document.getElementById('set-save-msg').textContent='';
 }
 async function saveSettings(){
@@ -2377,6 +2401,8 @@ async function saveSettings(){
   const startEarly2=document.getElementById('set-start-early2').value||'06:00';
   let startGrace=parseInt(document.getElementById('set-start-grace').value,10);
   if(isNaN(startGrace)||startGrace<0)startGrace=5;
+  const {clean:notifyEmails,invalid:notifyInvalid}=parseNotifyEmails(document.getElementById('set-notify-emails').value);
+  const notifyEnabled=document.getElementById('set-notify-enabled').checked;
   const row={
     id:1,
     rounding_enabled:document.getElementById('set-rounding-enabled').checked,
@@ -2392,13 +2418,21 @@ async function saveSettings(){
     lunch_enabled:document.getElementById('set-lunch-enabled').checked,
     lunch_minutes:lunchMinutes,
     lunch_threshold_hours:lunchThreshold,
+    submit_notify_enabled:notifyEnabled,
+    submit_notify_emails:notifyEmails.join(', '),
     updated_at:new Date().toISOString()
   };
   msg.style.color='var(--txt2)';msg.textContent='Saving…';
   const {error}=await sb.from('pt_settings').upsert(row,{onConflict:'id'});
   if(error){msg.style.color='var(--red)';msg.textContent='Could not save: '+error.message;return}
   applySettingsRow(row);            // update this device immediately
-  msg.style.color='var(--green)';msg.textContent='Saved. Pay rules updated across all devices.';
+  document.getElementById('set-notify-emails').value=APP_SETTINGS.submitNotifyEmails; // reflect cleaned list
+  if(notifyEnabled&&notifyInvalid.length){
+    msg.style.color='var(--amber)';
+    msg.textContent=`Saved, but didn't look like valid email address${notifyInvalid.length!==1?'es':''} and ${notifyInvalid.length!==1?'were':'was'} dropped: ${notifyInvalid.join(', ')}`;
+  } else {
+    msg.style.color='var(--green)';msg.textContent='Saved. Pay rules updated across all devices.';
+  }
 }
 
 /* ─── Supervisor: Employees ─── */

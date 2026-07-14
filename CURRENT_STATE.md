@@ -1,15 +1,115 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v48.1 *(My Timecard transparency: day-grouped Paid vs Actual times)*
-**Last Updated:** July 13, 2026
+**Current Version:** v49.0 *(Submission notifications — settings foundation; Edge Function still to build)*
+**Last Updated:** July 14, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
 > actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5–v48.0 entries below are current; v44.1–v47.4 history isn't backfilled.
+> this session). The v47.5–v49.0 entries below are current; v44.1–v47.4 history isn't backfilled.
 
-> **Migration required:** run `migration_v48_start_time.sql` in the Supabase SQL editor before
-> deploying this version — adds `punches.declared_start_time` and 5 new `pt_settings` columns.
-> (Carried over from v48.0 — unchanged by v48.1.)
+> **Migrations required (run in order in the Supabase SQL editor before deploying this version):**
+> 1. `migration_v48_start_time.sql` — adds `punches.declared_start_time` and 5 `pt_settings`
+>    columns for scheduled-start selection. (Carried over from v48.0.)
+> 2. `migration_submit_notify.sql` — adds `pt_settings.submit_notify_enabled` and
+>    `pt_settings.submit_notify_emails`. (New this version.)
+
+> ⚠️ **v49.0 is a checkpoint, not a finished feature.** The submission-notification feature is
+> mid-build across several sessions — see the design decisions and remaining steps below before
+> continuing. The Settings screen toggle exists and saves correctly, but **no email will actually
+> send yet** — the Edge Function that calls Resend, and the wiring into the three action handlers
+> that should trigger it, haven't been built.
+
+---
+
+## 🚧 v49.0 — Submission notifications: settings foundation (part 1 of the feature)
+
+**Context:** GM asked to be emailed whenever a supervisor submits timecards to the office, so he
+knows work is coming in for export without having to check the app. Worked through the design
+with Julio step-by-step before building anything (see decisions below) — this entry covers only
+the first build increment (settings/storage); the Edge Function and trigger wiring are separate,
+not-yet-built pieces tracked in "On the horizon."
+
+**Design decisions, confirmed:**
+- **Channel:** Email via Resend (not Microsoft 365 — Panorama's M365 admin was hesitant about
+  registering an Azure app for this purpose). Sending domain: `notify.panoramabuildingsystems.ca`
+  — a dedicated subdomain, not the root domain (which carries M365's SPF/DKIM) and not
+  `panoramatrack.panoramabuildingsystems.ca` (which already has a CNAME to Netlify for app
+  hosting — DNS doesn't allow a TXT/MX record to coexist with a CNAME at the same hostname, so
+  that hostname was never usable for this regardless of the M365 question). **Domain is verified
+  in Resend as of this session.**
+- **Trigger:** Fires on the *action*, not on full jobsite completion — i.e. the moment a
+  supervisor sends timecards to the office, not once every employee at a site has been submitted.
+- **Frequency:** Real-time, one email per action (not a daily digest).
+- **Recipients:** Stored in `pt_settings` (not hardcoded as an Edge Function secret), editable
+  from the Settings screen, comma-separated for multiple addresses — built this session.
+- **Which actions count (4 total call sites, all funnel through `setTimecardStage(...,TC_STAGE.SUP,...)`):**
+  1. Supervisor batch "submit site to office" (`submitSiteToOffice` → `doSubmitSiteToOffice`,
+     ~line 2128) — **notifies**. Can span multiple jobsites in one action if the supervisor
+     manages more than one site.
+  2. Supervisor per-employee send (`supSendEmployeeToOffice`, ~line 2258) — **notifies**.
+  3. Admin override (`adminOverrideSite`, ~line 4680) — single employee/site, bypasses both the
+     employee submission and supervisor review steps entirely — **does NOT notify**. If the
+     admin/GM is the one pulling a card to export, they don't need to be told about their own
+     action.
+  4. **A supervisor-employee submitting their own timecard** (`submitMyTimecard`, ~line 1237) —
+     already skips `emp_submitted` entirely for any employee with `dept==='Supervisor'` (v46.0
+     behavior, confirmed unchanged this session — "As a supervisor, this goes straight to the
+     office once you submit"), regardless of whether that supervisor is actually supervising the
+     site they worked or just working it as a regular employee that day (raised via two real
+     examples — a supervisor covering un-supervised sites, and a supervisor working as a regular
+     employee on someone else's site — both confirmed to already behave this way). **This
+     notifies too.**
+  - Net: 3 of the 4 paths to `sup_submitted` trigger a notification; only the admin override is
+    silent.
+- **Batching:** One email per action, not one per employee/row. The low-level
+  `setTimecardStage()` function writes one status row per employee (so a 6-person batch send is 6
+  DB writes) — hooking the low-level function would cause a burst of separate emails per batch.
+  Instead, the notify call must be hooked at the **three action handlers** listed above (after
+  their `Promise.all(...)` of stage changes succeeds), building one combined summary per action
+  from whichever employees/jobsites were actually included in *that* pass. Confirmed self-
+  exclusion behavior: `readyPairs`/`sendable` in the supervisor batch/per-employee paths only
+  ever include rows still at `emp_submitted` — a supervisor's own row (already elevated straight
+  to `sup_submitted` via path 4) is automatically excluded from later batch emails without any
+  special-casing needed, since it's simply no longer in the "still waiting" set the batch action
+  operates on.
+  - Straggler passes get their own separate email — e.g. a batch of 5 followed later by a
+    catch-up pass that picks up 2 more sends a second email for just those 2.
+- **Failure handling (not yet built, but agreed):** the Edge Function call must never block or
+  fail the actual submission — if Resend is briefly down, the supervisor's action still succeeds
+  normally; the notification failure should log quietly, not surface as an error to the
+  supervisor.
+- **Email content (drafted, not finalized):** subject + body listing jobsite(s), pay period,
+  supervisor name, and the employee(s)/site(s) included in that action.
+
+**What shipped this session (`app.js`, `index.html`, `migration_submit_notify.sql`):**
+- New `pt_settings` columns: `submit_notify_enabled` (boolean), `submit_notify_emails` (text,
+  cleaned comma-separated string).
+- New Settings screen section ("Submission notifications") — enable checkbox + recipient email
+  field, following the existing settings-section pattern (Scheduled-start, lunch deduction, etc).
+- `parseNotifyEmails(raw)` helper — splits/trims/dedupes (case-insensitive) the comma-separated
+  input, loosely validates each entry as an email shape, returns `{clean, invalid}`. On save,
+  invalid-looking entries are dropped from what's stored and surfaced as a non-blocking amber
+  warning message (the settings save itself still succeeds).
+- `APP_SETTINGS`/`applySettingsRow()` extended with `submitNotifyEnabled`/`submitNotifyEmails` —
+  folded into the existing single-row `pt_settings` load/save cycle for simplicity, even though
+  (unlike the rest of `APP_SETTINGS`) these aren't pay-rule fields — the Edge Function (not yet
+  built) will read them directly from Supabase rather than via the client's `APP_SETTINGS` object.
+
+**Verified:** `node --check` on `app.js` + an 8-assertion harness on `parseNotifyEmails()`
+covering: basic comma-separated parsing, whitespace trimming, empty string, trailing/empty
+entries dropped, invalid entries flagged without crashing, case-insensitive dedupe (first casing
+kept), single-entry input, null/undefined input.
+
+**Not built yet — next steps:**
+1. The Supabase Edge Function itself — calls Resend's API using `RESEND_API_KEY` (Resend API key
+   was provided this session; **not stored in any file** — it must be added directly in Supabase
+   as an Edge Function secret when the function is deployed, never committed to GitHub).
+2. Wiring the three trigger points (`doSubmitSiteToOffice`, `supSendEmployeeToOffice`,
+   `submitMyTimecard`'s supervisor-bypass branch) to call the Edge Function after a successful
+   send, each building its own one-action summary.
+3. Julio deploys via the **Supabase Dashboard's built-in Edge Function editor** (confirmed this
+   session — no CLI use), and sets `RESEND_API_KEY` as a secret there.
+4. Finalize exact email subject/body wording.
 
 ---
 
