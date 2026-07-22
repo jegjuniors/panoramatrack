@@ -1,25 +1,56 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v49.1 *(Submission notifications — Edge Function + trigger wiring built; deployment is the only step left)*
-**Last Updated:** July 14, 2026
+**Current Version:** v49.2 *(Restored the v47.5 iPhone Dynamic Island safe-area fix on My Timecard — it had reverted somewhere between v47.5 and v48.0)*
+**Last Updated:** July 15, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
 > actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5–v49.1 entries below are current; v44.1–v47.4 history isn't backfilled.
+> this session). The v47.5–v49.2 entries below are current; v44.1–v47.4 history isn't backfilled.
 
 > **Migrations required (run in order in the Supabase SQL editor before deploying this version):**
 > 1. `migration_v48_start_time.sql` — adds `punches.declared_start_time` and 5 `pt_settings`
 >    columns for scheduled-start selection. (Carried over from v48.0.)
 > 2. `migration_submit_notify.sql` — adds `pt_settings.submit_notify_enabled` and
->    `pt_settings.submit_notify_emails`. (Carried over from v49.0 — no new migration this version.)
+>    `pt_settings.submit_notify_emails`. (Carried over from v49.0.)
 
-> ⚠️ **Deployment still needed before this feature is live** — see "Not built yet" at the bottom
-> of the v49.1 entry below. The code is complete; Julio still needs to create the Edge Function
-> in the Supabase Dashboard, paste in the provided code, and set the `RESEND_API_KEY` secret.
+> ⚠️ **Submission-notification feature status:** code-complete and deployed (Edge Function live,
+> secret set, settings UI wired) as of v49.1 — Julio confirmed it's working in real testing.
+> Still watching how it holds up over a full pay period.
 
 ---
 
-## 🚧 v49.1 — Submission notifications: Edge Function + trigger wiring (part 2 of the feature)
+## ✅ v49.2 — Restored: iPhone Dynamic Island safe-area fix on My Timecard
+
+**Context:** Julio noticed My Timecard had reverted to painting under the Dynamic Island again on
+notch iPhones — the same issue originally fixed in v47.5 (July 10). Confirmed via
+`conversation_search` against past sessions: the v47.5 fix changed `#screen-mytc`'s top padding
+from a flat `1.75rem` to `max(1.75rem, calc(env(safe-area-inset-top) + 8px))`. Checked this
+session's `index.html` and the `env()`/`max()` part was completely gone — back to the plain flat
+value. This wasn't touched in any session working on this project's memory/history — the
+reversion happened at some point between v47.5 and the v48.0 files first uploaded to this
+project's session; exactly when/how isn't known.
+
+**What shipped (`index.html`):** `#screen-mytc`'s inline style restored to the exact v47.5 fix:
+`padding:max(1.75rem, calc(env(safe-area-inset-top) + 8px)) 1rem 40px;`. On non-notch devices
+`env(safe-area-inset-top)` resolves to `0`, so `max()` keeps the original `1.75rem` — zero visual
+change there. On notch devices (Dynamic Island / older notch), the header drops below the
+island/status bar with an 8px gap.
+
+**Verified:** Direct diff against the exact fix text recorded in the v47.5 session summary —
+this is a single CSS value, not logic, so no harness applies. Worth Julio doing a quick visual
+check on an actual notch iPhone (or Safari's device simulator) to confirm, since this
+environment can't render/screenshot the app itself.
+
+**Not built / still deferred:** the "known latent" issue flagged back in v47.5 is still open —
+the same flat inline-padding pattern exists on every other `.screen` and on fixed-overlay
+modals, none of which are safe-area-aware yet. An app-wide pass is tracked in "On the horizon."
+Given this session's discovery that a *targeted* fix can silently revert without anyone noticing
+until a real device hits it, worth considering doing the full pass sooner rather than later —
+one consolidated change is easier to verify stayed intact than a lone one-off on a single screen.
+
+---
+
+## ✅ v49.1 — Submission notifications: Edge Function + trigger wiring (part 2 of the feature)
 
 **Context:** Continuation of v49.0 (settings foundation). This part adds the actual Edge Function
 that sends the email via Resend, and wires it into the three action handlers identified in the
