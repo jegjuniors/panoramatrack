@@ -1,21 +1,96 @@
 # PanoramaTrack — Current State
 
-**Current Version:** v49.2 *(Restored the v47.5 iPhone Dynamic Island safe-area fix on My Timecard — it had reverted somewhere between v47.5 and v48.0)*
-**Last Updated:** July 15, 2026
+**Current Version:** v49.3 *(Flags + fixes for punches that missed the scheduled-start selection popup)*
+**Last Updated:** August 10, 2026
 
 > Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
 > actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5–v49.2 entries below are current; v44.1–v47.4 history isn't backfilled.
+> this session). The v47.5–v49.3 entries below are current; v44.1–v47.4 history isn't backfilled.
 
 > **Migrations required (run in order in the Supabase SQL editor before deploying this version):**
 > 1. `migration_v48_start_time.sql` — adds `punches.declared_start_time` and 5 `pt_settings`
 >    columns for scheduled-start selection. (Carried over from v48.0.)
 > 2. `migration_submit_notify.sql` — adds `pt_settings.submit_notify_enabled` and
 >    `pt_settings.submit_notify_emails`. (Carried over from v49.0.)
+> No new migration this version — v49.3 only reads/writes the existing `declared_start_time`
+> column from v48.0.
 
 > ⚠️ **Submission-notification feature status:** code-complete and deployed (Edge Function live,
 > secret set, settings UI wired) as of v49.1 — Julio confirmed it's working in real testing.
 > Still watching how it holds up over a full pay period.
+
+---
+
+## ✅ v49.3 — Flag + fix punches that missed the scheduled-start selection popup
+
+**Context:** Julio found a real employee whose Thu/Fri hours looked short — traced to the
+scheduled-start popup (v48.0) never getting answered for those two punches (both 6:51 AM
+clock-ins, 9 minutes before the 7:00 standard start), so they fell through to plain 15-minute
+rounding (6:45) instead of the intended 7:00 credit. Root cause: the popup is coded as a forced,
+no-dismiss choice, but it only ever fires once, in the ~600ms right after a *live* clock-in —
+since every employee here uses a personal phone rather than a shared kiosk, backgrounding the
+app or locking the phone in that window silently skips it with no second chance, no matter how
+"forced" the popup itself is once it's actually showing.
+
+**Design agreed (discussed before building):**
+- **My Timecard (employee):** soft flag only, not a submit-blocker — the employee may be unable
+  to act on it (gone, unreachable), so a hard block with no fallback would leave that timecard
+  stuck. Fix is one tap away as long as the punch isn't locked yet.
+- **Submissions panel (supervisor/GM):** blocks send-to-office, same tier as an unresolved
+  auto-clock or a pending lunch waive — this directly affects paid hours, so it shouldn't be
+  possible to miss. Unlike the softer flags, this one always has a fallback fix path (below), so
+  blocking doesn't strand it the way a block with no resolution would.
+- **Resolution:** a dedicated "set start time" action, not the general edit-punch flow — writes
+  `declared_start_time` directly without touching the raw clock-in, so the true punch (and the
+  Paid-vs-Actual transparency from v48.1) isn't overwritten just to fix a credit calculation.
+
+**What shipped (`app.js`):**
+- **`needsStartTimeConfirm(entry)`** (next to `computeStartTimeOptions`) — true when a punch's
+  raw in-time was early enough to have needed a selection (same check the live popup uses) but
+  `declaredStart` was never saved. Note: `computeStartTimeOptions` always includes the standard
+  time as an option for *any* early punch, regardless of grace — grace only prunes which earlier
+  sub-options (6:00/6:30) also show alongside it — so this can flag punches only a couple minutes
+  early too, not just clearly-early ones like the 6:51 case that prompted this. Worth watching
+  once this ships whether that surfaces more instances across the roster than expected; see
+  "Worth watching" below.
+- **`openStartTimeFix(entry, onDone)` / `selectStartTimeFix(hhmm)`** — a new, separate retroactive
+  picker reusing the same modal markup as the v48.0 live popup, but deliberately its own
+  context/handler pair: the original `showStartTimeModal()`/`selectStartTime()` chains into the
+  Corfix safety reminder afterward, which only makes sense right after a live clock-in, not when
+  fixing a past punch. Callers pass their own refresh callback.
+- **My Timecard (`renderMyTcList`):** punch cards now show an amber "⚠ Confirm your start time"
+  banner with a "Fix" button when `needsStartTimeConfirm` is true AND the punch isn't locked yet
+  (`!punchLocked`) — once locked, it's out of the employee's hands and becomes the supervisor/
+  GM's problem instead. `openMyTcStartFix(dbId)` looks the entry up the same
+  `String(...)===String(...)` type-safe way `openMyTcEdit` already does.
+- **Submissions panel (`refreshSubmissionsPanel`):** new `unconfirmedCount` per site/employee,
+  added to `flagParts` ("N unconfirmed start times") and folded into the existing `blocked`
+  boolean alongside `autoCount`/`waiveCount` — so it also gates the amber "Override" button the
+  same way an unresolved auto-clock already does (shows "Fix punches first" instead).
+- **Admin correction modal (`refreshAdminEmpCorrect`):** per-punch flag added to the existing
+  three (auto-clock/waive/out-of-submission), plus a dedicated amber "Set start" button next to
+  the existing "Edit" button when flagged. `openAdminStartFix(dbId)` looks the punch up from a
+  new `_adminCorrectEntries` list (populated on each modal refresh) and, on selection, refreshes
+  both the modal and the Submissions panel underneath so the block clears immediately.
+
+**Verified:** `node --check` on `app.js` + a 9-assertion harness on `needsStartTimeConfirm()`
+covering: the real 6:51/grace-5 scenario from Julio's screenshots (needs confirm), a 6:57
+punch (also needs confirm, once grace was understood correctly — see harness comment for why),
+exactly-on-time and late punches (never need confirm), an already-resolved `declaredStart`
+(never re-flagged), a punch within grace of an *early* band, the feature toggled off entirely,
+and null/missing-field inputs handled defensively.
+
+**Known limitation, not built:** the retroactive fix modal (`openStartTimeFix`) has no cancel
+button — it reuses the v48.0 live-popup markup, which is intentionally forced/no-dismiss for
+its original context (right after a live clock-in). For the two new retroactive contexts (My
+Timecard "Fix", admin "Set start"), that means clicking the button by mistake currently commits
+to picking *some* time rather than allowing a backout. Worth adding a context-specific Cancel
+option if this trips anyone up in practice.
+
+**Worth watching:** because any early clock-in (even a couple minutes) technically "needed" a
+selection per the existing v48.0 logic, this flag may surface more instances across the roster
+than just the one employee/two days that prompted this — worth keeping an eye on volume once
+live, in case the grace-window behavior itself is worth revisiting separately.
 
 ---
 

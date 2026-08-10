@@ -212,6 +212,16 @@ function computeStartTimeOptions(punchIn){
   offered.push(standard);
   return offered;
 }
+// v49.x: true when a punch's raw in-time was early enough to need a scheduled-start selection
+// (computeStartTimeOptions returns a non-empty list) but none was ever saved — e.g. the popup
+// fired at clock-in but the employee backgrounded the app before answering it. Used to flag the
+// punch in My Timecard (employee, soft flag) and the Submissions panel / admin correction modal
+// (supervisor/GM fallback, blocking — same tier as an unresolved auto-clock or pending waive).
+function needsStartTimeConfirm(entry){
+  if(!entry||!entry.in||entry.declaredStart)return false;
+  const opts=computeStartTimeOptions(entry.in);
+  return !!(opts&&opts.length);
+}
 // Effective {in,out} after applying enabled rules. Synthetic punches untouched.
 function adjustedTimes(entry){
   let inT=entry.declaredStart||entry.in;
@@ -1407,6 +1417,10 @@ function renderMyTcList(){
       const stillIn=!e.out;
       const a=adjustedTimes(e); // v48.1: {in,out} used for the bold "Paid" line below
       const paidHrs=paidHours(e);
+      // v49.x: soft flag — a missed start-time selection from clock-in, still fixable by the
+      // employee themselves as long as the punch isn't locked yet. Doesn't block Submit; once
+      // locked, this becomes the supervisor/GM's problem via the Submissions panel instead.
+      const needsStart=!punchLocked&&needsStartTimeConfirm(e);
       const badges=[
         stillIn?'<span class="badge b-in">In</span>':'',
         e.manualEntry?'<span class="badge b-amber">✎ Manual</span>':'',
@@ -1428,6 +1442,10 @@ function renderMyTcList(){
           </div>
           <div style="text-align:right;flex-shrink:0;">${badges}</div>
         </div>
+        ${needsStart?`<div style="margin-top:8px;padding:6px 8px;background:var(--amber-l);border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;color:var(--amber);">⚠ Confirm your start time — it wasn't set when you clocked in</span>
+          <button class="btn-sm" onclick="event.stopPropagation();openMyTcStartFix('${e.dbId}')" style="background:var(--amber);color:#fff;border:0;flex-shrink:0;">Fix</button>
+        </div>`:''}
         ${punchEditable?`<div style="margin-top:8px;text-align:right;"><button class="btn-sm" onclick="openMyTcEdit('${e.dbId}')">Edit</button></div>`:''}
       </div>`;
     }).join('');
@@ -1454,6 +1472,13 @@ function openMyTcAdd(){
   document.getElementById('mytc-edit-modal-bg').style.display='flex';
 }
 
+// v49.x: retroactive start-time fix for My Timecard — find the entry the same safe,
+// type-agnostic way openMyTcEdit below does, then hand off to the shared picker.
+function openMyTcStartFix(dbId){
+  const e=myTcPunches.find(p=>String(p.dbId)===String(dbId));
+  if(!e)return;
+  openStartTimeFix(e,renderMyTcList);
+}
 function openMyTcEdit(dbId){
   // v47.0: per-site editability — check this punch's site stage
   const e=myTcPunches.find(p=>String(p.dbId)===String(dbId));
@@ -1704,6 +1729,37 @@ async function selectStartTime(hhmm){
   document.getElementById('start-time-modal-bg').style.display='none';
   _startTimeCtx=null;
   showCorfixReminder(site);
+}
+
+// v49.x: retroactive version of the picker above — used to fix a punch that needed a start-time
+// selection at clock-in but never got one (see needsStartTimeConfirm()). Reuses the same modal
+// markup (start-time-modal-bg/start-time-options) but is deliberately a separate context/handler
+// from showStartTimeModal()/selectStartTime(): those chain into the Corfix safety reminder,
+// which only makes sense right after a live clock-in, not when reviewing a past punch. Callers
+// (My Timecard, the admin correction modal) pass their own onDone refresh callback.
+let _startFixCtx=null;
+function openStartTimeFix(entry,onDone){
+  const opts=computeStartTimeOptions(entry.in);
+  if(!opts||!opts.length)return; // shouldn't happen if the caller only shows the button when needed
+  _startFixCtx={entry,onDone};
+  document.getElementById('start-time-options').innerHTML=opts.map(t=>
+    `<button onclick="selectStartTimeFix('${t}')" style="padding:18px;font-size:20px;font-weight:700;background:var(--bg2);color:var(--txt);border:1.5px solid var(--bdr2);border-radius:var(--radius);cursor:pointer;font-family:inherit;">${fmtHHMM(t)}</button>`
+  ).join('');
+  document.getElementById('start-time-modal-bg').style.display='flex';
+}
+async function selectStartTimeFix(hhmm){
+  if(!_startFixCtx)return;
+  const {entry,onDone}=_startFixCtx;
+  const [h,m]=hhmm.split(':').map(Number);
+  const declared=new Date(entry.in);declared.setHours(h,m,0,0);
+  if(entry.dbId){
+    const {error}=await sb.from('punches').update({declared_start_time:declared.toISOString()}).eq('id',entry.dbId);
+    if(error){showCustomAlert('Could not save',error.message);return;}
+  }
+  entry.declaredStart=declared;
+  document.getElementById('start-time-modal-bg').style.display='none';
+  _startFixCtx=null;
+  if(onDone)onDone();
 }
 
 /* ─── Corfix safety reminder ─── */
@@ -4527,7 +4583,8 @@ async function refreshAdminEmpCorrect(){
   if(error){list.innerHTML='<p style="text-align:center;color:var(--red);padding:20px;font-size:13px;">Could not load punches — check connection.</p>';return;}
   const entries=(data||[]).map(dbRowToEntry);
   if(!entries.length){list.innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">No punches recorded for this period.</p>';return;}
-  // v47.6: per-punch flags — the same three categories the Submissions panel already rolls up
+  _adminCorrectEntries=entries; // v49.x: so openAdminStartFix(dbId) can look an entry back up
+  // v47.6: per-punch flags — the same categories the Submissions panel already rolls up
   // into the employee-level "⚠️ ..." summary one screen up, surfaced per punch here so the admin
   // can see exactly which record needs attention instead of opening each one to check.
   list.innerHTML=entries.map(e=>{
@@ -4536,11 +4593,16 @@ async function refreshAdminEmpCorrect(){
     const autoFlag=e.autoClocked&&!e.editedAfterAuto;
     const waiveFlag=isPendingWaive(e);
     const oosFlag=isOutOfSubmission(e,row);
-    const flagged=autoFlag||waiveFlag||oosFlag;
+    // v49.x: same missed-start-time-selection case flagged in My Timecard and the Submissions
+    // panel — surfaced here too, as the supervisor/GM's fallback fix when the employee can't
+    // or didn't resolve it themselves.
+    const startFlag=needsStartTimeConfirm(e);
+    const flagged=autoFlag||waiveFlag||oosFlag||startFlag;
     const flagParts=[];
     if(autoFlag)flagParts.push('Unresolved auto-clock');
     if(waiveFlag)flagParts.push('Pending lunch waive');
     if(oosFlag)flagParts.push('Punch after submit');
+    if(startFlag)flagParts.push('Unconfirmed start time');
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
       <div style="min-width:0;">
         <span style="font-size:13px;color:var(--txt);font-weight:600;">${e.jobsite||'—'}</span>
@@ -4549,10 +4611,19 @@ async function refreshAdminEmpCorrect(){
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
         <span style="font-size:12px;color:${flagged?'var(--red)':'var(--txt2)'};font-weight:${flagged?'700':'400'};">${hrs!=null?hrs.toFixed(2)+'h':'—'}</span>
+        ${startFlag?`<button class="btn-sm" onclick="openAdminStartFix('${e.dbId}')" style="background:var(--amber);color:#fff;border:0;">Set start</button>`:''}
         <button class="btn-sm" onclick="openEditModal('db:${e.dbId}')" style="background:var(--bg2);color:var(--txt);border:0.5px solid var(--bdr2);">Edit</button>
       </div>
     </div>`;
   }).join('');
+}
+// v49.x: entries from the most recent refreshAdminEmpCorrect() render, so openAdminStartFix
+// (called later from an onclick, by dbId only) can look the punch back up.
+let _adminCorrectEntries=[];
+function openAdminStartFix(dbId){
+  const e=_adminCorrectEntries.find(p=>String(p.dbId)===String(dbId));
+  if(!e)return;
+  openStartTimeFix(e,()=>{refreshAdminEmpCorrect();refreshSubmissionsPanel();});
 }
 
 function closeAdminEmpCorrect(){
@@ -4621,6 +4692,11 @@ async function refreshSubmissionsPanel(){
       const oosCount=sitePunches.filter(p=>isOutOfSubmission(p,row)).length;
       const autoCount=sitePunches.filter(p=>p.autoClocked&&!p.editedAfterAuto).length;
       const waiveCount=sitePunches.filter(p=>isPendingWaive(p)).length;
+      // v49.x: same tier as an unresolved auto-clock or pending waive — a missed start-time
+      // selection directly affects paid hours, so it blocks send-to-office the same way,
+      // with the admin correction modal (via "Fix punches first" → the employee's name) as
+      // the supervisor/GM's fallback when the employee themselves can't act on it.
+      const unconfirmedCount=sitePunches.filter(p=>needsStartTimeConfirm(p)).length;
       const neverSubmitted=stage===TC_STAGE.OPEN&&periodEnded;
       const stuckEmp=stage===TC_STAGE.EMP;
 
@@ -4648,8 +4724,9 @@ async function refreshSubmissionsPanel(){
       if(oosCount)flagParts.push(`${oosCount} punch${oosCount!==1?'es':''} after submit`);
       if(autoCount)flagParts.push(`${autoCount} unresolved auto-clock${autoCount!==1?'s':''}`);
       if(waiveCount)flagParts.push(`${waiveCount} pending waive${waiveCount!==1?'s':''}`);
+      if(unconfirmedCount)flagParts.push(`${unconfirmedCount} unconfirmed start time${unconfirmedCount!==1?'s':''}`);
       const hasFlag=flagParts.length>0;
-      const blocked=autoCount>0||waiveCount>0;
+      const blocked=autoCount>0||waiveCount>0||unconfirmedCount>0;
       const canOverride=(neverSubmitted||stuckEmp)&&!blocked;
 
       let actionHtml='';
