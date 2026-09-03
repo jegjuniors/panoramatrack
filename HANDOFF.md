@@ -1,23 +1,90 @@
-# PanoramaTrack — Current State
+# PanoramaTrack — Handoff
 
-**Current Version:** v49.3 *(Flags + fixes for punches that missed the scheduled-start selection popup)*
-**Last Updated:** August 10, 2026
+**Version:** v49.3 *(Flag + fix punches that missed the scheduled-start selection popup)*
+**Last handoff update:** September 3, 2026
 
-> Note: this file had fallen out of sync with the codebase (last full update was at v44.0; the
-> actual app was already at v47.4 per the `index.html` version badge and in-code comments before
-> this session). The v47.5–v49.3 entries below are current; v44.1–v47.4 history isn't backfilled.
+> This is the living handoff file. Sections 1–4 below are the current state — read them first.
+> Everything under "Reference & History" is background: architecture, DB schema, standing build
+> rules, key code locations, and the full version-by-version changelog.
 
-> **Migrations required (run in order in the Supabase SQL editor before deploying this version):**
-> 1. `migration_v48_start_time.sql` — adds `punches.declared_start_time` and 5 `pt_settings`
->    columns for scheduled-start selection. (Carried over from v48.0.)
-> 2. `migration_submit_notify.sql` — adds `pt_settings.submit_notify_enabled` and
->    `pt_settings.submit_notify_emails`. (Carried over from v49.0.)
-> No new migration this version — v49.3 only reads/writes the existing `declared_start_time`
-> column from v48.0.
+---
 
-> ⚠️ **Submission-notification feature status:** code-complete and deployed (Edge Function live,
-> secret set, settings UI wired) as of v49.1 — Julio confirmed it's working in real testing.
-> Still watching how it holds up over a full pay period.
+## 1. Current Status — what was just completed
+
+- **v49.3** — Retroactive flag + fix for early punches that never answered the v48.0
+  scheduled-start popup (phone backgrounded/locked in the ~600ms window silently skipped it).
+  Soft amber "Confirm your start time" banner on My Timecard (fix one tap away, not a
+  submit-blocker); hard block on the Submissions panel + admin correction modal with a
+  dedicated "Set start" action that writes `declared_start_time` without touching the raw
+  clock-in. New `needsStartTimeConfirm(entry)` / `openStartTimeFix()` / `selectStartTimeFix()`
+  in `app.js`.
+- **v49.2** — Restored the v47.5 iPhone Dynamic Island safe-area fix on `#screen-mytc` in
+  `index.html` (it had silently reverted to flat `1.75rem` top padding somewhere before v48.0).
+- **v49.1** — Submission-notification Edge Function (`submission-notify-edge-function.ts`, Deno +
+  Resend) built and wired into the 3 supervisor submit paths via `notifySubmission()` in
+  `app.js`. Deployed; Julio confirmed it works in real testing.
+- **v49.0** — Settings foundation for submission notifications (`pt_settings.submit_notify_enabled`
+  / `submit_notify_emails`, Settings-screen toggle + recipient field).
+
+## 2. Active State
+
+- **Branch:** `main` — working tree clean, all of the above committed (HEAD `d242690`).
+- **Modified files:** none uncommitted.
+- **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
+  `styles.css` served as-is. Verification is `node --check app.js` (passes) plus ad-hoc
+  assertion harnesses: `needsStartTimeConfirm()` (9 assertions, v49.3) and the submission-notify
+  item-building logic (8 assertions, v49.1) both pass. The Edge Function was `tsc`-checked
+  against a Deno shim only — not runtime-tested outside Supabase.
+- **Migrations — all already run in production by Julio:**
+  1. `migration_v48_start_time.sql` — `punches.declared_start_time` + 5 `pt_settings` columns.
+  2. `migration_submit_notify.sql` — `pt_settings.submit_notify_enabled` / `submit_notify_emails`.
+  - v49.3 adds **no** migration (reuses `declared_start_time`).
+- **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
+  secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
+
+## 3. Next Steps
+
+1. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+   a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
+   across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
+   grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
+   modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
+2. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+   fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
+   consolidated pass is easier to keep from silently reverting than scattered one-offs.
+3. **Close out the submission-notification watch** once it's held up over a full pay period, then
+   move on to the standing security items (see Blockers) or Bank Hours (shelved from v44.0).
+
+## 4. Blockers / Notes
+
+- **Supabase RLS is disabled.** The anon key currently allows full read/write/delete on
+  `punches` and likely every other table. Do **NOT** enable RLS (or click Supabase's "Resolve
+  issue") without writing policies first — with the anon key and no policies it takes the whole
+  app offline. Needs a deliberate pass: RLS + policies (or move writes behind a server function)
+  + key rotation.
+- **Plaintext secrets in DB:** employee PINs and `supervisor_password` are stored plaintext.
+  Hashing is on the security short-list.
+- **No kiosk lock screen** — the app doesn't return to PIN entry after inactivity.
+- **v49.3 limitation (not built):** the retroactive start-time fix modal has no Cancel — a
+  mis-tap commits to picking some time. See Next Step 1.
+- **Standing build gotchas** (full text under Reference & History → Standing Build Rules):
+  dark-mode needs explicit `var(--txt*)` colors on every text element; keep `#app` free of
+  `transform`/`filter`/`contain` so `position:fixed` bars work; use the JS scroll-rail pattern
+  on mobile, not CSS scrollbars; guard async log refreshers with a sequence number; don't delete
+  the `const` lines above the row-template literals in `refreshMasterLog`/`refreshSupLog`.
+- **~11 clock-outs overwritten Jun 8–10** by the old auto-clock bug (fixed in v37.1) may still
+  need manual reconstruction via the edit modal — no backups on the free tier. Likely stale.
+- **Deploy:** static files → Netlify (host `panoramatrack.panoramabuildingsystems.ca`). The
+  Edge Function is pasted into the Supabase Dashboard by hand, not deployed from this repo.
+  `payroll-template.js` is auto-generated base64 — never hand-edit.
+
+---
+
+# Reference & History
+
+_Everything below is background context, kept from the former `CURRENT_STATE.md`. The
+version entries are newest-first; v47.5–v49.3 are current, v44.1–v47.4 history was never
+backfilled, v44.0 and earlier are the original log._
 
 ---
 
@@ -638,7 +705,8 @@ CREATE TABLE pt_timecard_status (
 | `app.js` | All logic, Supabase calls, state |
 | `styles.css` | All styling |
 | `payroll-template.js` | **(v40.0)** Embedded base64 blank payroll Excel template, loaded by the Excel-pack export. Auto-generated — do not hand-edit. |
-| `CURRENT_STATE.md` | This file — project state tracker |
+| `HANDOFF.md` | This file — living handoff + project history (formerly `CURRENT_STATE.md`) |
+| `CLAUDE.md` | Repo guide for Claude Code — workflow, handoff protocol, orientation |
 | `PanoramaTrack_Future_Features.md` | Roadmap / future ideas |
 
 ---
@@ -1063,8 +1131,8 @@ See the Security / Priority short-list below for the standing open items (RLS, k
 
 Paste this at the top of your first message:
 
-> "I'm continuing development on PanoramaTrack. Please read CURRENT_STATE.md and the project files to get up to speed. Here's what I need help with today: [your task]"
+> "I'm continuing development on PanoramaTrack. Please read HANDOFF.md and the project files to get up to speed. Here's what I need help with today: [your task]"
 
 ---
 
-_Last updated: July 2, 2026 — v44.0 (3-tier submission flow complete — all 3 builds delivered)_
+_Reference & History section last backfilled: July 2, 2026 — v44.0. Current state is Sections 1–4 at the top of this file (v49.3, September 3, 2026)._

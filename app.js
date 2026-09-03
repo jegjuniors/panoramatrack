@@ -327,7 +327,7 @@ async function setTimecardStage(empId,period,stage,jobsite){
 
 // v49.x: fires the submission-notify Edge Function so the office gets emailed whenever a
 // supervisor sends timecards in (batch send, per-employee send, or a supervisor's own
-// self-submission — see CURRENT_STATE.md). Deliberately NOT called from the admin override path.
+// self-submission — see HANDOFF.md). Deliberately NOT called from the admin override path.
 // Fire-and-forget: never awaited by callers, and any failure here must never surface to the
 // supervisor or block their actual submission — it's a side effect, not part of the workflow.
 // The Edge Function itself checks submit_notify_enabled/submit_notify_emails, so this is safe
@@ -5051,7 +5051,7 @@ function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,peri
 /* ─── Preliminary reminder banner ─── */
 /* ─── Database Maintenance modal (v47.7) ───
    Shell for now — backup (below) moved in unchanged. Restore + selective wipe are planned as
-   follow-ups once the table list / restore semantics are settled (see CURRENT_STATE.md). */
+   follow-ups once the table list / restore semantics are settled (see HANDOFF.md). */
 function openDbMaintModal(){
   document.getElementById('backup-status').textContent='';
   document.getElementById('archive-status').textContent='';
