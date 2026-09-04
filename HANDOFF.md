@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.4 *(Fix: supervisor-employee "Unsubmitted timecard" banner stuck forever)*
+**Version:** v49.6 *(Estimated-clock-out prompt on submit-to-office + dark-mode name fix)*
 **Last handoff update:** September 4, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,6 +11,27 @@
 
 ## 1. Current Status — what was just completed
 
+- **v49.6** — The "Employees still clocked in" estimated-clock-out prompt (previously shown only
+  from the supervisor's "Preview PDF (Preliminary)" flow) now also appears before **"Submit site
+  to office"** (batch) and the per-employee **"Send to office"** button, whenever any of the
+  employees about to be sent are currently clocked in. In this context it's FYI-only — confirming
+  a time just continues to the normal submit confirmation; nothing is written to punch records
+  (the modal's copy is reworded accordingly — see `EST_NOTE_FYI` vs `EST_NOTE_PDF` in `app.js`).
+  `showEstModal()` was refactored to take an `onProceed(timeVal)` callback instead of being
+  hardwired to the PDF/export path, so both flows share one implementation. Also fixed: the
+  employee-name `<span>` in that modal's per-employee list had no color at all, rendering as
+  illegible black text in dark mode — now `var(--txt)`.
+- **v49.5** — Fixed `saveMyTcEdit()`/`saveEdit()` (My Timecard and the shared supervisor/master
+  edit-punch modal) unconditionally nulling `declared_start_time` on every save, even when only
+  jobsite/activities/clock-out changed and the clock-in time itself didn't move. That silently
+  wiped an already-resolved v49.3 start-time confirmation and re-flagged the punch with no
+  indication anything regressed. Now only resets it when the clock-in time actually changes.
+  Found while investigating a report that two employees' (Sandy Enriquez, Victor Manual Aguilar)
+  "unconfirmed start time" flags persisted on the Submissions panel / admin correction modal even
+  though they looked resolved on the employee's own (locked) My Timecard screen — that specific
+  case turned out to be lock-suppression working as designed (v49.3: the employee-facing banner
+  hides once a punch is locked, regardless of whether it's actually resolved) rather than this
+  bug, but the unconditional-reset bug was real and is fixed regardless.
 - **v49.4** — Fixed a bug where a supervisor-employee's (`dept==='Supervisor'`) My Timecard
   catch-up banner ("⚠️ Unsubmitted timecard for …") could never clear for a past period, no
   matter how many times they pulled back and resubmitted. Root cause: the v45.0 catch-up check
@@ -41,37 +62,39 @@
 ## 2. Active State
 
 - **Branch:** `main`.
-- **Modified files (uncommitted as of this update):** `app.js` (catch-up fix + `app_version`
-  bump), `index.html` (version badge → v49.4). Not yet committed/pushed.
+- **Modified files:** none uncommitted — v49.4, v49.5, and v49.6 are all committed and pushed as
+  of this update (`app.js`, `index.html`).
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
   `styles.css` served as-is. `node --check app.js` passes. Ad-hoc assertion harnesses (established
   pattern, run against extracted/mirrored logic — the real functions depend on live
-  Supabase/DOM state): the v49.4 catch-up predicate (8 assertions, including the exact bug case),
-  `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify item-building (8 assertions,
-  v49.1) — all pass. The v49.4 fix has **not** been checked against the real UI/Supabase — worth
-  Julio confirming the banner actually clears on his account after this deploys (or immediately,
-  independent of the deploy, by an admin exporting his Aug 10–23 Bluevale row from the
-  Submissions panel → Last period, which stamps `exported` and unblocks him right now either way).
+  Supabase/DOM state): the v49.4 catch-up predicate (8 assertions), the v49.5 edit-save predicate
+  (4 assertions), `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify
+  item-building (8 assertions, v49.1) — all pass. v49.6 (the submit-to-office prompt + color fix)
+  was verified with `node --check` only — it's DOM-driven UI wiring, not exercised against the
+  real UI/Supabase here. Worth a quick real-device check: trigger "Submit site to office" and the
+  per-employee "Send to office" button while someone's still clocked in, confirm the prompt shows
+  and names are legible in dark mode.
 - **Migrations — all already run in production by Julio:**
   1. `migration_v48_start_time.sql` — `punches.declared_start_time` + 5 `pt_settings` columns.
   2. `migration_submit_notify.sql` — `pt_settings.submit_notify_enabled` / `submit_notify_emails`.
-  - v49.3 and v49.4 add **no** migration.
+  - v49.3 through v49.6 add **no** migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Commit + push v49.4**, then have an admin re-check the Submissions panel for any other
-   supervisor-employees who may have the same stuck-banner symptom on past periods (anyone whose
-   period was paid out via the Report tab rather than the Submissions-panel export will have been
-   affected) — the code fix stops new nags but doesn't retroactively touch already-mis-flagged
-   rows (it doesn't need to; the fix is purely in the read-side check).
-2. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+1. **Real-device check on v49.6** (see Build/test status above) — confirm the prompt fires on
+   both submit-to-office paths and the name color reads correctly in dark mode.
+2. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+   the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
+   Report tab rather than the Submissions-panel export will have been affected) — the code fix
+   stops new nags but doesn't retroactively touch already-mis-flagged rows.
+3. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-3. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+4. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
@@ -110,8 +133,71 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.4 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.6 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.6 — Estimated-clock-out prompt on submit-to-office + dark-mode name fix
+
+**Context:** the "⏱ Employees still clocked in" estimated-clock-out modal only ever appeared
+from the supervisor's "Preview PDF (Preliminary)" button. Julio asked for the same prompt any
+time a timecard with a still-clocked-in employee is submitted to office, not just previewed —
+and separately flagged that the employee names inside that modal render as illegible black text
+in dark mode.
+
+**What shipped (`app.js`, `index.html`):**
+- `showEstModal(openPunches, onProceed, note)` — generalized from a PDF-flow-only function into a
+  reusable prompt: callers pass what should happen once the supervisor confirms a time
+  (`onProceed`) and, optionally, context-appropriate copy (`note`). The live re-preview listener
+  (fires as the time input changes) now tracks its own `_estModalOpenPunches` instead of assuming
+  `exportRange.logs` exists, so it works outside the export flow too.
+- `openExportConfirm()`'s existing preliminary-PDF path passes an `onProceed` that reproduces the
+  exact previous behavior (stamp estimated `out` onto the in-memory logs, set
+  `exportRange.estimatedOut`, continue into `checkDupsAndProceed()`) — no behavior change there.
+- `submitSiteToOffice()` (batch "Submit site to office") and `supSendEmployeeToOffice()`
+  (per-employee "Send to office") each now check for open punches (`clock_out IS NULL`) among the
+  employees about to be sent, fetched fresh from Supabase. If any are open, the modal shows first;
+  confirming just continues to the normal submit-confirmation dialog (`confirmSubmitSiteToOffice`/
+  `confirmSendEmployeeToOffice`, split out of the original functions) — **purely a heads-up**,
+  nothing is written to punch records, matching Julio's call on scope. Copy swapped to
+  `EST_NOTE_FYI` ("nothing is saved here...") vs. the PDF flow's `EST_NOTE_PDF`, via a new
+  `id="est-note"` paragraph in `index.html` so the modal's explanation stays accurate per context.
+- `buildEstEmployeeList()`'s per-employee name `<span>` now sets `color:var(--txt)` — previously
+  unstyled, so it fell back to browser-default black, invisible against the dark background (the
+  standing dark-mode gotcha: every injected text element needs an explicit `--txt*` color).
+
+**Verified:** `node --check` on `app.js`. This is DOM-driven UI wiring (modal show/hide, event
+listeners, live DB queries for open punches) with no pure-logic core to extract into an assertion
+harness the way `needsStartTimeConfirm`/the catch-up predicate were — not exercised against the
+real UI/Supabase here. Worth a real-device pass: trigger both submit-to-office paths while
+someone's clocked in, confirm the prompt appears and names read correctly in dark mode.
+
+---
+
+## ✅ v49.5 — Fix: any punch edit silently cleared a resolved start-time confirmation
+
+**Context:** while investigating a report that two employees' (Sandy Enriquez, Victor Manual
+Aguilar) "unconfirmed start time" flags (v49.3) persisted on the Submissions panel and admin
+correction modal even though the flag had disappeared from their own (already-locked) My
+Timecard screens, traced `saveMyTcEdit()` and the shared supervisor/master `saveEdit()` to always
+writing `declared_start_time: null` on every save — regardless of whether the clock-in time
+itself changed. Editing just the jobsite, activities, or clock-out on an already-`declared_start_time`-resolved
+punch would silently wipe that resolution and re-flag it, with no indication anything regressed.
+(In Sandy/Victor's specific case, the persisting flag turned out to be v49.3's lock-suppression
+working as designed rather than this bug — see the v49.4-adjacent write-up — but this bug was
+real and independently worth fixing.)
+
+**What shipped (`app.js`):** both `saveMyTcEdit()` and `saveEdit()` now compare the new clock-in
+against the punch's previous clock-in (`newIn.getTime()!==oldIn.getTime()`) and only include
+`declared_start_time: null` in the update (and only null the in-memory `declaredStart`) when the
+clock-in actually moved.
+
+**Verified:** `node --check` on `app.js` + a 4-assertion harness against the extracted
+`clockInChanged` predicate: unchanged clock-in with other fields edited → no reset key in the
+update payload; genuinely changed clock-in → reset present and `null`; a new `Date` object
+representing the same instant (not the same reference) → correctly still "unchanged" via
+`getTime()`, not object identity.
 
 ---
 

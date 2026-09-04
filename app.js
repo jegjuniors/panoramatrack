@@ -1553,7 +1553,13 @@ async function saveMyTcEdit(){
     const oldJobsite=e.jobsite,oldIn=e.in; // v47.4: capture pre-edit site/date for orphan cleanup
     const wasAuto=e.autoClocked;
     const editedAfterAuto=wasAuto&&!!newOut;
-    const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true,declared_start_time:null};
+    // v49.5: only invalidate a saved scheduled-start selection when the clock-in time itself
+    // actually moved — previously this reset unconditionally on every save, so editing just the
+    // jobsite/activities/clock-out on an already-resolved punch silently wiped declared_start_time
+    // and re-flagged it as needing confirmation with no indication anything regressed.
+    const clockInChanged=newIn.getTime()!==oldIn.getTime();
+    const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true};
+    if(clockInChanged)upd.declared_start_time=null;
     upd.clock_out=newOut?newOut.toISOString():null;
     if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
     const {error}=await sb.from('punches').update(upd).eq('id',e.dbId);
@@ -1561,7 +1567,8 @@ async function saveMyTcEdit(){
     // Keep the in-memory open-punch cache consistent for this device too
     const memEntry=timeLog.find(l=>l.dbId===e.dbId);
     if(memEntry){
-      memEntry.in=newIn;memEntry.out=newOut;memEntry.jobsite=jobsite;memEntry.activity=acts;memEntry.manualEntry=true;memEntry.declaredStart=null;
+      memEntry.in=newIn;memEntry.out=newOut;memEntry.jobsite=jobsite;memEntry.activity=acts;memEntry.manualEntry=true;
+      if(clockInChanged)memEntry.declaredStart=null;
       if(editedAfterAuto){memEntry.autoClocked=false;memEntry.editedAfterAuto=true;}
       if(newOut){const idx=timeLog.indexOf(memEntry);if(idx>=0)timeLog.splice(idx,1);}
     }
@@ -2272,6 +2279,23 @@ async function submitSiteToOffice(){
     return;
   }
 
+  // v49.6: heads-up (not a block) if any of the employees about to be sent are still clocked
+  // in right now — same "estimated clock-out" prompt as the preliminary PDF flow, just used
+  // here purely as an FYI before confirming; nothing is written to their punch records.
+  const readyEmpIds=[...new Set(readyPairs.map(p=>p.empId))];
+  const {data:openData}=await sb.from('punches').select('*')
+    .in('employee_id',readyEmpIds).is('clock_out',null);
+  const openPunches=(openData||[]).map(dbRowToEntry);
+  if(openPunches.length){
+    showEstModal(openPunches,async()=>{
+      confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount);
+    },EST_NOTE_FYI);
+    return;
+  }
+  confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount);
+}
+
+function confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount){
   const sub=openCount
     ? `${openCount} employee${openCount!==1?'s have':' has'} not submitted yet and will stay open for a later pass.`
     : 'All employees at your sites have submitted.';
@@ -2359,6 +2383,20 @@ async function supSendEmployeeToOffice(empId,empName){
     return;
   }
   const siteList=sendable.map(r=>r.jobsite).sort().join(', ');
+  // v49.6: same still-clocked-in heads-up as the batch send \u2014 FYI only, nothing stored.
+  const {data:openData}=await sb.from('punches').select('*')
+    .eq('employee_id',empId).is('clock_out',null);
+  const openPunches=(openData||[]).map(dbRowToEntry);
+  if(openPunches.length){
+    showEstModal(openPunches,async()=>{
+      confirmSendEmployeeToOffice(empId,empName,period,periodLabel,sendable,siteList);
+    },EST_NOTE_FYI);
+    return;
+  }
+  confirmSendEmployeeToOffice(empId,empName,period,periodLabel,sendable,siteList);
+}
+
+function confirmSendEmployeeToOffice(empId,empName,period,periodLabel,sendable,siteList){
   showCustomConfirm(
     `Send ${empName}\u2019s timecard to office?`,
     `This sends ${empName}\u2019s submitted timecard at ${siteList} (${periodLabel}) to head office and locks it. Review their punches above before sending.`,
@@ -3723,9 +3761,15 @@ async function saveEdit(){
   const newActs=[...editActs];
   const wasAuto=e.autoClocked;
   const editedAfterAuto=wasAuto&&!!newOut;
+  // v49.5: only invalidate a saved scheduled-start selection when the clock-in time itself
+  // actually moved — previously this reset unconditionally on every save, so editing just the
+  // jobsite/activities/clock-out on an already-resolved punch silently wiped declared_start_time
+  // and re-flagged it as needing confirmation with no indication anything regressed.
+  const clockInChanged=newIn.getTime()!==oldIn.getTime();
   // Write to DB
   if(e.dbId){
-    const upd={clock_in:newIn.toISOString(),jobsite:newJobsite,activities:newActs,declared_start_time:null};
+    const upd={clock_in:newIn.toISOString(),jobsite:newJobsite,activities:newActs};
+    if(clockInChanged)upd.declared_start_time=null;
     if(newOut)upd.clock_out=newOut.toISOString();else upd.clock_out=null;
     if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
     // Lunch waive decision (v42.0) — only write when a decision was made this session
@@ -3734,7 +3778,8 @@ async function saveEdit(){
     if(error){err.textContent='DB error: '+error.message;return}
   }
   // Update memory
-  e.in=newIn;e.out=newOut;e.jobsite=newJobsite;e.activity=newActs;e.declaredStart=null;
+  e.in=newIn;e.out=newOut;e.jobsite=newJobsite;e.activity=newActs;
+  if(clockInChanged)e.declaredStart=null;
   if(editedAfterAuto){e.autoClocked=false;e.editedAfterAuto=true;}
   if(_editWaiveDecision!==null)e.lunchWaived=_editWaiveDecision;
   // v47.4: if this edit left the OLD site with no punches this period, drop its stale status row
@@ -3950,7 +3995,19 @@ async function openExportConfirm(){
     if(openPunches.length>0){
       // Show estimated clock-out modal — mandatory
       exportRange={from,to,logs,periodStart,periodEnd,dups:[],isPrelim:true,estimatedOut:null};
-      showEstModal(openPunches);
+      showEstModal(openPunches,async(timeVal)=>{
+        const [h,m]=timeVal.split(':').map(Number);
+        // Apply estimated clock-out to open punches in memory only
+        exportRange.logs.filter(l=>!l.out).forEach(l=>{
+          const estOut=new Date(l.in);estOut.setHours(h,m,0,0);
+          // If est time is before clock-in (overnight edge), add a day
+          if(estOut<=l.in)estOut.setDate(estOut.getDate()+1);
+          l.estimatedOut=estOut; // mark as estimated — not written to DB
+          l.out=estOut;          // used for PDF calculation
+        });
+        exportRange.estimatedOut=timeVal;
+        await checkDupsAndProceed();
+      });
       return;
     }
     // Prelim but no open punches — proceed normally but flag as prelim
@@ -4024,7 +4081,19 @@ function reviewGateGoNow(){
   goToSupReport('review'); // jumps Time log into the needs-review filter (v35.7)
 }
 
-function showEstModal(openPunches){
+// v49.6: showEstModal takes an onProceed(timeVal) callback instead of always feeding into the
+// PDF/export flow, so the same "some employees are still clocked in" prompt can gate other
+// actions too (submit-to-office) — each caller decides what happens once the supervisor
+// confirms a time. _estModalOpenPunches is kept alongside so the live preview (the change
+// listener below) can rebuild without assuming exportRange.logs exists.
+let _estModalOpenPunches=[];
+let _estModalOnProceed=null;
+const EST_NOTE_PDF='Set an estimated clock-out time for today. This will be used to calculate approximate hours for the <b>Preliminary</b> report only — actual punch records are not affected.';
+const EST_NOTE_FYI='Just a heads-up before sending — nothing is saved here and punch records are not affected. Confirm a rough time to continue.';
+function showEstModal(openPunches,onProceed,note){
+  _estModalOpenPunches=openPunches;
+  _estModalOnProceed=onProceed||null;
+  document.getElementById('est-note').innerHTML=note||EST_NOTE_PDF;
   document.getElementById('est-open-count').textContent=
     `${openPunches.length} employee${openPunches.length!==1?' are':' is'} currently clocked in and will have estimated hours.`;
   // Default est time to now rounded to nearest 15 min
@@ -4046,7 +4115,7 @@ function buildEstEmployeeList(openPunches){
       const estOut=new Date(l.in);estOut.setHours(h,m,0,0);
       const hrs=Math.max(0,(estOut-l.in)/3600000);
       return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid var(--bdr);">
-        <span>${l.name}</span>
+        <span style="color:var(--txt);">${l.name}</span>
         <span style="color:var(--amber);">In: ${fmt(l.in)} → Est: ${timeVal} ≈ ${hrs.toFixed(2)}h</span>
       </div>`;
     }).join('');
@@ -4055,8 +4124,7 @@ function buildEstEmployeeList(openPunches){
 // Update preview when time changes
 document.addEventListener('change',function(e){
   if(e.target.id==='est-time-input'){
-    const open=exportRange.logs?exportRange.logs.filter(l=>!l.out):[];
-    if(open.length)buildEstEmployeeList(open);
+    if(_estModalOpenPunches.length)buildEstEmployeeList(_estModalOpenPunches);
   }
 },{passive:true});
 
@@ -4065,20 +4133,9 @@ function closeEstModal(){document.getElementById('est-clockout-modal-bg').style.
 async function proceedWithEstimate(){
   const timeVal=document.getElementById('est-time-input').value;
   if(!timeVal){document.getElementById('est-modal-err').textContent='Please enter an estimated clock-out time.';return}
-  const [h,m]=timeVal.split(':').map(Number);
-  // Apply estimated clock-out to open punches in memory only
-  const now=new Date();
-  const openPunches=exportRange.logs.filter(l=>!l.out);
-  openPunches.forEach(l=>{
-    const estOut=new Date(l.in);estOut.setHours(h,m,0,0);
-    // If est time is before clock-in (overnight edge), add a day
-    if(estOut<=l.in)estOut.setDate(estOut.getDate()+1);
-    l.estimatedOut=estOut; // mark as estimated — not written to DB
-    l.out=estOut;          // used for PDF calculation
-  });
-  exportRange.estimatedOut=timeVal;
   closeEstModal();
-  await checkDupsAndProceed();
+  const cb=_estModalOnProceed;_estModalOnProceed=null;_estModalOpenPunches=[];
+  if(cb)await cb(timeVal);
 }
 
 async function checkDupsAndProceed(){
@@ -5125,7 +5182,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.4',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.6',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5174,7 +5231,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.4',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.6',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
