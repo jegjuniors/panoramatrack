@@ -3298,9 +3298,35 @@ async function doMasterExcelZip(){
   // ── Activity name → numeric code map ──
   const codeMap={};(ALL_ACTIVITIES||ACTIVITIES||[]).forEach(a=>{if(a.code)codeMap[a.name]=a.code;});
 
+  // v49.9: detect punches that overlap in time for the same employee/jobsite/day, so a
+  // duplicate/near-duplicate clock-in doesn't get silently summed into one payroll cell with no
+  // trace at all (unlike the PDF, this template has no spare row to split an overlap into — see
+  // consolidatePunchesByDay() above for that version). Still writes the summed hours (a blank
+  // cell isn't valid payroll input either way), but the employee's name is collected for the
+  // on-screen export confirmation below, not just a console.warn like the other warnings here.
+  const overlapKeys=new Set(); // `${empId}|${jobsite}|${dateKey}`
+  {
+    const groups={};
+    logs.forEach(l=>{
+      const at=adjustedTimes(l);
+      const key=`${l.empId}|${l.jobsite||''}|${toDateStr(l.in)}`;
+      (groups[key]=groups[key]||[]).push({in:at.in,out:at.out});
+    });
+    Object.entries(groups).forEach(([key,items])=>{
+      if(items.length<2)return;
+      items.sort((a,b)=>a.in-b.in);
+      let runningMaxOut=null,overlap=false;
+      items.forEach(it=>{
+        if(runningMaxOut&&it.out&&it.in<runningMaxOut)overlap=true;
+        if(it.out&&(!runningMaxOut||it.out>runningMaxOut))runningMaxOut=it.out;
+      });
+      if(overlap)overlapKeys.add(key);
+    });
+  }
+
   // ── Group by employee → week → jobsite → date ──
   const sorted=[...logs].sort((a,b)=>a.in-b.in);
-  const emps={};const overflowWarn=[];const multiCodeWarn=[];const outsideWarn=[];
+  const emps={};const overflowWarn=[];const multiCodeWarn=[];const outsideWarn=[];const overlapWarn=[];
   sorted.forEach(l=>{
     const dayMidnight=new Date(l.in.getFullYear(),l.in.getMonth(),l.in.getDate()).getTime();
     const dayDiff=Math.floor((dayMidnight-startMidnight)/86400000);
@@ -3314,6 +3340,7 @@ async function doMasterExcelZip(){
     const dk=toDateStr(l.in);
     const cell=W.sites[site][dk]||(W.sites[site][dk]={dow:l.in.getDay(),hours:0,codes:[]});
     cell.hours+=ph;
+    if(overlapKeys.has(`${l.empId}|${l.jobsite||''}|${dk}`))overlapWarn.push(l.name);
     (l.activity||[]).forEach(name=>{const c=_xlNumericCode(name,codeMap);if(c!=null&&!cell.codes.includes(c))cell.codes.push(c);});
   });
 
@@ -3396,13 +3423,77 @@ async function doMasterExcelZip(){
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');a.href=url;a.download=zipName;a.click();URL.revokeObjectURL(url);
   closeMasterFormatModal();
+  // v49.9: msg was previously referenced here without ever being declared/initialized — every
+  // Excel export threw a ReferenceError right at this line, after the file had already
+  // downloaded but before the code below it (including the stage='exported' stamp a couple
+  // lines down) ever ran. Declaring it here fixes that for good, not just for this feature.
+  let msg=`${fileCount} timesheet${fileCount!==1?'s':''} exported for ${empList.length} employee${empList.length!==1?'s':''}`;
   if(overflowWarn.length)msg+=` · ${[...new Set(overflowWarn)].length} had 4+ sites (extra sheet added)`;
+  if(overlapWarn.length)msg+=` · ⚠ ${[...new Set(overlapWarn)].length} had overlapping punches (hours summed — verify)`;
   showNotif('✓','Excel pack exported',msg,'#1D9E75',4500);
   if(outsideWarn.length)console.warn('Excel export: punches outside the 14-day grid were skipped for:',[...new Set(outsideWarn)]);
   if(multiCodeWarn.length)console.warn('Excel export: 3+ activity codes at one jobsite/day (parked GM case) for:',[...new Set(multiCodeWarn.filter(Boolean))]);
+  if(overlapWarn.length)console.warn('Excel export: overlapping punches (summed into one day-cell) for:',[...new Set(overlapWarn)]);
   // v44.0 Build 3: if this export came from the admin Submissions panel, stamp stage='exported'.
   if(_pendingExportStampFn){const fn=_pendingExportStampFn;_pendingExportStampFn=null;await fn();}
 }
+// v49.9: shared by generatePDF()/generateMasterPDF() — groups punches by date+jobsite, but only
+// merges punches whose adjusted [in,out] intervals DON'T overlap into one summed row (e.g. a
+// legitimate clock-out-for-lunch/back-in-later split shift). When punches in the same
+// date+jobsite bucket DO overlap in time (e.g. a duplicate/near-duplicate clock-in), they're
+// never silently summed into one deceptive total — each stays its own row, flagged
+// hasOverlap:true, so the anomaly stays visible on the printed timecard instead of being hidden
+// behind a merged number. doMasterExcelZip() reuses the same overlap check before its own
+// per-day summing (see there for why it can't just call this — the template groups differently).
+function consolidatePunchesByDay(punches){
+  const buckets={};
+  punches.forEach(p=>{
+    const at=adjustedTimes(p);
+    const dayKey=p.in.toDateString()+'|'+(p.jobsite||'');
+    (buckets[dayKey]=buckets[dayKey]||[]).push({p,in:at.in,out:at.out});
+  });
+  const rows=[];
+  Object.values(buckets).forEach(items=>{
+    items.sort((a,b)=>a.in-b.in);
+    let overlap=false,runningMaxOut=null;
+    items.forEach(it=>{
+      if(runningMaxOut&&it.out&&it.in<runningMaxOut)overlap=true;
+      if(it.out&&(!runningMaxOut||it.out>runningMaxOut))runningMaxOut=it.out;
+    });
+    if(overlap){
+      items.forEach(it=>{
+        const ph=paidHours(it.p);
+        rows.push({
+          date:it.in,clockIn:it.in,clockOut:it.out,
+          hrs:ph!=null?ph:0,
+          acts:new Set((it.p.activity||[]).filter(a=>a!=='Auto-clocked')),
+          jobsite:it.p.jobsite||'—',
+          hasAuto:!!it.p.autoClocked,hasEstimated:!!it.p.estimatedOut,
+          hasOverlap:true
+        });
+      });
+    } else {
+      const d={date:items[0].in,clockIn:items[0].in,clockOut:items[0].out,hrs:0,acts:new Set(),
+        jobsite:items[0].p.jobsite||'—',hasAuto:false,hasEstimated:false,hasOverlap:false};
+      let anyOpen=false;
+      items.forEach(it=>{
+        if(it.in<d.clockIn)d.clockIn=it.in;
+        if(!it.out)anyOpen=true;
+        if(it.out&&(!d.clockOut||it.out>d.clockOut))d.clockOut=it.out;
+        const ph=paidHours(it.p);if(ph!=null)d.hrs+=ph;
+        (it.p.activity||[]).forEach(a=>{if(a!=='Auto-clocked')d.acts.add(a);});
+        if(it.p.autoClocked)d.hasAuto=true;
+        if(it.p.estimatedOut)d.hasEstimated=true;
+      });
+      // A still-open punch merged with an earlier closed one on the same day/site must not show
+      // that earlier close time as if the day were done — the row is still open, full stop.
+      if(anyOpen)d.clockOut=null;
+      rows.push(d);
+    }
+  });
+  return rows.sort((a,b)=>a.date-b.date||a.jobsite.localeCompare(b.jobsite));
+}
+
 function generateMasterPDF(){
   const {jsPDF}=window.jspdf;
   const logs=_masterLogs||masterExportRange.logs||[];
@@ -3430,25 +3521,6 @@ function generateMasterPDF(){
   });
   const empIds=Object.keys(empMap).sort((a,b)=>empMap[a].name.localeCompare(empMap[b].name));
 
-  // ── Consolidate: group by date+jobsite, variable-height rows ──
-  function consolidate(punches){
-    const dayMap={};
-    punches.forEach(p=>{
-      const at=adjustedTimes(p);
-      const aIn=at.in,aOut=at.out;
-      const dayKey=p.in.toDateString()+'|'+(p.jobsite||'');
-      if(!dayMap[dayKey])dayMap[dayKey]={date:aIn,clockIn:aIn,clockOut:aOut,hrs:0,acts:new Set(),jobsite:p.jobsite||'—',hasAuto:false,hasEstimated:false};
-      const d=dayMap[dayKey];
-      if(aIn<d.clockIn)d.clockIn=aIn;
-      if(aOut&&(!d.clockOut||aOut>d.clockOut))d.clockOut=aOut;
-      const ph=paidHours(p);if(ph!=null)d.hrs+=ph;
-      (p.activity||[]).forEach(a=>{if(a!=='Auto-clocked')d.acts.add(a);});
-      if(p.autoClocked)d.hasAuto=true;
-      if(p.estimatedOut)d.hasEstimated=true;
-    });
-    return Object.values(dayMap).sort((a,b)=>a.date-b.date||a.jobsite.localeCompare(b.jobsite));
-  }
-
   const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'letter'});
   const PW=215.9,PH=279.4;
   const ML=14,MR=14,MT=14;
@@ -3464,6 +3536,7 @@ function generateMasterPDF(){
   const LGRAY=[245,245,245];
   const AMBER_BG=[255,243,220];
   const RED_TEXT=[163,45,45];
+  const OVERLAP_BG=[252,222,222];
   const SITE_HDR=[230,240,230];
 
   const COL={date:38,site:28,in:24,out:24,hrs:16,task:0};
@@ -3479,7 +3552,7 @@ function generateMasterPDF(){
       if(pageIdx>0)doc.addPage();
       pageIdx++;
       const emp=empMap[empId];
-      const rows=consolidate(emp.punches);
+      const rows=consolidatePunchesByDay(emp.punches);
       const allSites=[...emp.sites].sort().join(', ');
       let y=MT;
 
@@ -3554,7 +3627,7 @@ function generateMasterPDF(){
         }
 
         const rowBg=ri%2===0?WHITE:LGRAY;
-        const bgColor=r.hasEstimated?AMBER_BG:rowBg;
+        const bgColor=r.hasOverlap?OVERLAP_BG:(r.hasEstimated?AMBER_BG:rowBg);
         doc.setFillColor(...bgColor);doc.rect(ML,y,CW,rH,'F');
         doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
         let rx=ML;COL_WIDTHS.forEach(w=>{rx+=w;if(rx<ML+CW)doc.line(rx,y,rx,y+rH);});
@@ -3567,9 +3640,9 @@ function generateMasterPDF(){
         totalHrs+=r.hrs;
 
         const textY=y+4;
-        doc.setTextColor(...(r.hasAuto?RED_TEXT:BLACK));
+        doc.setTextColor(...((r.hasAuto||r.hasOverlap)?RED_TEXT:BLACK));
         let tx=ML;
-        doc.text((r.hasAuto?'! ':'')+dateStr,tx+2,textY);tx+=COL.date;
+        doc.text((r.hasAuto?'! ':'')+(r.hasOverlap?'⚠ ':'')+dateStr,tx+2,textY);tx+=COL.date;
         doc.setTextColor(...BLACK);
         doc.text(r.jobsite,tx+COL.site/2,textY,{align:'center'});tx+=COL.site;
         doc.text(inStr,tx+COL.in/2,textY,{align:'center'});tx+=COL.in;
@@ -3597,6 +3670,11 @@ function generateMasterPDF(){
       if(rows.some(r=>r.hasAuto)){
         doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(...RED_TEXT);
         doc.text('! Records marked ! were auto-clocked out at 12 hours and may require review.',ML,y);
+        y+=4.5;doc.setTextColor(...BLACK);
+      }
+      if(rows.some(r=>r.hasOverlap)){
+        doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(...RED_TEXT);
+        doc.text('⚠ Rows marked ⚠ have overlapping punches for the same day/jobsite (e.g. a duplicate clock-in) — verify before finalizing pay.',ML,y);
         y+=4.5;doc.setTextColor(...BLACK);
       }
 
@@ -4405,30 +4483,6 @@ function generatePDF(){
     if(l.jobsite)empMap[l.empId].sites.add(l.jobsite);
   });
 
-  // ── Consolidate: group by date, keep jobsite per row (different sites = separate rows) ──
-  function consolidate(punches){
-    const dayMap={};
-    punches.forEach(p=>{
-      const at=adjustedTimes(p);   // effective in/out after pay rules (raw for synthetic punches)
-      const aIn=at.in,aOut=at.out;
-      // Key by date + jobsite so different sites on same day stay separate rows
-      const dayKey=p.in.toDateString()+'|'+(p.jobsite||'');
-      if(!dayMap[dayKey])dayMap[dayKey]={
-        date:aIn,clockIn:aIn,clockOut:aOut,
-        hrs:0,acts:new Set(),jobsite:p.jobsite||'—',
-        hasAuto:false,hasEstimated:false
-      };
-      const d=dayMap[dayKey];
-      if(aIn<d.clockIn)d.clockIn=aIn;
-      if(aOut&&(!d.clockOut||aOut>d.clockOut))d.clockOut=aOut;
-      const ph=paidHours(p);if(ph!=null)d.hrs+=ph;
-      (p.activity||[]).forEach(a=>{if(a!=='Auto-clocked')d.acts.add(a);});
-      if(p.autoClocked)d.hasAuto=true;
-      if(p.estimatedOut)d.hasEstimated=true;
-    });
-    return Object.values(dayMap).sort((a,b)=>a.date-b.date||a.jobsite.localeCompare(b.jobsite));
-  }
-
   const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'letter'});
   const PW=215.9,PH=279.4;
   const ML=14,MR=14,MT=14;
@@ -4444,6 +4498,7 @@ function generatePDF(){
   const LGRAY=[245,245,245];
   const AMBER_BG=[255,243,220];
   const RED_TEXT=[163,45,45];
+  const OVERLAP_BG=[252,222,222];
 
   // ── Column widths — 6 cols — total = CW ~187.9mm ──
   // DATE(38) + SITE(28) + IN(24) + OUT(24) + HRS(16) + TASK(remainder~57.9)
@@ -4457,7 +4512,7 @@ function generatePDF(){
   empIds.forEach((empId,pageIdx)=>{
     if(pageIdx>0)doc.addPage();
     const emp=empMap[empId];
-    const rows=consolidate(emp.punches);
+    const rows=consolidatePunchesByDay(emp.punches);
     const allSites=[...emp.sites].sort().join(', ');
     let y=MT;
 
@@ -4576,7 +4631,7 @@ function generatePDF(){
       }
 
       const rowBg=ri%2===0?WHITE:LGRAY;
-      const bgColor=r.hasEstimated?AMBER_BG:rowBg;
+      const bgColor=r.hasOverlap?OVERLAP_BG:(r.hasEstimated?AMBER_BG:rowBg);
       doc.setFillColor(...bgColor);
       doc.rect(ML,y,CW,rH,'F');
       doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
@@ -4591,10 +4646,10 @@ function generatePDF(){
       totalHrs+=r.hrs;
 
       const textY=y+4; // baseline for first text line
-      doc.setTextColor(...(r.hasAuto?RED_TEXT:BLACK));
+      doc.setTextColor(...((r.hasAuto||r.hasOverlap)?RED_TEXT:BLACK));
       let tx=ML;
       // Date
-      doc.text((r.hasAuto?'! ':'')+dateStr,tx+2,textY);tx+=COL.date;
+      doc.text((r.hasAuto?'! ':'')+(r.hasOverlap?'⚠ ':'')+dateStr,tx+2,textY);tx+=COL.date;
       // Jobsite
       doc.setTextColor(...BLACK);
       doc.text(r.jobsite,tx+COL.site/2,textY,{align:'center'});tx+=COL.site;
@@ -4634,6 +4689,12 @@ function generatePDF(){
       doc.setFont('helvetica','italic');doc.setFontSize(7);
       doc.setTextColor(...RED_TEXT);
       doc.text('! Records marked ! were auto-clocked out at 12 hours and may require review.',ML,y);
+      y+=4.5;doc.setTextColor(...BLACK);
+    }
+    if(rows.some(r=>r.hasOverlap)){
+      doc.setFont('helvetica','italic');doc.setFontSize(7);
+      doc.setTextColor(...RED_TEXT);
+      doc.text('⚠ Rows marked ⚠ have overlapping punches for the same day/jobsite (e.g. a duplicate clock-in) — verify before finalizing pay.',ML,y);
       y+=4.5;doc.setTextColor(...BLACK);
     }
 
@@ -5281,7 +5342,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.8',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.9',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5330,7 +5391,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.8',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.9',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

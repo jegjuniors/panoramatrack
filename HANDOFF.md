@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.8 *(Per-employee estimated clock-out — send-to-office skips when already covered, force-submit now gated)*
+**Version:** v49.9 *(Export overlap-summing fix — duplicate punches no longer silently inflate a payroll total; fixed a crashing Excel-export bug found along the way)*
 **Last handoff update:** September 4, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,65 +11,61 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.8 — per-employee estimated clock-out, everywhere `showEstModal()` is used.** Two bugs,
-  found together while looking at a supervisor's actual send-to-office screen (Julio's
-  screenshot): Victor Manual Aguilar had already submitted his own timecard with his own
-  estimate (v49.7), but "Send to office" re-prompted for a fresh one anyway; and the whole
-  estimate modal only ever had **one shared time field** applied identically to every employee
-  listed, batch or not.
-  - **`showEstModal()`/`buildEstEmployeeList()` reworked to be per-row**, not per-modal: one
-    `<input type="time">` per open punch (was one global `#est-time-input` for the whole list —
-    removed from `index.html`), each defaulting to that employee's own `employeeEstimatedOut`
-    (v49.7) when they have one — labeled "Employee's estimate" — or "now" rounded to 15 min when
-    they don't, labeled "No estimate on file." Each row is independently editable/overridable.
-    `proceedWithEstimate()` now returns an `estimates` object keyed by punch `dbId` instead of a
-    single string; all four callers (below) updated to match.
-  - **Fixed a latent rounding bug** caught by the new harness while rewriting this: the old
-    "round now to nearest 15 min" fallback did `m>=60?0:m` on the minutes only, so anything
-    rounding up into the next hour (e.g. 14:53 → 60) reset to `:00` **without** bumping the hour
-    — producing a default earlier than the actual current time. Now lets `Date.setMinutes()`
-    handle the hour rollover natively.
-  - **`submitSiteToOffice()`/`supSendEmployeeToOffice()`** (send-to-office, FYI-only, `EMP→SUP`):
-    now skip the modal entirely when every open punch already has an employee estimate — nothing
-    left to review, so don't interrupt the supervisor. Still shows (per-row, prefilled) when at
-    least one open punch has no estimate on file.
-  - **`forceSubmitEmployee()`** (`OPEN→EMP`, the supervisor genuinely submitting *on the
-    employee's behalf*): this is the case that should actually require an estimate, and until
-    now it had **no check at all** — a supervisor could force-submit for someone still clocked in
-    with zero record of an expected end time. Now gated exactly like `submitMyTimecard()`
-    (v49.7): if any of the punches being forced are still open, the modal is required and
-    **persists** `estimated_clock_out` per punch (new `estNoteForce(empName)` copy), before
-    continuing into the (now-extracted) `confirmForceSubmit()` confirm dialog.
-  - **PDF-preview flow** (`openExportConfirm`, `EST_NOTE_PDF`) and **employee's own MyTC submit**
-    (`submitMyTimecard`, `EST_NOTE_MYTC`) — the two existing callers — get the per-row accuracy
-    improvement for free (each punch stamped with its own estimate instead of one blanket value
-    applied to everyone). The PDF footnote text dropped its embedded single time value since
-    there's no longer one shared time to name (each row's own estimated time already shows next
-    to "(est.)" in the CLOCK OUT column).
-  - Bumped version badge/`app_version` to v49.8.
-- **v49.0–v49.7** — settings foundation + Edge Function for submission notifications, the
+- **v49.9 — exports no longer silently sum overlapping/duplicate punches into one deceptive
+  total; a real crash in the Excel export path fixed along the way.** Root cause of a real case
+  (Sandy Enriquez, Wed Sep 2: two near-duplicate punches — 05:55–15:15 and 05:58–15:21 — showed
+  up on the printed PDF as one 06:00–15:30 row with **18.00 hours**, more than the displayed
+  window itself). Traced to `consolidate()` (duplicated verbatim in `generatePDF()` and
+  `generateMasterPDF()`): it grouped punches by date+jobsite and always took earliest-in/latest-out
+  for display while summing hours from *every* punch in the group — fine for a legitimate gapped
+  split shift, silently wrong when two punches actually overlap in time.
+  - **New shared `consolidatePunchesByDay(punches)`** replaces both duplicated `consolidate()`
+    copies. Same date+jobsite grouping, but only merges punches whose adjusted `[in,out]`
+    intervals don't overlap. When they do overlap, each stays its own row, flagged
+    `hasOverlap:true` — never silently summed.
+  - **PDF rendering** (`generatePDF()`/`generateMasterPDF()`): overlap rows get a red `⚠` prefix
+    on the date (mirrors the existing `!` auto-clock treatment) and a light-red row background
+    (`OVERLAP_BG`), plus a new footnote when any row is flagged.
+  - **`doMasterExcelZip()`** (the actual payroll file): same overlap check before its per-day-cell
+    `hours+=` summing. Can't split a row the way the PDF can (fixed template), so it still writes
+    the summed hours but surfaces the affected employee names in the **on-screen** export
+    confirmation, not just a `console.warn`.
+  - **Found and fixed along the way, not part of the original ask:** `doMasterExcelZip()`
+    referenced an undeclared `msg` variable in its final notification line — **every Excel export
+    was throwing a `ReferenceError` right after the file downloaded**, before the
+    `stage='exported'` stamp a few lines later ever ran. This plausibly explains at least some of
+    the already-documented Report-tab/Submissions-panel status divergence (see Blockers). Also
+    fixed a second latent bug in the *unchanged* merge branch, caught by the new test harness: a
+    still-open punch merged with an earlier closed one on the same day/site kept showing the
+    earlier punch's close time instead of "still in."
+  - Bumped version badge/`app_version` to v49.9. Sandy's actual duplicate punch still needs a
+    manual fix in the admin panel — this change makes the anomaly visible, it doesn't touch data.
+- **v49.0–v49.8** — settings foundation + Edge Function for submission notifications, the
   scheduled-start confirm/flag/fix flow, several My Timecard/catch-up/edit-save bugfixes, the
-  original (single-field, FYI-only) estimated-clock-out prompt, and the persisting employee-side
-  estimate gate. Full detail for each is in the changelog under Reference & History below.
+  estimated-clock-out prompt (single-field FYI-only, then persisting, then per-row/skip-when-
+  covered). Full detail for each is in the changelog under Reference & History below.
 
 ## 2. Active State
 
-- **Branch:** `main`, working tree clean — v49.8 (per-employee estimate modal + force-submit
-  gate) and this handoff update are committed and pushed.
+- **Branch:** `main`, working tree clean — v49.9 (export overlap fix + the Excel `msg` crash fix)
+  and this handoff update are committed and pushed.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.8 included).
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.9 included).
   Ad-hoc assertion harnesses (established pattern, run against extracted/mirrored logic — the
-  real functions depend on live Supabase/DOM state): v49.8's `estDefaultTimeStr`/`estRowHours`
-  (6 assertions — employee-estimate-as-default, no-estimate fallback incl. the rounding-bug fix,
-  overnight-edge hours math), v49.7's clear-on-close payload predicate + overnight-edge estimate
-  math (5 assertions), the v49.4 catch-up predicate (8 assertions), the v49.5 edit-save predicate
-  (4 assertions), `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify item-building
-  (8 assertions, v49.1) — all pass. The modal/DOM wiring itself (per-row inputs, skip-when-covered
-  branching, the new force-submit gate) was verified with `node --check` only, not exercised
-  against the real UI/Supabase — worth a real-device pass: send an employee who's already
-  estimated to office (modal should skip straight to confirm), send one who hasn't (modal shows,
-  per-row, editable), and force-submit someone still clocked in (modal now required, persists,
-  shows up as "est. out …" same as a normal self-submit).
+  real functions depend on live Supabase/DOM state): v49.9's `consolidatePunchesByDay()` (14
+  assertions — the Sandy-shaped overlap case splits and doesn't sum, a legit lunch-break gap
+  still merges, single-punch days unaffected, cross-jobsite same-time punches never compared,
+  the still-open-punch display fix incl. reversed input order, a partial-overlap 3-punch bucket
+  stays fully split), v49.8's `estDefaultTimeStr`/`estRowHours` (6 assertions), v49.7's
+  clear-on-close payload predicate + overnight-edge estimate math (5 assertions), the v49.4
+  catch-up predicate (8 assertions), the v49.5 edit-save predicate (4 assertions),
+  `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify item-building (8 assertions,
+  v49.1) — all pass. Not exercised against the real UI/Supabase/jsPDF/ExcelJS — worth a
+  real-device/real-export pass: run a PDF export (supervisor or master) that includes a
+  Sandy-shaped overlap and confirm the red `⚠` row/footnote render correctly, and run an Excel
+  export end-to-end to confirm the "✓ Excel pack exported" toast now actually appears (it never
+  did before this version) and `stage='exported'` gets stamped when exporting via the
+  Submissions-panel "Excel" option specifically.
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
@@ -83,43 +79,39 @@
 
 ## 3. Next Steps
 
-1. **Real-device check on v49.6 – v49.8** together — see the specific scenarios called out in
-   Active State above. Now unblocked — migration is run, so this can happen against the live
-   column.
-2. **Fix the `consolidate()` overlap-summing bug in exports** (planned this session, not yet
-   built — separate from v49.8). `generatePDF()`/`generateMasterPDF()`'s `consolidate()` (and
-   `doMasterExcelZip()`'s day-cell summing) silently sum hours from punches that overlap in time
-   instead of flagging them — found via a real case (Sandy Enriquez, Wed Sep 2: two near-duplicate
-   punches summed into one deceptive 18.00-hour row on the printed PDF). Plan: extract one shared
-   `consolidatePunchesByDay()`, split overlapping punches into their own flagged rows (PDF) /
-   surface an in-app warning instead of a console-only one (Excel), rather than silently merging.
-   Sandy's actual duplicate punch still needs a manual fix in the admin panel regardless of this.
-3. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+1. **Real-device/real-export check on v49.6 – v49.9** together — see the specific scenarios
+   called out in Active State above. Now unblocked — migration is run, so this can happen against
+   the live column.
+2. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
+   correction modal — v49.9 makes it visible on exports, it doesn't touch the underlying data.
+   Worth a quick scan for other employees with the same symptom while in there — v49.9's overlap
+   flag will now surface them on the next export.
+3. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
+   Submissions-panel `stage='exported'` divergence** noted below — worth checking whether any
+   already-"final" periods exported via Excel are missing their stamp because of it.
+4. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
-4. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+5. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-5. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+6. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
 ## 4. Blockers / Notes
 
-- **Duplicate/overlapping punches can silently inflate payroll exports.** Root cause + fix plan
-  captured in Next Steps #2 above. The underlying data bug (how an employee ends up with two
-  overlapping punches — likely a double clock-in/race condition) is separate from the export-side
-  fix and still needs a manual per-incident correction via the admin panel.
-- **Report-tab export vs. Submissions-panel export still diverge.** Only the Submissions-panel
-  export stamps `pt_timecard_status.stage='exported'`; the Report-tab export (likely the more
-  habitually-used one for actually running payroll) never does. v49.4 stopped that gap from
-  nagging employees, but the underlying inconsistency — an admin can "finish" a period via Report
-  tab and `pt_timecard_status` never reflects it — is still open. Worth deciding whether the
-  Report-tab export should also stamp status, or whether Submissions-panel export should become
-  the only sanctioned path for closing out a period.
+- **Report-tab export vs. Submissions-panel export still diverge** — and v49.9 found a plausible
+  mechanism: `doMasterExcelZip()` was throwing a `ReferenceError` on every single Excel export
+  (fixed this version — see Current Status), which meant the `stage='exported'` stamp a few lines
+  later never ran, for *either* the Report tab or a Submissions-panel export where "Excel" was
+  the chosen format. Still open: whether the Report-tab/Submissions-panel distinction itself
+  should remain (admin can "finish" a period via Report tab and `pt_timecard_status` never
+  reflects it) — worth deciding whether Report-tab export should also stamp status, or whether
+  Submissions-panel export should become the only sanctioned path for closing out a period.
 - **Supabase RLS is disabled.** The anon key currently allows full read/write/delete on
   `punches` and likely every other table. Do **NOT** enable RLS (or click Supabase's "Resolve
   issue") without writing policies first — with the anon key and no policies it takes the whole
@@ -146,8 +138,82 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.8 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.9 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.9 — Exports stop silently summing overlapping punches; Excel-export crash fixed
+
+**Context:** a supervisor's printed PDF timecard showed Sandy Enriquez working 18.00 hours on
+Wednesday Sep 2, inside a displayed 06:00 AM–03:30 PM window (~9.5 hours) — mathematically
+impossible for one continuous shift. The Master Log correctly showed the underlying cause as two
+separate punches, 05:55 AM–03:15 PM and 05:58 AM–03:21 PM, three minutes apart at clock-in and six
+at clock-out — almost certainly a duplicate clock-in (double-tap or a network retry that both
+succeeded), not two real shifts. `consolidate()` (byte-identical, duplicated in `generatePDF()`
+and `generateMasterPDF()`) groups punches by date+jobsite, takes the earliest clock-in/latest
+clock-out for display, and sums `paidHours()` from every punch in the group — correct for a
+legitimate gapped split shift (e.g. an unpaid errand), silently wrong when the punches actually
+overlap in time, since nothing checked for that.
+
+**Design (discussed before building, both recommended):** extend the fix to `doMasterExcelZip()`
+too, since it's the actual payroll file and had *zero* visible trace of a duplicate (not even
+separate rows the way the PDF/Master Log at least show). And deduplicate the two identical
+`consolidate()` copies into one shared function rather than fixing each in place, removing the
+risk of them drifting apart again.
+
+**What shipped (`app.js`):**
+- **New `consolidatePunchesByDay(punches)`**, replacing both local `consolidate()` copies. Same
+  date+jobsite bucketing as before; within each bucket, punches are sorted by adjusted clock-in
+  and checked for overlap (any punch's clock-in falling before the running-max clock-out so far).
+  No overlap → merges into one row exactly as before (unchanged behavior for the common case).
+  Overlap found → every punch in that bucket becomes its own row, `hasOverlap:true`, never summed
+  together — the anomaly stays visible instead of being hidden behind one merged total.
+- **`generatePDF()`/`generateMasterPDF()` row rendering:** overlap rows get a light-red background
+  (new `OVERLAP_BG` constant) and a red `⚠` prefix on the date (mirrors the existing `!`
+  auto-clock treatment — both prefixes appear together if a row is somehow both). New footnote,
+  same style as the existing auto-clock one, when any row is flagged.
+- **`doMasterExcelZip()`:** same overlap detection (a pre-pass grouping by
+  `empId|jobsite|dateKey`) before its per-day-cell `hours+=ph` summing. The fixed payroll template
+  has no spare cell to print a warning into, so an overlap still writes the summed hours (a blank
+  cell isn't valid payroll input) but the affected employee names are now appended to the
+  **on-screen** "Excel pack exported" confirmation message, not just a `console.warn` like the
+  export's other edge-case warnings (3+ activity codes, punches outside the 14-day grid).
+- **Found and fixed along the way (not part of the original ask):**
+  - `doMasterExcelZip()`'s final `showNotif('✓','Excel pack exported',msg,...)` referenced `msg`
+    without it ever being declared — a plain read of an undeclared identifier, which throws a
+    `ReferenceError` unconditionally. Every Excel export was hitting this **immediately after the
+    file had already downloaded**, meaning the success toast never appeared and — more
+    importantly — the `stage='exported'` stamp a few lines later (`_pendingExportStampFn`) never
+    ran either, for any Excel export including one launched from the admin Submissions panel with
+    "Excel" chosen as the format. Declared `msg` properly (base message + the existing
+    `overflowWarn` count + the new overlap-employee count).
+  - In the *unchanged* non-overlap merge branch of the new function, the new test harness caught
+    a second latent bug: if a still-open punch (still clocked in) gets merged with an earlier
+    closed punch on the same day/site, the merge logic only ever widens `clockOut` toward a
+    *later* value and a `null` (still-open) `out` never satisfies that comparison — so the row
+    kept showing the earlier punch's real close time instead of "still in." Now tracks whether
+    any punch in the merged group is open and forces `clockOut=null` for the row if so.
+- Bumped version badge/`app_version` to v49.9.
+
+**Not built (explicitly out of scope, discussed before building):** cross-jobsite overlap (same
+employee, same day, two *different* sites — physically impossible but not caught, since bucketing
+is still per-jobsite); a hard export-blocking gate for overlaps (kept to "never invisible," not a
+blocker — matches the existing review-gate pattern being reserved for auto-clock/lunch-waive
+only). Sandy's actual duplicate punch still needs a manual admin-panel fix — this change makes
+the anomaly visible, it doesn't touch existing data.
+
+**Verified:** `node --check` on `app.js` + a 14-assertion harness against
+`consolidatePunchesByDay()` (mirrored, with `adjustedTimes`/`paidHours` mocked as identity since
+the rounding rules they apply aren't what's under test): the Sandy-shaped overlap case (2 rows,
+both flagged, hours preserved but never merged into one inflated number), a legitimate lunch-break
+gap (still merges, unflagged, same as before), a single punch per day (unaffected), two different
+jobsites with identical overlapping times (bucketed separately, cross-site overlap correctly out
+of scope), a trailing still-open punch after an earlier closed one (merges without a false-positive
+overlap, and correctly shows "still in" — the second bug above, including with reversed input
+order to confirm the fix doesn't depend on array order), and a 3-punch bucket where only 2 of the
+3 actually overlap (whole bucket stays split rather than partially merged). Not exercised against
+real jsPDF/ExcelJS output or live Supabase data — worth a real export pass, see Active State.
 
 ---
 
