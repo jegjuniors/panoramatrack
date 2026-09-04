@@ -3511,9 +3511,21 @@ function generateMasterPDF(){
   (ALL_ACTIVITIES||ACTIVITIES||[]).forEach(a=>{if(a.code)actCodeMap[a.name]=a.code;});
   function formatTaskCode(actName){const code=actCodeMap[actName];return code?`${code} (${actName})`:actName;}
 
+  // v49.10: the master admin export is intentionally not gated by an estimate prompt (see the
+  // comment above openMasterExportConfirm) — but that meant a still-open punch just exported
+  // blank, with no hours at all, even when the employee had already given their own estimate at
+  // submit time (v49.7's employeeEstimatedOut). Fall back to that when present, as a synthetic
+  // close for this PDF only — a shallow clone, so it never mutates the shared _masterLogs/
+  // masterExportRange.logs entries (which doMasterExcelZip, the actual payroll file, also reads
+  // from the same cache — that one must never see a synthetic close). No estimate on file →
+  // exports exactly as before (blank, no guessed hours).
+  const withMasterEstimates=logs.map(l=>
+    (!l.out&&l.employeeEstimatedOut)?{...l,out:l.employeeEstimatedOut,estimatedOut:l.employeeEstimatedOut}:l
+  );
+
   // ── v47.0: Group by employee (consolidated — one card per employee, all sites) ──
   const empMap={};
-  logs.forEach(l=>{
+  withMasterEstimates.forEach(l=>{
     const empId=l.empId||l.name;
     if(!empMap[empId])empMap[empId]={name:l.name,dept:l.dept,punches:[],sites:new Set()};
     empMap[empId].punches.push(l);
@@ -3642,7 +3654,7 @@ function generateMasterPDF(){
         const textY=y+4;
         doc.setTextColor(...((r.hasAuto||r.hasOverlap)?RED_TEXT:BLACK));
         let tx=ML;
-        doc.text((r.hasAuto?'! ':'')+(r.hasOverlap?'⚠ ':'')+dateStr,tx+2,textY);tx+=COL.date;
+        doc.text((r.hasAuto?'! ':'')+(r.hasOverlap?'!! ':'')+dateStr,tx+2,textY);tx+=COL.date;
         doc.setTextColor(...BLACK);
         doc.text(r.jobsite,tx+COL.site/2,textY,{align:'center'});tx+=COL.site;
         doc.text(inStr,tx+COL.in/2,textY,{align:'center'});tx+=COL.in;
@@ -3674,7 +3686,12 @@ function generateMasterPDF(){
       }
       if(rows.some(r=>r.hasOverlap)){
         doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(...RED_TEXT);
-        doc.text('⚠ Rows marked ⚠ have overlapping punches for the same day/jobsite (e.g. a duplicate clock-in) — verify before finalizing pay.',ML,y);
+        doc.text('!! Rows marked !! have overlapping punches for the same day/jobsite (e.g. a duplicate clock-in) — verify before finalizing pay.',ML,y);
+        y+=4.5;doc.setTextColor(...BLACK);
+      }
+      if(rows.some(r=>r.hasEstimated)){
+        doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(214,123,17);
+        doc.text('Hours marked (est.) are still clocked in — shown using the employee’s own estimated end time and are PRELIMINARY until they actually clock out.',ML,y);
         y+=4.5;doc.setTextColor(...BLACK);
       }
 
@@ -4338,7 +4355,7 @@ async function checkDupsAndProceed(){
     return;
   }
   exportRange.dups=[];
-  openChecklist();
+  doExport();
 }
 
 function closeDupModal(){document.getElementById('dup-modal-bg').style.display='none';}
@@ -4353,52 +4370,21 @@ function proceedSkipDups(){
     document.getElementById('s-export-err').textContent='All employees were already submitted. Nothing left to export.';
     return;
   }
-  openChecklist();
+  doExport();
 }
 
 function proceedIncludeDups(){
   exportRange.skipDups=false;
   closeDupModal();
-  openChecklist();
+  doExport();
 }
 
-function openChecklist(){
-  ['chk1','chk2','chk3','chk4','chk5'].forEach(id=>{
-    const el=document.getElementById(id);if(el)el.checked=false;
-  });
-  document.getElementById('confirm-err').textContent='';
-  document.getElementById('export-confirm-submit').onclick=doExport;
-  // Show/hide preliminary elements
-  const isPrelim=exportRange.isPrelim;
-  const prelimSection=document.getElementById('checklist-prelim-section');
-  const modalTitle=document.querySelector('#export-confirm-modal h3');
-  const submitBtn=document.getElementById('export-confirm-submit');
-  if(isPrelim){
-    if(prelimSection)prelimSection.style.display='block';
-    if(modalTitle)modalTitle.textContent='Preliminary preview — confirm';
-    if(submitBtn)submitBtn.textContent='Generate preview PDF →';
-    submitBtn.style.background='var(--amber)';
-  } else {
-    if(prelimSection)prelimSection.style.display='none';
-    if(modalTitle)modalTitle.textContent='Preview PDF — confirm';
-    if(submitBtn)submitBtn.textContent='Generate preview PDF';
-    submitBtn.style.background='var(--green)';
-  }
-  document.getElementById('export-confirm-modal').style.display='flex';
-}
-function closeConfirmModal(){
-  document.getElementById('export-confirm-modal').style.display='none';
-  const submitBtn=document.getElementById('export-confirm-submit');
-  submitBtn.style.display='';
-  submitBtn.textContent='Generate preview PDF';
-  submitBtn.onclick=doExport;
-}
+// v49.11: the confirmation checklist (chk1-chk5, "I have reviewed all clock-in/out times…" etc.)
+// gated every "Preview PDF" behind a modal that just needed clicking through — not a meaningful
+// review step, so it's gone (removed from index.html too). doExport() now runs straight off
+// checkDupsAndProceed()/proceedSkipDups()/proceedIncludeDups() above.
 async function doExport(){
   const isPrelim=exportRange.isPrelim;
-  const requiredChks=isPrelim?['chk1','chk2','chk3','chk4','chk5']:['chk1','chk2','chk3','chk4'];
-  const all=requiredChks.every(id=>document.getElementById(id)?.checked);
-  if(!all){document.getElementById('confirm-err').textContent='Please confirm all items above before submitting.';return}
-  // Generate PDF first, THEN close modal — closing before save can interrupt download on mobile
   try{
     generatePDF();
   }catch(pdfErr){
@@ -4406,7 +4392,6 @@ async function doExport(){
     showCustomAlert('PDF Error','Could not generate PDF: '+pdfErr.message);
     return;
   }
-  closeConfirmModal();
   // Record submissions — supervisor only, master admin bypasses
   if(activeSup&&exportRange.periodStart&&exportRange.periodEnd){
     const status=isPrelim?'preliminary':'final';
@@ -4528,7 +4513,7 @@ function generatePDF(){
     doc.text(`Pay period: ${periodFrom} – ${periodTo}`,ML+3,y+10);
     if(isPrelim){
       doc.setFont('helvetica','bold');doc.setFontSize(7);
-      doc.text('⚠ PRELIMINARY — SUBJECT TO REVISION',ML+CW-3,y+6.5,{align:'right'});
+      doc.text('PRELIMINARY — SUBJECT TO REVISION',ML+CW-3,y+6.5,{align:'right'});
     }
     y+=14;
 
@@ -4649,7 +4634,7 @@ function generatePDF(){
       doc.setTextColor(...((r.hasAuto||r.hasOverlap)?RED_TEXT:BLACK));
       let tx=ML;
       // Date
-      doc.text((r.hasAuto?'! ':'')+(r.hasOverlap?'⚠ ':'')+dateStr,tx+2,textY);tx+=COL.date;
+      doc.text((r.hasAuto?'! ':'')+(r.hasOverlap?'!! ':'')+dateStr,tx+2,textY);tx+=COL.date;
       // Jobsite
       doc.setTextColor(...BLACK);
       doc.text(r.jobsite,tx+COL.site/2,textY,{align:'center'});tx+=COL.site;
@@ -4694,7 +4679,7 @@ function generatePDF(){
     if(rows.some(r=>r.hasOverlap)){
       doc.setFont('helvetica','italic');doc.setFontSize(7);
       doc.setTextColor(...RED_TEXT);
-      doc.text('⚠ Rows marked ⚠ have overlapping punches for the same day/jobsite (e.g. a duplicate clock-in) — verify before finalizing pay.',ML,y);
+      doc.text('!! Rows marked !! have overlapping punches for the same day/jobsite (e.g. a duplicate clock-in) — verify before finalizing pay.',ML,y);
       y+=4.5;doc.setTextColor(...BLACK);
     }
 
@@ -4727,7 +4712,6 @@ function generatePDF(){
   if(isPrelim){
     (exportRange.logs||[]).forEach(l=>{if(l.estimatedOut){l.out=null;l.estimatedOut=null;}});
   }
-  closeConfirmModal();
   const notifMsg=isPrelim?'Preliminary report submitted — remember to submit Final after the holiday':'PDF generated';
   showNotif('✓',notifMsg,`${Object.keys(empMap).length} time card${Object.keys(empMap).length!==1?'s':''} downloaded`,isPrelim?'#c47f17':'#1D9E75',3500);
 }
@@ -5342,7 +5326,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.9',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.11',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5391,7 +5375,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.9',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.11',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

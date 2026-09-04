@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.9 *(Export overlap-summing fix — duplicate punches no longer silently inflate a payroll total; fixed a crashing Excel-export bug found along the way)*
+**Version:** v49.11 *(Removed the supervisor "Preview PDF" confirmation checklist; fixed a jsPDF glyph bug that garbled the ⚠ PRELIMINARY banner and every overlap-flag marker into "&")*
 **Last handoff update:** September 4, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,61 +11,61 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.9 — exports no longer silently sum overlapping/duplicate punches into one deceptive
-  total; a real crash in the Excel export path fixed along the way.** Root cause of a real case
-  (Sandy Enriquez, Wed Sep 2: two near-duplicate punches — 05:55–15:15 and 05:58–15:21 — showed
-  up on the printed PDF as one 06:00–15:30 row with **18.00 hours**, more than the displayed
-  window itself). Traced to `consolidate()` (duplicated verbatim in `generatePDF()` and
-  `generateMasterPDF()`): it grouped punches by date+jobsite and always took earliest-in/latest-out
-  for display while summing hours from *every* punch in the group — fine for a legitimate gapped
-  split shift, silently wrong when two punches actually overlap in time.
-  - **New shared `consolidatePunchesByDay(punches)`** replaces both duplicated `consolidate()`
-    copies. Same date+jobsite grouping, but only merges punches whose adjusted `[in,out]`
-    intervals don't overlap. When they do overlap, each stays its own row, flagged
-    `hasOverlap:true` — never silently summed.
-  - **PDF rendering** (`generatePDF()`/`generateMasterPDF()`): overlap rows get a red `⚠` prefix
-    on the date (mirrors the existing `!` auto-clock treatment) and a light-red row background
-    (`OVERLAP_BG`), plus a new footnote when any row is flagged.
-  - **`doMasterExcelZip()`** (the actual payroll file): same overlap check before its per-day-cell
-    `hours+=` summing. Can't split a row the way the PDF can (fixed template), so it still writes
-    the summed hours but surfaces the affected employee names in the **on-screen** export
-    confirmation, not just a `console.warn`.
-  - **Found and fixed along the way, not part of the original ask:** `doMasterExcelZip()`
-    referenced an undeclared `msg` variable in its final notification line — **every Excel export
-    was throwing a `ReferenceError` right after the file downloaded**, before the
-    `stage='exported'` stamp a few lines later ever ran. This plausibly explains at least some of
-    the already-documented Report-tab/Submissions-panel status divergence (see Blockers). Also
-    fixed a second latent bug in the *unchanged* merge branch, caught by the new test harness: a
-    still-open punch merged with an earlier closed one on the same day/site kept showing the
-    earlier punch's close time instead of "still in."
-  - Bumped version badge/`app_version` to v49.9. Sandy's actual duplicate punch still needs a
-    manual fix in the admin panel — this change makes the anomaly visible, it doesn't touch data.
-- **v49.0–v49.8** — settings foundation + Edge Function for submission notifications, the
+- **v49.11 — removed the supervisor "Preview PDF" confirmation checklist; fixed a jsPDF glyph bug
+  that garbled every ⚠ warning symbol on a printed PDF into a stray "&".** Two changes prompted by
+  the same screenshot (Julio's own supervisor timecard PDF):
+  - **Checklist removed.** `openExportConfirm()` → (review gate) → (estimate modal, if needed) →
+    `checkDupsAndProceed()`/`proceedSkipDups()`/`proceedIncludeDups()` used to route into
+    `openChecklist()`, a modal with 4–5 checkboxes ("I have reviewed all clock-in/out times…"
+    etc.) the supervisor had to tick before `doExport()` would actually run `generatePDF()` — a
+    click-through gate, not a meaningful review step. All three call sites now call `doExport()`
+    directly; `openChecklist()`/`closeConfirmModal()` and the `#export-confirm-modal` markup
+    (`index.html`) are gone. `doExport()` itself lost its checkbox-validation block but is
+    otherwise unchanged — same PDF generation, same submission-recording logic.
+  - **jsPDF glyph bug, found via the screenshot:** the amber "⚠ PRELIMINARY — SUBJECT TO
+    REVISION" corner banner was rendering as "& PRELIMINARY — SUBJECT T…" — jsPDF's built-in
+    fonts (Helvetica, WinAnsiEncoding) don't support the ⚠ Unicode character (U+26A0) and silently
+    substitute a wrong glyph rather than erroring. This affected **5 places**, not just the one in
+    the screenshot: the PRELIMINARY banner, both PDF generators' overlap-row date prefix
+    (`generatePDF()`/`generateMasterPDF()`, from v49.9), and both overlap footnotes — all replaced
+    with plain ASCII (`!!` for the overlap marker, distinct from the existing single `!`
+    auto-clock marker; dropped entirely from the banner, which already reads clearly off its
+    amber background and bold "PRELIMINARY" wording alone). The apparent right-edge truncation in
+    the screenshot is very likely just the screenshot/viewer crop, not the PDF itself — the banner
+    text is right-aligned well inside the physical page margin — worth a quick look at the actual
+    generated PDF to confirm now that the glyph itself is fixed.
+  - Bumped version badge/`app_version` to v49.11.
+- **v49.0–v49.10** — settings foundation + Edge Function for submission notifications, the
   scheduled-start confirm/flag/fix flow, several My Timecard/catch-up/edit-save bugfixes, the
-  estimated-clock-out prompt (single-field FYI-only, then persisting, then per-row/skip-when-
-  covered). Full detail for each is in the changelog under Reference & History below.
+  estimated-clock-out prompt (single-field FYI-only → persisting → per-row/skip-when-covered),
+  the export overlap-summing fix (+ a crashing Excel-export bug found along the way), and the
+  master-admin PDF estimate fallback. Full detail for each is in the changelog under Reference &
+  History below.
 
 ## 2. Active State
 
-- **Branch:** `main`, working tree clean — v49.9 (export overlap fix + the Excel `msg` crash fix)
-  and this handoff update are committed and pushed.
+- **Branch:** `main`, working tree clean — v49.10 (master PDF estimate fallback) and v49.11
+  (checklist removal + jsPDF glyph fix) are committed and pushed together.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.9 included).
-  Ad-hoc assertion harnesses (established pattern, run against extracted/mirrored logic — the
-  real functions depend on live Supabase/DOM state): v49.9's `consolidatePunchesByDay()` (14
-  assertions — the Sandy-shaped overlap case splits and doesn't sum, a legit lunch-break gap
-  still merges, single-punch days unaffected, cross-jobsite same-time punches never compared,
-  the still-open-punch display fix incl. reversed input order, a partial-overlap 3-punch bucket
-  stays fully split), v49.8's `estDefaultTimeStr`/`estRowHours` (6 assertions), v49.7's
-  clear-on-close payload predicate + overnight-edge estimate math (5 assertions), the v49.4
-  catch-up predicate (8 assertions), the v49.5 edit-save predicate (4 assertions),
-  `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify item-building (8 assertions,
-  v49.1) — all pass. Not exercised against the real UI/Supabase/jsPDF/ExcelJS — worth a
-  real-device/real-export pass: run a PDF export (supervisor or master) that includes a
-  Sandy-shaped overlap and confirm the red `⚠` row/footnote render correctly, and run an Excel
-  export end-to-end to confirm the "✓ Excel pack exported" toast now actually appears (it never
-  did before this version) and `stage='exported'` gets stamped when exporting via the
-  Submissions-panel "Excel" option specifically.
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.11 included).
+  v49.11 itself is mostly DOM-flow removal (no modal to open) and a plain string substitution —
+  no extractable pure-logic harness the way most other versions have, beyond a quick sanity check
+  confirming the new `!`/`!!` marker combinations stay visually distinct (auto-only, overlap-only,
+  and both-at-once). Ad-hoc assertion harnesses for earlier still-current versions: v49.10's
+  `withMasterEstimates` mapping (6 assertions), v49.9's `consolidatePunchesByDay()` (14
+  assertions), v49.8's `estDefaultTimeStr`/`estRowHours` (6 assertions), v49.7's clear-on-close
+  payload predicate + overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate
+  (8 assertions), the v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9
+  assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass. Not
+  exercised against the real UI/Supabase/jsPDF/ExcelJS — worth a real-export pass covering v49.9
+  through v49.11 together: click "Preview PDF" and confirm it now generates immediately with no
+  checklist modal in the way; confirm the amber "PRELIMINARY — SUBJECT TO REVISION" banner and
+  the `!!` overlap markers/footnotes render as plain readable text instead of "&"; a master PDF
+  export with a Sandy-shaped overlap and with a still-open punch that has an employee estimate
+  (confirm a still-open punch with NO estimate still exports blank as before); and a full Excel
+  export to confirm the "✓ Excel pack exported" toast now actually appears (it never did before
+  v49.9) and `stage='exported'` gets stamped when exporting via the Submissions-panel "Excel"
+  option specifically.
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
@@ -79,7 +79,7 @@
 
 ## 3. Next Steps
 
-1. **Real-device/real-export check on v49.6 – v49.9** together — see the specific scenarios
+1. **Real-device/real-export check on v49.6 – v49.11** together — see the specific scenarios
    called out in Active State above. Now unblocked — migration is run, so this can happen against
    the live column.
 2. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
@@ -138,8 +138,105 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.9 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.11 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.11 — Removed the supervisor PDF checklist; fixed a jsPDF "⚠ → &" glyph bug
+
+**Context:** a screenshot of a real supervisor PDF (Julio's own timecard) showed the amber corner
+banner reading "& PRELIMINARY — SUBJECT T…" instead of "⚠ PRELIMINARY — SUBJECT TO REVISION" —
+garbled text, apparently cut off. Investigating led to two separate, unrelated changes made
+together: removing the confirmation checklist gating the "Preview PDF" button (asked directly),
+and the actual root cause of the garbled banner text.
+
+**Checklist removal:** `openExportConfirm()`'s chain — review gate (auto-clocked punches) → the
+v49.7/v49.8 estimate modal (if needed) → duplicate-submission check
+(`checkDupsAndProceed()`/`proceedSkipDups()`/`proceedIncludeDups()`) — used to funnel into
+`openChecklist()`, a modal requiring 4 or 5 checkboxes ticked ("I have reviewed all employee
+clock-in and clock-out times…", etc.) before `doExport()` would run `generatePDF()`. Purely a
+click-through gate with no actual review happening — removed. All three former `openChecklist()`
+call sites now call `doExport()` directly; `openChecklist()` and `closeConfirmModal()` are
+deleted from `app.js` (including a second, redundant `closeConfirmModal()` call that was already
+sitting unreachable-in-spirit at the tail of `generatePDF()` itself), `doExport()` lost its
+checkbox-validation block (kept everything else — same PDF generation, same `submissions`
+table writes, same preliminary-reminder `sessionStorage` logic), and the `#export-confirm-modal`
+block was deleted from `index.html`. The master admin's Report-tab/Submissions-panel export was
+never gated by this checklist in the first place (different flow, `showMasterReviewWarning`/
+`showMasterFormatModal`) — untouched.
+
+**jsPDF glyph bug:** jsPDF's built-in fonts (Helvetica etc., WinAnsiEncoding) don't support the
+⚠ Unicode warning-sign character (U+26A0) — unlike the en/em-dashes used elsewhere in these PDFs,
+which WinAnsi does support and which render fine. Rather than erroring, jsPDF silently substitutes
+a wrong glyph, which is what showed up as "&". This wasn't only the one banner in the screenshot —
+grepping `doc.text()` calls turned up **5 total occurrences**, including 4 introduced this session
+in v49.9's overlap-flagging work (which had never been checked against a real rendered PDF until
+now): the PRELIMINARY banner (pre-existing, `generatePDF()`), the overlap-row date prefix in both
+`generatePDF()` and `generateMasterPDF()`, and both PDF generators' overlap footnotes. All five
+replaced with plain ASCII: the overlap marker is now `!!` (double exclamation — kept distinct from
+the pre-existing single `!` auto-clock marker; a row with both now shows `! !! `, still legible),
+and the PRELIMINARY banner dropped the glyph entirely rather than substituting one, since amber
+background + bold "PRELIMINARY" wording alone reads clearly. The apparent right-edge truncation
+in the screenshot is very likely just a screenshot/viewer crop — the banner text is right-aligned
+well inside the actual page margin (`ML+CW-3` on a 215.9mm-wide Letter page leaves ~17mm to the
+true edge) — worth confirming against the real generated PDF now that the glyph is fixed, since
+this environment can't render/screenshot a PDF directly.
+
+**Verified:** `node --check` on `app.js`; grepped for any remaining `⚠` inside a `doc.text()` call
+(none) and for any remaining reference to the removed checklist identifiers (none) after the
+edit. A quick inline sanity check confirmed the `!`/`!!` marker combinations concatenate
+unambiguously (auto-only, overlap-only, both). Not exercised against the real UI or a rendered
+PDF — see Active State.
+
+---
+
+## ✅ v49.10 — Master admin PDF shows employee-estimated hours for still-open punches
+
+**Context:** Julio: when the master admin exports to PDF, an employee who's still clocked in
+exports with a blank clock-out and no hours at all — even when that employee had already given
+their own rough estimate when submitting mid-shift (v49.7). The supervisor's own PDF-preview
+export already handles this case (it prompts for an estimate at export time via `showEstModal`),
+but the master admin's Report-tab/Submissions-panel PDF export (`openMasterExportConfirm`) has no
+such prompt — by design, that path is explicitly *not* gated (admin override — see the standing
+comment above `openMasterExportConfirm`), so it never had any way to backfill an open punch's
+hours at all.
+
+**Design:** keep the export ungated — no new modal, no new requirement for the admin. Instead,
+automatically fall back to whatever estimate the employee already provided (`employeeEstimatedOut`)
+when one exists; a still-open punch with no estimate on file exports exactly as it did before
+(blank, nothing guessed). Highlight rows using an estimate and mark them preliminary, matching the
+treatment the supervisor's own PDF-preview flow already has.
+
+**What shipped (`app.js`):**
+- **`generateMasterPDF()`** now builds `withMasterEstimates` — a shallow-cloned copy of `logs`
+  where any still-open punch (`!l.out`) that has `employeeEstimatedOut` gets a synthetic `out`
+  (and the `estimatedOut` flag, same field the supervisor's PDF-preview flow already uses) set to
+  that estimate, for this PDF's rendering only. Punches that are already closed, or have no
+  estimate on file, pass through completely unchanged — same object reference, not even a clone.
+  **Critically this never mutates `_masterLogs`/`masterExportRange.logs`** — those are also read
+  by `doMasterExcelZip()` (the real payroll file) from the same cache when generating from the
+  same format-picker modal, and that path must never see a synthetic close. Excel behavior is
+  untouched: it still skips still-open punches entirely, same as always.
+- **Row rendering** reuses machinery that already existed in `generateMasterPDF()` for
+  `hasEstimated` (amber background via `AMBER_BG`, italic "(est.)" suffix on the clock-out) —
+  it simply never had estimated data reaching it before, since nothing upstream ever set
+  `estimatedOut` on a master-export punch. Added a new footnote (the master PDF had none for
+  this before, unlike the supervisor PDF's): *"Hours marked (est.) are still clocked in — shown
+  using the employee's own estimated end time and are PRELIMINARY until they actually clock
+  out."* Estimated hours now correctly flow into the printed TOTAL as well, since `paidHours()`
+  treats the synthetic `out`+`estimatedOut` pair the same way it already treats the supervisor
+  PDF-preview flow's synthetic estimates (skips rounding and the lunch deduction — same code
+  path, `adjustedTimes()`'s `skipRounding` check).
+- Bumped version badge/`app_version` to v49.10.
+
+**Verified:** `node --check` on `app.js` + a 6-assertion harness against the extracted
+`withMasterEstimates` mapping: an open punch with an estimate gets the synthetic out + flag and
+the original object is provably untouched (different reference, source `.out` still `null`
+afterward); an open punch with no estimate passes through as the exact same object reference (no
+unnecessary cloning, no behavior change); an already-closed punch is never overridden by a stale
+estimate even if one happens to still be present. Not exercised against real jsPDF output or live
+Supabase data — worth a real export pass, see Active State.
 
 ---
 
