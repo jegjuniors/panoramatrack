@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.6 *(Estimated-clock-out prompt on submit-to-office + dark-mode name fix)*
+**Version:** v49.7 *(Estimated end time required when an employee submits while still clocked in)*
 **Last handoff update:** September 4, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,6 +11,23 @@
 
 ## 1. Current Status — what was just completed
 
+- **v49.7 — pushed to `main`, but NOT YET DEPLOYABLE: the migration hasn't been run in Supabase
+  yet** (see Migrations below) — the code writes to `punches.estimated_clock_out` unconditionally
+  once an employee hits the still-clocked-in gate, so don't deploy `app.js`/`index.html` ahead of
+  running `migration_estimated_clock_out.sql`. Gated an employee's own
+  `submitMyTimecard()` on any open punch (still clocked in): they must now give a rough estimated
+  end time before the submit proceeds, reusing the `showEstModal()`/`onProceed` machinery from
+  v49.6 (new `EST_NOTE_MYTC` copy). Unlike v49.6's FYI-only usage, **this one persists** — new
+  nullable `punches.estimated_clock_out` column (`migration_estimated_clock_out.sql`, not yet run
+  in Supabase), mapped in `dbRowToEntry()` as `employeeEstimatedOut` (deliberately a distinct
+  field from the transient `estimatedOut`/`out` the Preliminary-PDF flow uses for synthetic hours
+  math — this new one never touches `out` or pay calculations, display-only). Cleared back to
+  `null` wherever a punch actually gets a real `clock_out` — `confirmClockOut()` (normal kiosk
+  clock-out), `checkAutoServer()` (12-hour auto-clock), and `saveMyTcEdit()`/`saveEdit()` (edit
+  modal, only when the edit itself sets a new clock-out). Surfaced as a small "est. out …" /"You
+  estimated out ~…" note wherever an open punch already renders: `renderMyTcList()` (employee's
+  own view), `refreshSupLog()`, `refreshMasterLog()`, and `refreshAdminEmpCorrect()` (admin
+  correction modal). Also bumped the version badge/`app_version` to v49.7.
 - **v49.6** — The "Employees still clocked in" estimated-clock-out prompt (previously shown only
   from the supervisor's "Preview PDF (Preliminary)" flow) now also appears before **"Submit site
   to office"** (batch) and the per-employee **"Send to office"** button, whenever any of the
@@ -61,45 +78,63 @@
 
 ## 2. Active State
 
-- **Branch:** `main`.
-- **Modified files:** none uncommitted — v49.4, v49.5, and v49.6 are all committed and pushed as
-  of this update (`app.js`, `index.html`).
+- **Branch:** `main`, working tree clean — v49.4 through v49.7 (including this handoff update
+  and the new `migration_estimated_clock_out.sql`) are all committed and pushed.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes. Ad-hoc assertion harnesses (established
-  pattern, run against extracted/mirrored logic — the real functions depend on live
-  Supabase/DOM state): the v49.4 catch-up predicate (8 assertions), the v49.5 edit-save predicate
-  (4 assertions), `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify
-  item-building (8 assertions, v49.1) — all pass. v49.6 (the submit-to-office prompt + color fix)
-  was verified with `node --check` only — it's DOM-driven UI wiring, not exercised against the
-  real UI/Supabase here. Worth a quick real-device check: trigger "Submit site to office" and the
-  per-employee "Send to office" button while someone's still clocked in, confirm the prompt shows
-  and names are legible in dark mode.
-- **Migrations — all already run in production by Julio:**
-  1. `migration_v48_start_time.sql` — `punches.declared_start_time` + 5 `pt_settings` columns.
-  2. `migration_submit_notify.sql` — `pt_settings.submit_notify_enabled` / `submit_notify_emails`.
-  - v49.3 through v49.6 add **no** migration.
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.7 included).
+  Ad-hoc assertion harnesses (established pattern, run against extracted/mirrored logic — the
+  real functions depend on live Supabase/DOM state): v49.7's clear-on-close payload predicate +
+  overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate (8 assertions), the
+  v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9 assertions, v49.3),
+  submission-notify item-building (8 assertions, v49.1) — all pass. v49.6 and v49.7's modal/DOM
+  wiring itself was verified with `node --check` only, not exercised against the real
+  UI/Supabase. Worth a real-device check on v49.7 specifically: submit a timecard while clocked
+  in, confirm the modal appears, an estimate gets required, and "est. out …" shows up on the open
+  punch in My Timecard, the supervisor/master log, and the admin correction modal — **after**
+  `migration_estimated_clock_out.sql` has been run (see Migrations below), since the column
+  doesn't exist yet.
+- **Migrations:**
+  1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
+     columns.
+  2. `migration_submit_notify.sql` — already run. `pt_settings.submit_notify_enabled` /
+     `submit_notify_emails`.
+  3. **`migration_estimated_clock_out.sql` — NOT YET RUN.** Adds nullable
+     `punches.estimated_clock_out`. The app.js/index.html for v49.7 is already pushed to `main` —
+     run this in the Supabase SQL editor before deploying/updating the live site, since the code
+     assumes the column exists (writes to it unconditionally once an employee hits the
+     still-clocked-in gate).
+  - v49.3 through v49.6 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Real-device check on v49.6** (see Build/test status above) — confirm the prompt fires on
-   both submit-to-office paths and the name color reads correctly in dark mode.
-2. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+1. **Run `migration_estimated_clock_out.sql` in the Supabase SQL editor** before the next deploy
+   of `main` — the code is already pushed and assumes the column exists.
+2. **Real-device check on v49.6 + v49.7** together — confirm both estimate-modal flows (FYI-only
+   on submit-to-office, required+persisted on the employee's own submit) and that the "est. out"
+   note reads correctly in dark mode across all four render surfaces.
+3. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
-3. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+4. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-4. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+5. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
 ## 4. Blockers / Notes
 
+- **v49.7 is pushed to `main` but not deployable yet — migration required first.** `app.js`
+  writes to `punches.estimated_clock_out` unconditionally once an employee hits the
+  still-clocked-in submit gate; that column doesn't exist until
+  `migration_estimated_clock_out.sql` runs. Don't deploy this `main` to Netlify without running
+  it first (or the write will just error — no data-loss risk, but the gate would be broken in
+  production).
 - **Report-tab export vs. Submissions-panel export still diverge.** Only the Submissions-panel
   export stamps `pt_timecard_status.stage='exported'`; the Report-tab export (likely the more
   habitually-used one for actually running payroll) never does. v49.4 stopped that gap from
@@ -133,8 +168,55 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.6 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.7 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## 🚧 v49.7 — Estimated end time required when an employee submits while still clocked in
+
+**Status:** coded, verified, and pushed to `main`. **Not yet deployable** — needs
+`migration_estimated_clock_out.sql` run in the Supabase SQL editor before the site is next
+deployed, since the code assumes the new column already exists.
+
+**Context:** `submitMyTimecard()` only ever gated on unresolved auto-clocked punches — an
+employee could submit their timecard mid-shift with an open punch and no record of when they
+expected to finish. Unlike the v49.6 submit-to-office prompt (FYI-only, supervisor/admin side),
+the user wanted this one to actually persist so supervisors/admins reviewing an open punch have
+some sense of what to expect, not just a confirmation gate.
+
+**What shipped:**
+- **`migration_estimated_clock_out.sql`** (new file) — `ALTER TABLE punches ADD COLUMN IF NOT
+  EXISTS estimated_clock_out timestamptz;`. Nullable, purely additive, no backfill.
+- **`dbRowToEntry()`** — maps it to `employeeEstimatedOut`, deliberately a distinct field from
+  the transient `estimatedOut`/`out` the Preliminary-PDF flow already uses (that one flags
+  `skipRounding` in `adjustedTimes()` and stands in for a synthetic close for hours math — this
+  new field must never touch `out` or pay calculations; it's display-only).
+- **`submitMyTimecard()`** — restructured so everything from the `beforeEnd` early-submit warning
+  onward lives in an inner `proceedToSubmit()` closure. Before that, a new gate: any punch in
+  `myTcPunches` with no `out` triggers `showEstModal(openPunches, onProceed, EST_NOTE_MYTC)`
+  (same modal/`onProceed` machinery built for v49.6). Confirming a time writes
+  `estimated_clock_out` to each open punch (handles the overnight-edge case — if the estimate is
+  earlier in the clock than the clock-in, roll to the next day — same math as the existing
+  PDF-flow estimate), updates the in-memory copy, then calls `proceedToSubmit()`. No open
+  punches → straight to `proceedToSubmit()`, unchanged behavior.
+- **Clear-on-close, everywhere a real `clock_out` gets written:** `confirmClockOut()` (normal
+  kiosk clock-out) and `checkAutoServer()` (12-hour auto-clock) unconditionally null
+  `estimated_clock_out` in their update payload, since they always set a real clock-out.
+  `saveMyTcEdit()`/`saveEdit()` (the shared edit-punch modal) null it only when the edit itself
+  sets a new `clock_out` — editing jobsite/activities on a still-open punch leaves the estimate
+  alone (mirrors the v49.5 `clockInChanged` fix's spirit: don't touch a field the edit didn't
+  actually make stale).
+- **Display**, wherever an open punch already renders "still clocked in" / "Still in": a small
+  "est. out …" (or, on the employee's own screen, "You estimated out ~…") note appended when
+  `employeeEstimatedOut` is set — `renderMyTcList()`, `refreshSupLog()`, `refreshMasterLog()`,
+  `refreshAdminEmpCorrect()`.
+
+**Verified:** `node --check` on `app.js`. A 5-assertion harness against the extracted
+clear-on-close payload predicate (key absent when no new clock-out is being set; present and
+`null` when one is) and the overnight-edge estimate math (same-day case unchanged; an overnight
+clock-in with an earlier-clock estimate correctly rolls to the next day). Not exercised against
+the real UI/Supabase or the actual DB column (doesn't exist until the migration runs).
 
 ---
 

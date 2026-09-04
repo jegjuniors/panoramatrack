@@ -589,7 +589,13 @@ function dbRowToEntry(r){
     lunchWaiveRequested:r.lunch_waive_requested||false,
     lunchWaived:(r.lunch_waived===true||r.lunch_waived===false)?r.lunch_waived:null,
     // v48.0: employee's confirmed actual start time (scheduled-start selection popup), if any.
-    declaredStart:r.declared_start_time?new Date(r.declared_start_time):null
+    declaredStart:r.declared_start_time?new Date(r.declared_start_time):null,
+    // v49.7: employee's own rough guess at their clock-out, given at submit time while this
+    // punch was still open. Display-only note for supervisors/admins reviewing an open punch —
+    // deliberately a separate field from the transient `estimatedOut`/`out` used by the
+    // Preliminary-PDF flow (showEstModal's other caller), which DOES get treated as a synthetic
+    // close for hours math. This one never touches `out` and never affects rounding/pay.
+    employeeEstimatedOut:r.estimated_clock_out?new Date(r.estimated_clock_out):null
   };
 }
 
@@ -610,7 +616,8 @@ async function checkAutoServer(){
     const {data,error}=await sb.from('punches').update({
       clock_out:autoOut.toISOString(),
       activities:['Auto-clocked'],
-      auto_clocked:true
+      auto_clocked:true,
+      estimated_clock_out:null // v49.7: a real (auto) clock-out supersedes the employee's own guess
     }).eq('id',e.dbId).is('clock_out',null).select();
     if(error){continue;} // transient — leave open and retry next cycle
     if(data&&data.length){
@@ -1296,6 +1303,7 @@ async function submitMyTimecard(){
         :''} that auto-clocked out at 12 hours. Tap Edit on ${autos.length!==1?'each of those punches':'that punch'} below and set your real clock-out time, then submit.`);
     return;
   }
+  const proceedToSubmit=()=>{
   const beforeEnd=new Date()<myTcPeriod.end;
   const doSubmit=async()=>{
     if(myTcBusy)return;
@@ -1340,6 +1348,28 @@ async function submitMyTimecard(){
   } else {
     doSubmit();
   }
+  };
+
+  // v49.7: still-clocked-in gate — require a rough estimated end time before submitting a
+  // timecard that includes an open punch, so the supervisor isn't left with zero sense of when
+  // the shift wraps up. Persisted (estimated_clock_out) so it's visible on the open punch
+  // wherever it renders — see the write sites that clear it once a real clock-out lands.
+  const openPunches=myTcPunches.filter(p=>!p.out);
+  if(openPunches.length){
+    showEstModal(openPunches,async(timeVal)=>{
+      const [h,m]=timeVal.split(':').map(Number);
+      await Promise.all(openPunches.map(async p=>{
+        if(!p.dbId)return;
+        const estOut=new Date(p.in);estOut.setHours(h,m,0,0);
+        if(estOut<=p.in)estOut.setDate(estOut.getDate()+1); // overnight edge, same as the PDF flow
+        const {error}=await sb.from('punches').update({estimated_clock_out:estOut.toISOString()}).eq('id',p.dbId);
+        if(!error)p.employeeEstimatedOut=estOut; // keep the in-memory copy in sync
+      }));
+      proceedToSubmit();
+    },EST_NOTE_MYTC);
+    return;
+  }
+  proceedToSubmit();
 }
 
 /* Employee pulls their submission back (v44.0, reworked v47.0 per-site) — only retracts
@@ -1444,6 +1474,7 @@ function renderMyTcList(){
             <div style="font-size:11px;color:var(--txt3);margin-top:2px;">
               Actual: ${fmt(e.in)} &nbsp;→&nbsp; ${e.out?fmt(e.out):'—'}
             </div>
+            ${(!e.out&&e.employeeEstimatedOut)?`<div style="font-size:11px;color:var(--txt3);margin-top:2px;">You estimated out ~${fmt(e.employeeEstimatedOut)}</div>`:''}
             ${(e.activity&&e.activity.length)?`<div style="font-size:11px;color:var(--txt3);margin-top:4px;">${e.activity.join(', ')}</div>`:''}
           </div>
           <div style="text-align:right;flex-shrink:0;">${badges}</div>
@@ -1561,6 +1592,7 @@ async function saveMyTcEdit(){
     const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true};
     if(clockInChanged)upd.declared_start_time=null;
     upd.clock_out=newOut?newOut.toISOString():null;
+    if(newOut)upd.estimated_clock_out=null; // v49.7: a real clock-out supersedes the employee's own guess
     if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
     const {error}=await sb.from('punches').update(upd).eq('id',e.dbId);
     if(error){err.textContent='DB error: '+error.message;return}
@@ -1690,7 +1722,8 @@ async function confirmClockOut(){
       clock_out:now.toISOString(),
       activities:[...selectedActs],
       auto_clocked:false,
-      lunch_waive_requested:lunchWaiveRequested
+      lunch_waive_requested:lunchWaiveRequested,
+      estimated_clock_out:null // v49.7: the real clock-out supersedes the employee's own guess
     }).eq('id',entry.dbId);
     if(error){showNotif('✗','Error','Could not save clock-out — check connection','#E24B4A');return}
   }
@@ -2162,7 +2195,9 @@ async function refreshSupLog(){
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
       const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
-      const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
+      let outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
+      // v49.7: employee's own guess at when this open shift will end, given at submit time.
+      if(!l.out&&l.employeeEstimatedOut)outTxt+=`<div style="font-size:10px;color:var(--txt3);">est. out ${fmt(l.employeeEstimatedOut)}</div>`;
       let actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
       if(l.manualEntry)actBadges=`<span class="badge" style="background:#f0a830;color:#3a2600;margin-right:2px;">✎ Manual</span>`+actBadges;
       // v42.0 lunch-waive status badge
@@ -3103,7 +3138,9 @@ async function refreshMasterLog(){
   tbody.innerHTML=[...logs].reverse().map(l=>{
     const idx=timeLog.indexOf(l);
     const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
-    const outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
+    let outTxt=l.out?fmtDt(l.out):'<span style="color:var(--txt2)">Still in</span>';
+    // v49.7: employee's own guess at when this open shift will end, given at submit time.
+    if(!l.out&&l.employeeEstimatedOut)outTxt+=`<div style="font-size:10px;color:var(--txt3);">est. out ${fmt(l.employeeEstimatedOut)}</div>`;
     let actBadges=l.autoClocked?`<span class="badge b-auto">Auto-out ⚠️</span>`:(l.activity&&l.activity.length?l.activity.map(a=>`<span class="badge b-blue" style="margin-right:2px;">${a}</span>`).join(''):'—');
     if(l.manualEntry)actBadges=`<span class="badge" style="background:#f0a830;color:#3a2600;margin-right:2px;">✎ Manual</span>`+actBadges;
     if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
@@ -3771,6 +3808,7 @@ async function saveEdit(){
     const upd={clock_in:newIn.toISOString(),jobsite:newJobsite,activities:newActs};
     if(clockInChanged)upd.declared_start_time=null;
     if(newOut)upd.clock_out=newOut.toISOString();else upd.clock_out=null;
+    if(newOut)upd.estimated_clock_out=null; // v49.7: a real clock-out supersedes the employee's own guess
     if(editedAfterAuto){upd.auto_clocked=false;upd.edited_after_auto=true;}
     // Lunch waive decision (v42.0) — only write when a decision was made this session
     if(_editWaiveDecision!==null)upd.lunch_waived=_editWaiveDecision;
@@ -3780,6 +3818,7 @@ async function saveEdit(){
   // Update memory
   e.in=newIn;e.out=newOut;e.jobsite=newJobsite;e.activity=newActs;
   if(clockInChanged)e.declaredStart=null;
+  if(newOut)e.employeeEstimatedOut=null;
   if(editedAfterAuto){e.autoClocked=false;e.editedAfterAuto=true;}
   if(_editWaiveDecision!==null)e.lunchWaived=_editWaiveDecision;
   // v47.4: if this edit left the OLD site with no punches this period, drop its stale status row
@@ -4090,6 +4129,7 @@ let _estModalOpenPunches=[];
 let _estModalOnProceed=null;
 const EST_NOTE_PDF='Set an estimated clock-out time for today. This will be used to calculate approximate hours for the <b>Preliminary</b> report only — actual punch records are not affected.';
 const EST_NOTE_FYI='Just a heads-up before sending — nothing is saved here and punch records are not affected. Confirm a rough time to continue.';
+const EST_NOTE_MYTC='Since you’re still clocked in, give a rough end time for this shift so your supervisor knows what to expect. This is just a note — it won’t change your actual clock-out, and you can update it any time before you clock out for real.';
 function showEstModal(openPunches,onProceed,note){
   _estModalOpenPunches=openPunches;
   _estModalOnProceed=onProceed||null;
@@ -4669,7 +4709,7 @@ async function refreshAdminEmpCorrect(){
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
       <div style="min-width:0;">
         <span style="font-size:13px;color:var(--txt);font-weight:600;">${e.jobsite||'—'}</span>
-        <div style="font-size:11px;color:var(--txt2);margin-top:2px;">${fmtDt(e.in)} – ${e.out?fmtDt(e.out):'still clocked in'}</div>
+        <div style="font-size:11px;color:var(--txt2);margin-top:2px;">${fmtDt(e.in)} – ${e.out?fmtDt(e.out):'still clocked in'}${!e.out&&e.employeeEstimatedOut?` · est. out ${fmt(e.employeeEstimatedOut)}`:''}</div>
         ${flagged?`<div style="font-size:11px;color:var(--red);margin-top:2px;">⚠️ ${flagParts.join(' · ')}</div>`:''}
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
@@ -5182,7 +5222,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.6',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.7',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5231,7 +5271,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.6',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.7',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

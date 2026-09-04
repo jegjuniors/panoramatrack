@@ -58,6 +58,26 @@ There is no test runner or CI. Before handing work back:
   3. **Next Steps:** The immediate 2–3 items that need to be tackled next.
   4. **Blockers/Notes:** Any known bugs, architectural decisions, or flags to watch out for.
 
+## Stage gating: plan → code → push
+
+Three separate gates, each requiring its own explicit go-ahead — finishing one is not permission
+to start the next:
+
+1. **Plan first.** When asked to plan, investigate and design a change (design decisions, files
+   to touch, the mechanism) without editing `app.js`/`index.html`/`styles.css` or any other
+   shipped file. Ask clarifying questions before finalizing the plan when the design forks on
+   something the user hasn't specified (e.g. "should this value persist or just gate the action").
+2. **Code only when told to.** Don't start implementing a planned change until the user
+   explicitly says to (e.g. "let's build it," "implement this," "yes, fix it now"). A plan being
+   agreed on isn't itself the go-ahead to write code, unless the user's message doing the
+   agreeing also asks for the code.
+3. **Push only when told to, and only once all of this session's coding is done.** Finishing and
+   verifying one fix (`node --check`, a harness) is not permission to commit/push it — keep it
+   staged in the working tree and say so. Commit + push only on an explicit instruction (e.g.
+   "let's submit these changes," "commit and push"), and treat that as covering everything coded
+   so far in the session, not just the most recent fix — don't push mid-session after each
+   individual fix unless asked to.
+
 ## How this maps to `HANDOFF.md`
 
 `HANDOFF.md` keeps the four required sections at the **top** of the file, in order, under a
