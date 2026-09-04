@@ -434,6 +434,21 @@ function isOutOfSubmission(entry,statusRow){
   return entry.in>new Date(statusRow.emp_submitted_at);
 }
 
+// v49.12: has this punch's DATA changed (any insert/update, per the DB-maintained
+// `updated_at` — see migration_punch_updated_at.sql) since a given timestamp? Distinct from
+// isOutOfSubmission above, which only catches a brand-new clock-in landing after submission —
+// this also catches an EXISTING already-submitted/exported punch being edited afterward (the
+// case that prompted this: an estimated-hours punch later getting its real clock-out filled
+// in). Powers the "updated since submit/export" flags across the supervisor log, admin
+// Submissions panel, admin correction modal, and the changed-only re-export option.
+function changedSince(punch,sinceIso){
+  if(!sinceIso||!punch||!punch.updatedAt)return false;
+  return punch.updatedAt>new Date(sinceIso);
+}
+function anyChangedSince(punches,sinceIso){
+  return (punches||[]).some(p=>changedSince(p,sinceIso));
+}
+
 // Running-total paid hours for the My Timecard panel (v44.0).
 //  - Excludes still-active punches (no clock-out yet) — same as paidHours returning null.
 //  - Optimistically treats a PENDING lunch waive as if approved, so the running total
@@ -595,7 +610,11 @@ function dbRowToEntry(r){
     // deliberately a separate field from the transient `estimatedOut`/`out` used by the
     // Preliminary-PDF flow (showEstModal's other caller), which DOES get treated as a synthetic
     // close for hours math. This one never touches `out` and never affects rounding/pay.
-    employeeEstimatedOut:r.estimated_clock_out?new Date(r.estimated_clock_out):null
+    employeeEstimatedOut:r.estimated_clock_out?new Date(r.estimated_clock_out):null,
+    // v49.12: last insert/update timestamp, auto-maintained by a DB trigger (see
+    // migration_punch_updated_at.sql) — never set from app.js. Powers the "updated since
+    // submit/export" flags; null on a pre-migration row that's somehow still missing it.
+    updatedAt:r.updated_at?new Date(r.updated_at):null
   };
 }
 
@@ -2158,6 +2177,12 @@ async function refreshSupLog(){
     const chip=supStageChip(stage);
     // out-of-submission: match each punch to ITS OWN site's row (not a single shared row).
     const oos=records.filter(l=>isOutOfSubmission(l,mySiteRows.find(r=>r.jobsite===l.jobsite)||null)).length;
+    // v49.12: any punch at a site this supervisor already sent to office (sup_submitted+)
+    // whose data changed since that send — new/updated punches the supervisor hasn't seen yet.
+    const changedSinceSent=records.some(l=>{
+      const r=mySiteRows.find(rr=>rr.jobsite===l.jobsite);
+      return r&&stageAtLeast(r.stage,TC_STAGE.SUP)&&changedSince(l,r.sup_submitted_at);
+    });
     const totalHrs=records.reduce((s,l)=>s+(paidHours(l)||0),0);
     const flags=records.filter(l=>l.autoClocked).length;
     const waivePend=records.filter(l=>isPendingWaive(l)).length;
@@ -2207,6 +2232,13 @@ async function refreshSupLog(){
       else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
       // v44.0: punch landed after the employee handed in their card (matched to that punch's own site)
       if(isOutOfSubmission(l,mySiteRows.find(r=>r.jobsite===l.jobsite)||null))actBadges+=`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:2px;">⚠️ After submit</span>`;
+      // v49.12: this specific punch's data changed after this site was sent to office —
+      // per-punch counterpart to the employee-card-level pill above.
+      {
+        const _r=mySiteRows.find(r=>r.jobsite===l.jobsite);
+        if(_r&&stageAtLeast(_r.stage,TC_STAGE.SUP)&&changedSince(l,_r.sup_submitted_at))
+          actBadges+=`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:2px;">⚠️ Updated since sent</span>`;
+      }
       const isAssignedSite=(activeSup.jobsites||[]).includes(l.jobsite);
       const siteColor=isAssignedSite?'b-blue':'b-amber'; // amber = unassigned/temp site
       return `<tr class="${l.autoClocked?'row-auto':''}">
@@ -2225,6 +2257,7 @@ async function refreshSupLog(){
         <div>
           <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${data.name}
             <span class="badge" style="background:${chip.bg};color:${chip.color};margin-left:6px;font-size:10px;vertical-align:middle;">${chip.label}</span>
+            ${changedSinceSent?`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:6px;font-size:10px;vertical-align:middle;">⚠️ Updated since sent</span>`:''}
             ${forceBtn}${sendBtn}${sendBackBtn}
           </p>
           <p class="emp-summary">${summary}</p>
@@ -4804,12 +4837,16 @@ async function refreshAdminEmpCorrect(){
     // panel — surfaced here too, as the supervisor/GM's fallback fix when the employee can't
     // or didn't resolve it themselves.
     const startFlag=needsStartTimeConfirm(e);
-    const flagged=autoFlag||waiveFlag||oosFlag||startFlag;
+    // v49.12: this punch's data changed after this site was exported (new or edited) —
+    // matches the red pill next to "✓ Exported" one screen up in the Submissions panel.
+    const changedFlag=row&&row.stage===TC_STAGE.EXPORTED&&changedSince(e,row.exported_at);
+    const flagged=autoFlag||waiveFlag||oosFlag||startFlag||changedFlag;
     const flagParts=[];
     if(autoFlag)flagParts.push('Unresolved auto-clock');
     if(waiveFlag)flagParts.push('Pending lunch waive');
     if(oosFlag)flagParts.push('Punch after submit');
     if(startFlag)flagParts.push('Unconfirmed start time');
+    if(changedFlag)flagParts.push('Changed after export');
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
       <div style="min-width:0;">
         <span style="font-size:13px;color:var(--txt);font-weight:600;">${e.jobsite||'—'}</span>
@@ -4906,6 +4943,10 @@ async function refreshSubmissionsPanel(){
       const unconfirmedCount=sitePunches.filter(p=>needsStartTimeConfirm(p)).length;
       const neverSubmitted=stage===TC_STAGE.OPEN&&periodEnded;
       const stuckEmp=stage===TC_STAGE.EMP;
+      // v49.12: this site's punches changed (new or edited) since it was exported — e.g. an
+      // estimated-hours punch getting its real clock-out over the weekend. Purely informational,
+      // never blocks anything; see the changed-only re-export option below.
+      const changedAfterExport=exported&&anyChangedSince(sitePunches,row&&row.exported_at);
 
       // v47.2: cross-site blocker note — this site's row is done, but the employee worked
       // another site that isn't at sup_submitted+ yet. Only counts sites where the employee
@@ -4953,6 +4994,7 @@ async function refreshSubmissionsPanel(){
         : '';
       const statusHtml=exported
         ? '<span class="badge" style="background:var(--blue-l,#dbeafe);color:var(--blue-d,#1e40af);font-size:10px;margin-left:6px;">✓ Exported</span>'
+          +(changedAfterExport?'<span class="badge" style="background:#f7dede;color:#7a2020;font-size:10px;margin-left:6px;">⚠️ Updated since export</span>':'')
         : ready?`<span style="color:var(--green);font-weight:700;margin-left:6px;">✓</span>${blockingNote}`:'';
 
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
@@ -5119,7 +5161,11 @@ async function openSubmissionsExport(scopeType,jobsite){
    which is reserved for the LAST-period view where a delay actually matters. */
 
 let _ebReExportCb=null;
-function showExportBreakdown(title,bodyHtml,reExportLabel,onReExport){
+let _ebReExportChangedCb=null;
+// v49.12: second, optional button — "Re-export N changed only" — alongside the original
+// unconditional "Re-export N already-exported" one. Both can be shown at once; neither
+// replaces the other.
+function showExportBreakdown(title,bodyHtml,reExportLabel,onReExport,reExportChangedLabel,onReExportChanged){
   document.getElementById('eb-title').textContent=title;
   document.getElementById('eb-body').innerHTML=bodyHtml;
   const btn=document.getElementById('eb-reexport-btn');
@@ -5131,21 +5177,40 @@ function showExportBreakdown(title,bodyHtml,reExportLabel,onReExport){
     btn.style.display='none';
     _ebReExportCb=null;
   }
+  const btnChanged=document.getElementById('eb-reexport-changed-btn');
+  if(btnChanged){
+    if(reExportChangedLabel&&onReExportChanged){
+      btnChanged.textContent=reExportChangedLabel;
+      btnChanged.style.display='';
+      _ebReExportChangedCb=onReExportChanged;
+    } else {
+      btnChanged.style.display='none';
+      _ebReExportChangedCb=null;
+    }
+  }
   document.getElementById('export-breakdown-bg').style.display='flex';
 }
 function closeExportBreakdown(){
   document.getElementById('export-breakdown-bg').style.display='none';
   _ebReExportCb=null;
+  _ebReExportChangedCb=null;
 }
 function doExportBreakdownReExport(){
   const cb=_ebReExportCb;
   closeExportBreakdown();
   if(cb)cb();
 }
-// Wire the Re-export button once the DOM is ready.
+function doExportBreakdownReExportChanged(){
+  const cb=_ebReExportChangedCb;
+  closeExportBreakdown();
+  if(cb)cb();
+}
+// Wire the Re-export buttons once the DOM is ready.
 document.addEventListener('DOMContentLoaded',()=>{
   const b=document.getElementById('eb-reexport-btn');
   if(b)b.addEventListener('click',doExportBreakdownReExport);
+  const bc=document.getElementById('eb-reexport-changed-btn');
+  if(bc)bc.addEventListener('click',doExportBreakdownReExportChanged);
 });
 
 /* Compute state buckets for the empty-export popup, then show it.
@@ -5157,6 +5222,17 @@ document.addEventListener('DOMContentLoaded',()=>{
      - notSubmitted:      no sites at 'exported' AND not fully at 'sup_submitted' either
                           (covers open/emp_submitted/mixed-below-sup states)
    For per-site scope, only counts employees who touched that specific jobsite. */
+// v49.12: has this employee's punches at the given scope changed since their export? For
+// scopeType 'site', only that jobsite's row/punches count; for 'all', any of their exported
+// sites. Feeds both the "N changed" count in the breakdown popup and the changed-only re-export.
+function employeeChangedSinceExport(empId,rows,allLogs,scopeType,jobsite){
+  const relevantRows=scopeType==='site'?rows.filter(r=>r.jobsite===jobsite):rows;
+  return relevantRows.some(r=>{
+    if(r.stage!==TC_STAGE.EXPORTED||!r.exported_at)return false;
+    const sitePunches=allLogs.filter(l=>String(l.empId)===String(empId)&&l.jobsite===r.jobsite);
+    return anyChangedSince(sitePunches,r.exported_at);
+  });
+}
 function showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period){
   const empIds=Object.keys(statusMap);
   const punchEmpIds=Object.keys(sitesWorkedByEmp);
@@ -5172,7 +5248,7 @@ function showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorke
       })
     : allEmpIds;
 
-  let fullyExported=0,partiallyExported=0,notSubmitted=0;
+  let fullyExported=0,partiallyExported=0,notSubmitted=0,changedCount=0;
   scoped.forEach(id=>{
     const rows=statusMap[id]||[];
     const worked=[...(sitesWorkedByEmp[id]||[])];
@@ -5184,7 +5260,12 @@ function showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorke
     });
     const allEx=stages.every(st=>st===TC_STAGE.EXPORTED);
     const anyEx=stages.some(st=>st===TC_STAGE.EXPORTED);
-    if(allEx)fullyExported++;
+    if(allEx){
+      fullyExported++;
+      // v49.12: only fully-exported employees are eligible for the changed-only re-export —
+      // matches startReExport's own eligibility filter below.
+      if(employeeChangedSinceExport(id,rows,allLogs,scopeType,jobsite))changedCount++;
+    }
     else if(anyEx)partiallyExported++;
     else notSubmitted++;
   });
@@ -5198,6 +5279,7 @@ function showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorke
 
   const lines=[];
   if(fullyExported>0)lines.push(`<strong>${fullyExported}</strong> employee${fullyExported!==1?'s':''} already fully exported this period`);
+  if(changedCount>0)lines.push(`<strong style="color:var(--red,#c0392b);">${changedCount}</strong> of those have new/updated punches since export`);
   if(notSubmitted>0)lines.push(`<strong>${notSubmitted}</strong> employee${notSubmitted!==1?'s':''} ${notSubmittedLabel}`);
   if(partiallyExported>0)lines.push(`<strong>${partiallyExported}</strong> employee${partiallyExported!==1?'s':''} partially exported`);
 
@@ -5210,17 +5292,30 @@ function showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorke
     ? `Re-export ${fullyExported} already-exported employee${fullyExported!==1?'s':''}`
     : null;
   const onReExport=canReExport
-    ? ()=>startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period)
+    ? ()=>startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period,false)
     : null;
 
-  showExportBreakdown(title,bodyHtml,reExportLabel,onReExport);
+  // v49.12: distinct second option — regenerate files only for the employees whose exported
+  // punches actually changed, instead of the whole already-exported batch. Shown alongside the
+  // unconditional option above, not instead of it.
+  const canReExportChanged=changedCount>0;
+  const reExportChangedLabel=canReExportChanged
+    ? `Re-export ${changedCount} changed employee${changedCount!==1?'s':''} only`
+    : null;
+  const onReExportChanged=canReExportChanged
+    ? ()=>startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period,true)
+    : null;
+
+  showExportBreakdown(title,bodyHtml,reExportLabel,onReExport,reExportChangedLabel,onReExportChanged);
 }
 
 /* Re-export path — regenerates the same consolidated file(s) for employees whose every
    worked site is already at stage='exported'. No stage stamping (they're already
    exported); the no-op _pendingExportStampFn still refreshes the panel afterwards for
-   consistency. For per-site scope, further filtered to employees who worked that site. */
-function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period){
+   consistency. For per-site scope, further filtered to employees who worked that site.
+   v49.12: changedOnly further filters down to employees with an actual new/updated punch
+   since their export — see employeeChangedSinceExport(). */
+function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period,changedOnly){
   let reExportIds=Object.keys(statusMap).filter(id=>{
     const rows=statusMap[id]||[];
     const worked=[...(sitesWorkedByEmp[id]||[])];
@@ -5235,9 +5330,11 @@ function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,peri
     const worked=sitesWorkedByEmp[id];
     return worked&&worked.has(jobsite);
   });
+  if(changedOnly)reExportIds=reExportIds.filter(id=>
+    employeeChangedSinceExport(id,statusMap[id]||[],allLogs,scopeType,jobsite));
 
   if(!reExportIds.length){
-    showCustomAlert('Nothing to re-export','No fully-exported employees found for this scope.');
+    showCustomAlert('Nothing to re-export',changedOnly?'No changed employees found for this scope.':'No fully-exported employees found for this scope.');
     return;
   }
 
@@ -5326,7 +5423,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.11',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.12',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5375,7 +5472,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.11',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.12',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

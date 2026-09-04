@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.11 *(Removed the supervisor "Preview PDF" confirmation checklist; fixed a jsPDF glyph bug that garbled the ⚠ PRELIMINARY banner and every overlap-flag marker into "&")*
+**Version:** v49.12 *("Updated since submit/export" flags — red pill in supervisor log + Submissions panel, per-punch detail, changed-only re-export option — migration run, deployable)*
 **Last handoff update:** September 4, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,77 +11,84 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.11 — removed the supervisor "Preview PDF" confirmation checklist; fixed a jsPDF glyph bug
-  that garbled every ⚠ warning symbol on a printed PDF into a stray "&".** Two changes prompted by
-  the same screenshot (Julio's own supervisor timecard PDF):
-  - **Checklist removed.** `openExportConfirm()` → (review gate) → (estimate modal, if needed) →
-    `checkDupsAndProceed()`/`proceedSkipDups()`/`proceedIncludeDups()` used to route into
-    `openChecklist()`, a modal with 4–5 checkboxes ("I have reviewed all clock-in/out times…"
-    etc.) the supervisor had to tick before `doExport()` would actually run `generatePDF()` — a
-    click-through gate, not a meaningful review step. All three call sites now call `doExport()`
-    directly; `openChecklist()`/`closeConfirmModal()` and the `#export-confirm-modal` markup
-    (`index.html`) are gone. `doExport()` itself lost its checkbox-validation block but is
-    otherwise unchanged — same PDF generation, same submission-recording logic.
-  - **jsPDF glyph bug, found via the screenshot:** the amber "⚠ PRELIMINARY — SUBJECT TO
-    REVISION" corner banner was rendering as "& PRELIMINARY — SUBJECT T…" — jsPDF's built-in
-    fonts (Helvetica, WinAnsiEncoding) don't support the ⚠ Unicode character (U+26A0) and silently
-    substitute a wrong glyph rather than erroring. This affected **5 places**, not just the one in
-    the screenshot: the PRELIMINARY banner, both PDF generators' overlap-row date prefix
-    (`generatePDF()`/`generateMasterPDF()`, from v49.9), and both overlap footnotes — all replaced
-    with plain ASCII (`!!` for the overlap marker, distinct from the existing single `!`
-    auto-clock marker; dropped entirely from the banner, which already reads clearly off its
-    amber background and bold "PRELIMINARY" wording alone). The apparent right-edge truncation in
-    the screenshot is very likely just the screenshot/viewer crop, not the PDF itself — the banner
-    text is right-aligned well inside the physical page margin — worth a quick look at the actual
-    generated PDF to confirm now that the glyph itself is fixed.
-  - Bumped version badge/`app_version` to v49.11.
-- **v49.0–v49.10** — settings foundation + Edge Function for submission notifications, the
+- **v49.12 — "updated since submit/export" flags. `migration_punch_updated_at.sql` has been run
+  in Supabase** (adds `punches.updated_at`, incl. the backfill) — deployable. Julio's ask: employees still clocked in when a
+  timecard is submitted show estimated hours (v49.7) and export as preliminary; they eventually
+  clock out for real, and may pick up more shifts over the weekend — supervisors and admins had no
+  way to see that punch data changed *after* they submitted/exported, short of manually re-checking.
+  - **Detection:** new `punches.updated_at`, auto-stamped by a DB trigger on every insert/update —
+    no app.js write site needed to change, so nothing can be missed. `changedSince(punch,
+    sinceIso)`/`anyChangedSince(punches,sinceIso)` (new helpers, next to `isOutOfSubmission`) are
+    the shared primitive everything below builds on. Deliberately distinct from the existing
+    `isOutOfSubmission`, which only catches a brand-new clock-in landing after submission — this
+    also catches an *existing* already-submitted punch being edited afterward, e.g. the estimated
+    punch getting its real clock-out filled in, which was the actual scenario described.
+  - **Supervisor log** (`refreshSupLog`): a red "⚠️ Updated since sent" pill next to the green "✓
+    Sent to office" chip when any punch at a `sup_submitted+` site changed after that site's
+    `sup_submitted_at`. Same badge repeated per-punch in the row table (mirrors the existing
+    "⚠️ After submit" badge pattern) — purely informational, doesn't block anything; punches are
+    already always editable regardless of stage.
+  - **Admin Submissions panel** (`refreshSubmissionsPanel`): same red pill next to "✓ Exported",
+    compared against that site's `exported_at` instead.
+  - **Admin correction modal** (`refreshAdminEmpCorrect`): new "Changed after export" flag added
+    to the existing per-punch flag list (unresolved auto-clock, pending waive, punch-after-submit,
+    unconfirmed start).
+  - **Changed-only re-export:** the existing re-export flow (`showExportEmptyBreakdown`/
+    `startReExport`, triggered when clicking Export finds nothing newly-ready because everyone's
+    already exported) now offers a **second** button alongside the original unconditional one —
+    "Re-export N changed employees only" vs. "Re-export N already-exported employees" — both
+    available at once, neither replaces the other. New `employeeChangedSinceExport()` helper scopes
+    correctly to a single jobsite or "all sites" depending on which Export button was clicked.
+    `showExportBreakdown()`/the export-breakdown modal (`index.html`) extended to support the
+    second button.
+  - Bumped version badge/`app_version` to v49.12.
+- **v49.0–v49.11** — settings foundation + Edge Function for submission notifications, the
   scheduled-start confirm/flag/fix flow, several My Timecard/catch-up/edit-save bugfixes, the
   estimated-clock-out prompt (single-field FYI-only → persisting → per-row/skip-when-covered),
-  the export overlap-summing fix (+ a crashing Excel-export bug found along the way), and the
-  master-admin PDF estimate fallback. Full detail for each is in the changelog under Reference &
-  History below.
+  the export overlap-summing fix (+ a crashing Excel-export bug found along the way), the
+  master-admin PDF estimate fallback, and removing the supervisor PDF checklist (+ a jsPDF glyph
+  bug fix). Full detail for each is in the changelog under Reference & History below.
 
 ## 2. Active State
 
-- **Branch:** `main`, working tree clean — v49.10 (master PDF estimate fallback) and v49.11
-  (checklist removal + jsPDF glyph fix) are committed and pushed together.
+- **Branch:** `main`, working tree clean — v49.12 (including `migration_punch_updated_at.sql`,
+  now run in Supabase) is committed and pushed.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.11 included).
-  v49.11 itself is mostly DOM-flow removal (no modal to open) and a plain string substitution —
-  no extractable pure-logic harness the way most other versions have, beyond a quick sanity check
-  confirming the new `!`/`!!` marker combinations stay visually distinct (auto-only, overlap-only,
-  and both-at-once). Ad-hoc assertion harnesses for earlier still-current versions: v49.10's
-  `withMasterEstimates` mapping (6 assertions), v49.9's `consolidatePunchesByDay()` (14
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.12 included).
+  Ad-hoc assertion harnesses (established pattern): v49.12's `changedSince`/`anyChangedSince`/
+  `employeeChangedSinceExport` (11 assertions — flags a change after the threshold, doesn't flag
+  before it or with no threshold yet, doesn't crash on a missing `updatedAt`, the core scenario
+  of an existing punch edited after submission being caught, the export-side helper correctly
+  ignoring not-yet-exported employees and scoping correctly to one jobsite vs. "all sites"),
+  v49.10's `withMasterEstimates` mapping (6 assertions), v49.9's `consolidatePunchesByDay()` (14
   assertions), v49.8's `estDefaultTimeStr`/`estRowHours` (6 assertions), v49.7's clear-on-close
   payload predicate + overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate
   (8 assertions), the v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9
-  assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass. Not
-  exercised against the real UI/Supabase/jsPDF/ExcelJS — worth a real-export pass covering v49.9
-  through v49.11 together: click "Preview PDF" and confirm it now generates immediately with no
-  checklist modal in the way; confirm the amber "PRELIMINARY — SUBJECT TO REVISION" banner and
-  the `!!` overlap markers/footnotes render as plain readable text instead of "&"; a master PDF
-  export with a Sandy-shaped overlap and with a still-open punch that has an employee estimate
-  (confirm a still-open punch with NO estimate still exports blank as before); and a full Excel
-  export to confirm the "✓ Excel pack exported" toast now actually appears (it never did before
-  v49.9) and `stage='exported'` gets stamped when exporting via the Submissions-panel "Excel"
-  option specifically.
+  assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass. Not yet
+  exercised against the real UI/Supabase, now unblocked since the migration is run: confirm the
+  red pill appears in the supervisor log after editing an already-sent punch; confirm it appears
+  in the Submissions panel after editing an already-exported punch; confirm the admin correction
+  modal's new "Changed after export" flag; and confirm the changed-only re-export button appears
+  only when there's an actual change, generates the right subset of employees, and that "Re-export
+  everyone" still works unchanged alongside it. Also worth covering v49.9 – v49.11's still-open
+  real-export/real-PDF checks in the same pass if they haven't happened yet.
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
   2. `migration_submit_notify.sql` — already run. `pt_settings.submit_notify_enabled` /
      `submit_notify_emails`.
-  3. `migration_estimated_clock_out.sql` — **run** (confirmed by Julio, Sept 4, 2026). Adds
-     nullable `punches.estimated_clock_out`.
-  - v49.3 through v49.6 added no migration.
+  3. `migration_estimated_clock_out.sql` — already run.
+  4. `migration_punch_updated_at.sql` — **run** (confirmed by Julio, Sept 4, 2026). Adds
+     `punches.updated_at` (DB trigger, auto-stamped on every update) plus the one-time backfill
+     of existing rows to their own `clock_in`.
+  - v49.3 through v49.6, v49.11 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Real-device/real-export check on v49.6 – v49.11** together — see the specific scenarios
-   called out in Active State above. Now unblocked — migration is run, so this can happen against
-   the live column.
+1. **Real-device/real-export check on v49.6 – v49.12** together — see the specific scenarios
+   called out in Active State above. Now unblocked — migration is run.
 2. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
    correction modal — v49.9 makes it visible on exports, it doesn't touch the underlying data.
    Worth a quick scan for other employees with the same symptom while in there — v49.9's overlap
@@ -138,8 +145,95 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.11 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.12 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.12 — "Updated since submit/export" flags + changed-only re-export
+
+**Status:** coded, verified, pushed to `main`, and deployable — `migration_punch_updated_at.sql`
+has been run in Supabase (confirmed by Julio, Sept 4, 2026), backfill included.
+
+**Context:** Julio's ask, describing the exact scenario: a timecard submitted early in a pay
+period gets an estimated end time for anyone still clocked in (v49.7) and exports as preliminary
+(v49.10). Those employees eventually clock out for real, and may pick up more shifts over the
+weekend — but nothing in the app told a supervisor or admin that the underlying punch data had
+moved since they submitted/exported it. They'd only find out by manually re-checking, or not at
+all.
+
+**Design (confirmed before building, three separate questions):**
+1. **Detection mechanism** — real tracking via a new `punches.updated_at` column + DB trigger
+   (chosen over a cheaper `clock_in`-only comparison, which would have missed exactly the
+   scenario described: an *existing* estimated punch getting its real clock-out filled in later
+   doesn't change its `clock_in`, only a true last-modified timestamp catches that).
+2. **Where it shows** — supervisor log (red pill beside "✓ Sent to office") and admin Submissions
+   panel (red pill beside "✓ Exported"), each compared against its own relevant timestamp
+   (`sup_submitted_at` / `exported_at`) — plus, once in the weeds, a new capability: when
+   re-exporting, the admin should be able to choose "only the changed employees" or "the entire
+   site again," not just the one unconditional re-export that already existed.
+3. **Granularity** — employee-level badge for quick scanning, plus per-punch detail in the admin
+   correction modal (mirroring the existing auto-clock/waive/out-of-submission flag pattern
+   there) and, as an extra (asked for explicitly), the same per-punch badge inline in the
+   supervisor's own Time Log rows.
+
+**What shipped:**
+- **`migration_punch_updated_at.sql`** (new file) — `punches.updated_at timestamptz NOT NULL
+  DEFAULT now()`, plus a `BEFORE UPDATE` trigger (`set_punch_updated_at()`) that unconditionally
+  stamps `NEW.updated_at = now()` on every update. The trigger means **no app.js write site
+  needed to change** — every existing insert/update path (clock-in, clock-out, edits, auto-clock,
+  waive decisions, estimate writes) is covered automatically, with no risk of a missed call site.
+  **Critical backfill included in the same file:** `UPDATE punches SET updated_at = clock_in;`
+  run immediately after the column is added — without it, every pre-existing row would carry
+  `updated_at = "the moment the migration ran"`, making every already-submitted/exported timecard
+  in the system look like it just changed the instant v49.12 ships. See Blockers/Notes.
+- **`dbRowToEntry()`** — maps the new column to `updatedAt` (a `Date`, or `null`).
+- **New shared helpers** (`app.js`, next to `isOutOfSubmission`): `changedSince(punch,sinceIso)`
+  and `anyChangedSince(punches,sinceIso)` — the primitive every surface below is built on.
+  Deliberately distinct from the pre-existing `isOutOfSubmission`, which only catches a *new*
+  clock-in landing after submission (compares `clock_in`, not last-modified) — these catch an
+  *existing* punch being edited afterward too, which is the scenario that prompted this feature.
+- **Supervisor log** (`refreshSupLog`): a red "⚠️ Updated since sent" pill next to the green "✓
+  Sent to office" chip when any of that employee's punches at a `sup_submitted+` site changed
+  after that site's own `sup_submitted_at`. The same badge repeats per-punch in the row table
+  (mirroring the existing "⚠️ After submit" per-row badge) — purely informational; punches are
+  already editable regardless of submission stage, so no new action was needed to make the flag
+  actionable.
+- **Admin Submissions panel** (`refreshSubmissionsPanel`): same red pill next to "✓ Exported",
+  compared against that employee-site row's `exported_at` — computed from `sitePunches`, which
+  the panel already had scoped correctly per employee-per-site.
+- **Admin correction modal** (`refreshAdminEmpCorrect`): new `changedFlag` ("Changed after
+  export") added to the existing per-punch flag list (unresolved auto-clock, pending waive,
+  punch-after-submit, unconfirmed start-time) — same red-label rendering already there.
+- **Changed-only re-export** — extends the existing v44.3 re-export flow rather than adding new
+  UI surface. `showExportEmptyBreakdown()` now also computes `changedCount` (via new
+  `employeeChangedSinceExport(empId,rows,allLogs,scopeType,jobsite)`, which scopes correctly to
+  either the single jobsite an admin clicked "Export" on, or all sites for the "all sites"
+  button) and, when `changedCount>0`, shows a second button — "Re-export N changed employees
+  only" — alongside the pre-existing unconditional "Re-export N already-exported employees."
+  Neither replaces the other; both stay independently available. `showExportBreakdown()` and
+  `startReExport()` (new `changedOnly` param) extended to support the second button/path;
+  `index.html`'s export-breakdown modal gets the matching `#eb-reexport-changed-btn` (styled
+  red, `flex-wrap` added to the button row so three buttons can stack on a narrow screen instead
+  of squeezing unreadable).
+- Bumped version badge/`app_version` to v49.12.
+
+**Not built (explicitly discussed, not a gap):**
+- Only compares against `sup_submitted_at`/`exported_at` as designed — won't retroactively flag
+  anything edited before this ships (the backfill specifically prevents that).
+- The pre-existing `isOutOfSubmission` flag ("punch after submit") is untouched and still only
+  catches new clock-ins by time, not edits to existing punches — this version doesn't try to fix
+  that older, narrower flag, only adds the new one alongside it.
+
+**Verified:** `node --check` on `app.js` + an 11-assertion harness against
+`changedSince`/`anyChangedSince`/`employeeChangedSinceExport` (mirrored): flags a change after
+the threshold, correctly doesn't flag one before it or when there's no threshold yet (not
+submitted/exported), doesn't crash on a punch missing `updatedAt`, the core scenario (an existing
+punch's `clock_in` predates submission but its later edit is still caught), the export-side
+helper never flags a not-yet-exported employee, and per-site vs. "all sites" scoping is correct
+(a change at a different site than the one being queried is correctly ignored in site-scope, but
+still counted in all-sites scope). Not exercised against the real UI/Supabase — genuinely can't
+be, until the migration runs. See Active State.
 
 ---
 
