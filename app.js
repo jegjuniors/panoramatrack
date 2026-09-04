@@ -1356,10 +1356,11 @@ async function submitMyTimecard(){
   // wherever it renders — see the write sites that clear it once a real clock-out lands.
   const openPunches=myTcPunches.filter(p=>!p.out);
   if(openPunches.length){
-    showEstModal(openPunches,async(timeVal)=>{
-      const [h,m]=timeVal.split(':').map(Number);
+    showEstModal(openPunches,async(estimates)=>{
       await Promise.all(openPunches.map(async p=>{
-        if(!p.dbId)return;
+        const timeVal=estimates[p.dbId];
+        if(!p.dbId||!timeVal)return;
+        const [h,m]=timeVal.split(':').map(Number);
         const estOut=new Date(p.in);estOut.setHours(h,m,0,0);
         if(estOut<=p.in)estOut.setDate(estOut.getDate()+1); // overnight edge, same as the PDF flow
         const {error}=await sb.from('punches').update({estimated_clock_out:estOut.toISOString()}).eq('id',p.dbId);
@@ -2317,11 +2318,14 @@ async function submitSiteToOffice(){
   // v49.6: heads-up (not a block) if any of the employees about to be sent are still clocked
   // in right now — same "estimated clock-out" prompt as the preliminary PDF flow, just used
   // here purely as an FYI before confirming; nothing is written to their punch records.
+  // v49.8: only interrupt the supervisor when at least one open punch has no employee-provided
+  // estimate (v49.7) to show — if everyone still in already gave their own estimate, there's
+  // nothing to review, so skip straight to the send confirmation.
   const readyEmpIds=[...new Set(readyPairs.map(p=>p.empId))];
   const {data:openData}=await sb.from('punches').select('*')
     .in('employee_id',readyEmpIds).is('clock_out',null);
   const openPunches=(openData||[]).map(dbRowToEntry);
-  if(openPunches.length){
+  if(openPunches.some(p=>!p.employeeEstimatedOut)){
     showEstModal(openPunches,async()=>{
       confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount);
     },EST_NOTE_FYI);
@@ -2419,10 +2423,11 @@ async function supSendEmployeeToOffice(empId,empName){
   }
   const siteList=sendable.map(r=>r.jobsite).sort().join(', ');
   // v49.6: same still-clocked-in heads-up as the batch send \u2014 FYI only, nothing stored.
+  // v49.8: skip it if the employee already gave their own estimate \u2014 nothing to review.
   const {data:openData}=await sb.from('punches').select('*')
     .eq('employee_id',empId).is('clock_out',null);
   const openPunches=(openData||[]).map(dbRowToEntry);
-  if(openPunches.length){
+  if(openPunches.some(p=>!p.employeeEstimatedOut)){
     showEstModal(openPunches,async()=>{
       confirmSendEmployeeToOffice(empId,empName,period,periodLabel,sendable,siteList);
     },EST_NOTE_FYI);
@@ -2490,6 +2495,30 @@ async function forceSubmitEmployee(empId,empName){
     return;
   }
 
+  // v49.8: force-submitting stands in for the employee's own submit action, which (v49.7)
+  // requires a rough estimated end time whenever there's an open punch — this path bypassed
+  // that entirely until now. Gate it the same way, persisting to the open punch(es) so it
+  // shows up wherever an open punch renders, same as if the employee had set it themselves.
+  const openPunches=relevant.filter(p=>!p.out);
+  if(openPunches.length){
+    showEstModal(openPunches,async(estimates)=>{
+      await Promise.all(openPunches.map(async p=>{
+        const timeVal=estimates[p.dbId];
+        if(!p.dbId||!timeVal)return;
+        const [h,m]=timeVal.split(':').map(Number);
+        const estOut=new Date(p.in);estOut.setHours(h,m,0,0);
+        if(estOut<=p.in)estOut.setDate(estOut.getDate()+1); // overnight edge
+        const {error}=await sb.from('punches').update({estimated_clock_out:estOut.toISOString()}).eq('id',p.dbId);
+        if(!error)p.employeeEstimatedOut=estOut;
+      }));
+      confirmForceSubmit(empId,empName,openSites,period,periodLabel);
+    },estNoteForce(empName));
+    return;
+  }
+  confirmForceSubmit(empId,empName,openSites,period,periodLabel);
+}
+
+function confirmForceSubmit(empId,empName,openSites,period,periodLabel){
   showCustomConfirm(
     `Force submit for ${empName}?`,
     `This submits ${empName}'s timecard for ${openSites.join(', ')} (${periodLabel}) on their behalf, as if they'd submitted it themselves. Review their punches above before doing this.`,
@@ -4034,17 +4063,18 @@ async function openExportConfirm(){
     if(openPunches.length>0){
       // Show estimated clock-out modal — mandatory
       exportRange={from,to,logs,periodStart,periodEnd,dups:[],isPrelim:true,estimatedOut:null};
-      showEstModal(openPunches,async(timeVal)=>{
-        const [h,m]=timeVal.split(':').map(Number);
-        // Apply estimated clock-out to open punches in memory only
+      showEstModal(openPunches,async(estimates)=>{
+        // Apply each punch's own estimated clock-out to open punches in memory only
         exportRange.logs.filter(l=>!l.out).forEach(l=>{
+          const timeVal=estimates[l.dbId];if(!timeVal)return;
+          const [h,m]=timeVal.split(':').map(Number);
           const estOut=new Date(l.in);estOut.setHours(h,m,0,0);
           // If est time is before clock-in (overnight edge), add a day
           if(estOut<=l.in)estOut.setDate(estOut.getDate()+1);
           l.estimatedOut=estOut; // mark as estimated — not written to DB
           l.out=estOut;          // used for PDF calculation
         });
-        exportRange.estimatedOut=timeVal;
+        exportRange.estimatedOut=true;
         await checkDupsAndProceed();
       });
       return;
@@ -4128,54 +4158,83 @@ function reviewGateGoNow(){
 let _estModalOpenPunches=[];
 let _estModalOnProceed=null;
 const EST_NOTE_PDF='Set an estimated clock-out time for today. This will be used to calculate approximate hours for the <b>Preliminary</b> report only — actual punch records are not affected.';
-const EST_NOTE_FYI='Just a heads-up before sending — nothing is saved here and punch records are not affected. Confirm a rough time to continue.';
+const EST_NOTE_FYI='Just a heads-up before sending — nothing is saved here and punch records are not affected. Review or override the estimate below, then continue.';
 const EST_NOTE_MYTC='Since you’re still clocked in, give a rough end time for this shift so your supervisor knows what to expect. This is just a note — it won’t change your actual clock-out, and you can update it any time before you clock out for real.';
+function estNoteForce(empName){
+  return `You’re force-submitting this on ${empName}’s behalf while they’re still clocked in — give a rough estimated end time so head office has a sense of when the shift wraps up. This is saved just like if ${empName} had entered it themselves.`;
+}
+
+// v49.8: default per-row estimate — use the employee's own submitted estimate when they have
+// one (see v49.7), otherwise fall back to "now" rounded to the nearest 15 min like before.
+function estDefaultTimeStr(p){
+  let base=new Date();
+  if(p.employeeEstimatedOut)base=p.employeeEstimatedOut;
+  else{const m=Math.round(base.getMinutes()/15)*15;base=new Date(base);base.setMinutes(m,0,0);} // Date rolls minute overflow into the hour correctly
+  return `${String(base.getHours()).padStart(2,'0')}:${String(base.getMinutes()).padStart(2,'0')}`;
+}
+function estRowHours(p,timeVal){
+  const [h,m]=timeVal.split(':').map(Number);
+  const estOut=new Date(p.in);estOut.setHours(h,m,0,0);
+  if(estOut<=p.in)estOut.setDate(estOut.getDate()+1); // overnight edge
+  return Math.max(0,(estOut-p.in)/3600000);
+}
+
 function showEstModal(openPunches,onProceed,note){
   _estModalOpenPunches=openPunches;
   _estModalOnProceed=onProceed||null;
   document.getElementById('est-note').innerHTML=note||EST_NOTE_PDF;
   document.getElementById('est-open-count').textContent=
     `${openPunches.length} employee${openPunches.length!==1?' are':' is'} currently clocked in and will have estimated hours.`;
-  // Default est time to now rounded to nearest 15 min
-  const now=new Date();const m=Math.round(now.getMinutes()/15)*15;
-  const hh=String(now.getHours()).padStart(2,'0');
-  const mm=String(m>=60?0:m).padStart(2,'0');
-  document.getElementById('est-time-input').value=`${hh}:${mm}`;
   buildEstEmployeeList(openPunches);
   document.getElementById('est-modal-err').textContent='';
   document.getElementById('est-clockout-modal-bg').style.display='flex';
 }
 
+// v49.8: one time input per punch (was a single shared field applied to everyone) — each
+// row defaults to the employee's own estimate when they've already given one, so a supervisor
+// reviewing/sending a timecard isn't asked to re-guess a time the employee already provided.
 function buildEstEmployeeList(openPunches){
-  const timeVal=document.getElementById('est-time-input').value;
-  const [h,m]=timeVal.split(':').map(Number);
   const list=document.getElementById('est-employee-list');
-  list.innerHTML='<p style="font-weight:600;color:var(--txt);margin-bottom:6px;">Estimated hours per employee:</p>'+
-    openPunches.map(l=>{
-      const estOut=new Date(l.in);estOut.setHours(h,m,0,0);
-      const hrs=Math.max(0,(estOut-l.in)/3600000);
-      return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid var(--bdr);">
-        <span style="color:var(--txt);">${l.name}</span>
-        <span style="color:var(--amber);">In: ${fmt(l.in)} → Est: ${timeVal} ≈ ${hrs.toFixed(2)}h</span>
+  list.innerHTML='<p style="font-weight:600;color:var(--txt);margin-bottom:6px;">Estimated end time per employee:</p>'+
+    openPunches.map(p=>{
+      const timeVal=estDefaultTimeStr(p);
+      const hrs=estRowHours(p,timeVal);
+      const hasEst=!!p.employeeEstimatedOut;
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:0.5px solid var(--bdr);">
+        <div style="flex:1;min-width:0;">
+          <div style="color:var(--txt);">${p.name}</div>
+          <div style="font-size:10.5px;color:${hasEst?'var(--txt3)':'var(--amber)'};">${hasEst?'Employee’s estimate':'No estimate on file'} · In: ${fmt(p.in)}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;">
+          <input type="time" class="est-row-input" data-punch-id="${p.dbId}" value="${timeVal}" style="font-size:14px;padding:6px;width:110px;"/>
+          <div class="est-row-hrs" data-punch-id="${p.dbId}" style="font-size:10.5px;color:var(--amber);margin-top:2px;">≈ ${hrs.toFixed(2)}h</div>
+        </div>
       </div>`;
     }).join('');
 }
 
-// Update preview when time changes
+// Update that row's hours preview when its own time input changes
 document.addEventListener('change',function(e){
-  if(e.target.id==='est-time-input'){
-    if(_estModalOpenPunches.length)buildEstEmployeeList(_estModalOpenPunches);
-  }
+  if(!e.target.classList||!e.target.classList.contains('est-row-input'))return;
+  const pid=e.target.dataset.punchId;
+  const p=_estModalOpenPunches.find(x=>String(x.dbId)===String(pid));
+  if(!p)return;
+  const hrsEl=document.querySelector(`.est-row-hrs[data-punch-id="${pid}"]`);
+  if(hrsEl)hrsEl.textContent=`≈ ${estRowHours(p,e.target.value).toFixed(2)}h`;
 },{passive:true});
 
 function closeEstModal(){document.getElementById('est-clockout-modal-bg').style.display='none';}
 
 async function proceedWithEstimate(){
-  const timeVal=document.getElementById('est-time-input').value;
-  if(!timeVal){document.getElementById('est-modal-err').textContent='Please enter an estimated clock-out time.';return}
+  const inputs=[...document.querySelectorAll('.est-row-input')];
+  const estimates={};
+  for(const inp of inputs){
+    if(!inp.value){document.getElementById('est-modal-err').textContent='Please enter an estimated time for every employee.';return}
+    estimates[inp.dataset.punchId]=inp.value;
+  }
   closeEstModal();
   const cb=_estModalOnProceed;_estModalOnProceed=null;_estModalOpenPunches=[];
-  if(cb)await cb(timeVal);
+  if(cb)await cb(estimates);
 }
 
 async function checkDupsAndProceed(){
@@ -4581,7 +4640,7 @@ function generatePDF(){
     // ── Preliminary footnote ──
     if(isPrelim&&estimatedOut){
       doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(214,123,17);
-      doc.text(`Hours marked (est.) are based on an estimated clock-out of ${estimatedOut} provided by the supervisor at time of preliminary submission.`,ML,y);
+      doc.text('Hours marked (est.) are based on an estimated clock-out provided by the supervisor at time of preliminary submission.',ML,y);
       y+=5;doc.setTextColor(...BLACK);
     }
     // ── Signature line ──
@@ -5222,7 +5281,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.7',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.8',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5271,7 +5330,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.7',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.8',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

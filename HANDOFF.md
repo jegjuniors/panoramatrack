@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.7 *(Estimated end time required when an employee submits while still clocked in)*
+**Version:** v49.8 *(Per-employee estimated clock-out — send-to-office skips when already covered, force-submit now gated)*
 **Last handoff update:** September 4, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,109 +11,89 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.7 — pushed to `main`, but NOT YET DEPLOYABLE: the migration hasn't been run in Supabase
-  yet** (see Migrations below) — the code writes to `punches.estimated_clock_out` unconditionally
-  once an employee hits the still-clocked-in gate, so don't deploy `app.js`/`index.html` ahead of
-  running `migration_estimated_clock_out.sql`. Gated an employee's own
-  `submitMyTimecard()` on any open punch (still clocked in): they must now give a rough estimated
-  end time before the submit proceeds, reusing the `showEstModal()`/`onProceed` machinery from
-  v49.6 (new `EST_NOTE_MYTC` copy). Unlike v49.6's FYI-only usage, **this one persists** — new
-  nullable `punches.estimated_clock_out` column (`migration_estimated_clock_out.sql`, not yet run
-  in Supabase), mapped in `dbRowToEntry()` as `employeeEstimatedOut` (deliberately a distinct
-  field from the transient `estimatedOut`/`out` the Preliminary-PDF flow uses for synthetic hours
-  math — this new one never touches `out` or pay calculations, display-only). Cleared back to
-  `null` wherever a punch actually gets a real `clock_out` — `confirmClockOut()` (normal kiosk
-  clock-out), `checkAutoServer()` (12-hour auto-clock), and `saveMyTcEdit()`/`saveEdit()` (edit
-  modal, only when the edit itself sets a new clock-out). Surfaced as a small "est. out …" /"You
-  estimated out ~…" note wherever an open punch already renders: `renderMyTcList()` (employee's
-  own view), `refreshSupLog()`, `refreshMasterLog()`, and `refreshAdminEmpCorrect()` (admin
-  correction modal). Also bumped the version badge/`app_version` to v49.7.
-- **v49.6** — The "Employees still clocked in" estimated-clock-out prompt (previously shown only
-  from the supervisor's "Preview PDF (Preliminary)" flow) now also appears before **"Submit site
-  to office"** (batch) and the per-employee **"Send to office"** button, whenever any of the
-  employees about to be sent are currently clocked in. In this context it's FYI-only — confirming
-  a time just continues to the normal submit confirmation; nothing is written to punch records
-  (the modal's copy is reworded accordingly — see `EST_NOTE_FYI` vs `EST_NOTE_PDF` in `app.js`).
-  `showEstModal()` was refactored to take an `onProceed(timeVal)` callback instead of being
-  hardwired to the PDF/export path, so both flows share one implementation. Also fixed: the
-  employee-name `<span>` in that modal's per-employee list had no color at all, rendering as
-  illegible black text in dark mode — now `var(--txt)`.
-- **v49.5** — Fixed `saveMyTcEdit()`/`saveEdit()` (My Timecard and the shared supervisor/master
-  edit-punch modal) unconditionally nulling `declared_start_time` on every save, even when only
-  jobsite/activities/clock-out changed and the clock-in time itself didn't move. That silently
-  wiped an already-resolved v49.3 start-time confirmation and re-flagged the punch with no
-  indication anything regressed. Now only resets it when the clock-in time actually changes.
-  Found while investigating a report that two employees' (Sandy Enriquez, Victor Manual Aguilar)
-  "unconfirmed start time" flags persisted on the Submissions panel / admin correction modal even
-  though they looked resolved on the employee's own (locked) My Timecard screen — that specific
-  case turned out to be lock-suppression working as designed (v49.3: the employee-facing banner
-  hides once a punch is locked, regardless of whether it's actually resolved) rather than this
-  bug, but the unconditional-reset bug was real and is fixed regardless.
-- **v49.4** — Fixed a bug where a supervisor-employee's (`dept==='Supervisor'`) My Timecard
-  catch-up banner ("⚠️ Unsubmitted timecard for …") could never clear for a past period, no
-  matter how many times they pulled back and resubmitted. Root cause: the v45.0 catch-up check
-  (`refreshMyTcCatchupState` in `app.js`) required reaching `TC_STAGE.EXPORTED` for
-  supervisor-employees before considering a period "done" — but `EXPORTED` is stamped *only* by
-  the admin Submissions-panel export flow, never the older Report-tab export, so the banner could
-  get permanently stuck on an already-submitted period. Now the catch-up nag clears at
-  `sup_submitted` for everyone, matching regular employees; the separate edit/pull-back
-  safety-net threshold (still `EXPORTED` for supervisor-employees) is untouched. Reported by
-  Julio on his own timecard for the Aug 10–23, 2026 period. Also synced the drifted
-  `app_version` backup-payload constants (stuck at `v48.0` since that version) and the
-  `index.html` badge up to `v49.4`.
-- **v49.3** — Retroactive flag + fix for early punches that never answered the v48.0
-  scheduled-start popup (phone backgrounded/locked in the ~600ms window silently skipped it).
-  Soft amber "Confirm your start time" banner on My Timecard (fix one tap away, not a
-  submit-blocker); hard block on the Submissions panel + admin correction modal with a
-  dedicated "Set start" action that writes `declared_start_time` without touching the raw
-  clock-in. New `needsStartTimeConfirm(entry)` / `openStartTimeFix()` / `selectStartTimeFix()`
-  in `app.js`.
-- **v49.2** — Restored the v47.5 iPhone Dynamic Island safe-area fix on `#screen-mytc` in
-  `index.html` (it had silently reverted to flat `1.75rem` top padding somewhere before v48.0).
-- **v49.1** — Submission-notification Edge Function (`submission-notify-edge-function.ts`, Deno +
-  Resend) built and wired into the 3 supervisor submit paths via `notifySubmission()` in
-  `app.js`. Deployed; Julio confirmed it works in real testing.
-- **v49.0** — Settings foundation for submission notifications (`pt_settings.submit_notify_enabled`
-  / `submit_notify_emails`, Settings-screen toggle + recipient field).
+- **v49.8 — per-employee estimated clock-out, everywhere `showEstModal()` is used.** Two bugs,
+  found together while looking at a supervisor's actual send-to-office screen (Julio's
+  screenshot): Victor Manual Aguilar had already submitted his own timecard with his own
+  estimate (v49.7), but "Send to office" re-prompted for a fresh one anyway; and the whole
+  estimate modal only ever had **one shared time field** applied identically to every employee
+  listed, batch or not.
+  - **`showEstModal()`/`buildEstEmployeeList()` reworked to be per-row**, not per-modal: one
+    `<input type="time">` per open punch (was one global `#est-time-input` for the whole list —
+    removed from `index.html`), each defaulting to that employee's own `employeeEstimatedOut`
+    (v49.7) when they have one — labeled "Employee's estimate" — or "now" rounded to 15 min when
+    they don't, labeled "No estimate on file." Each row is independently editable/overridable.
+    `proceedWithEstimate()` now returns an `estimates` object keyed by punch `dbId` instead of a
+    single string; all four callers (below) updated to match.
+  - **Fixed a latent rounding bug** caught by the new harness while rewriting this: the old
+    "round now to nearest 15 min" fallback did `m>=60?0:m` on the minutes only, so anything
+    rounding up into the next hour (e.g. 14:53 → 60) reset to `:00` **without** bumping the hour
+    — producing a default earlier than the actual current time. Now lets `Date.setMinutes()`
+    handle the hour rollover natively.
+  - **`submitSiteToOffice()`/`supSendEmployeeToOffice()`** (send-to-office, FYI-only, `EMP→SUP`):
+    now skip the modal entirely when every open punch already has an employee estimate — nothing
+    left to review, so don't interrupt the supervisor. Still shows (per-row, prefilled) when at
+    least one open punch has no estimate on file.
+  - **`forceSubmitEmployee()`** (`OPEN→EMP`, the supervisor genuinely submitting *on the
+    employee's behalf*): this is the case that should actually require an estimate, and until
+    now it had **no check at all** — a supervisor could force-submit for someone still clocked in
+    with zero record of an expected end time. Now gated exactly like `submitMyTimecard()`
+    (v49.7): if any of the punches being forced are still open, the modal is required and
+    **persists** `estimated_clock_out` per punch (new `estNoteForce(empName)` copy), before
+    continuing into the (now-extracted) `confirmForceSubmit()` confirm dialog.
+  - **PDF-preview flow** (`openExportConfirm`, `EST_NOTE_PDF`) and **employee's own MyTC submit**
+    (`submitMyTimecard`, `EST_NOTE_MYTC`) — the two existing callers — get the per-row accuracy
+    improvement for free (each punch stamped with its own estimate instead of one blanket value
+    applied to everyone). The PDF footnote text dropped its embedded single time value since
+    there's no longer one shared time to name (each row's own estimated time already shows next
+    to "(est.)" in the CLOCK OUT column).
+  - Bumped version badge/`app_version` to v49.8.
+- **v49.0–v49.7** — settings foundation + Edge Function for submission notifications, the
+  scheduled-start confirm/flag/fix flow, several My Timecard/catch-up/edit-save bugfixes, the
+  original (single-field, FYI-only) estimated-clock-out prompt, and the persisting employee-side
+  estimate gate. Full detail for each is in the changelog under Reference & History below.
 
 ## 2. Active State
 
-- **Branch:** `main`, working tree clean — v49.4 through v49.7 (including this handoff update
-  and the new `migration_estimated_clock_out.sql`) are all committed and pushed.
+- **Branch:** `main`, working tree clean — v49.8 (per-employee estimate modal + force-submit
+  gate) and this handoff update are committed and pushed.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.7 included).
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.8 included).
   Ad-hoc assertion harnesses (established pattern, run against extracted/mirrored logic — the
-  real functions depend on live Supabase/DOM state): v49.7's clear-on-close payload predicate +
-  overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate (8 assertions), the
-  v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9 assertions, v49.3),
-  submission-notify item-building (8 assertions, v49.1) — all pass. v49.6 and v49.7's modal/DOM
-  wiring itself was verified with `node --check` only, not exercised against the real
-  UI/Supabase. Worth a real-device check on v49.7 specifically: submit a timecard while clocked
-  in, confirm the modal appears, an estimate gets required, and "est. out …" shows up on the open
-  punch in My Timecard, the supervisor/master log, and the admin correction modal — **after**
-  `migration_estimated_clock_out.sql` has been run (see Migrations below), since the column
-  doesn't exist yet.
+  real functions depend on live Supabase/DOM state): v49.8's `estDefaultTimeStr`/`estRowHours`
+  (6 assertions — employee-estimate-as-default, no-estimate fallback incl. the rounding-bug fix,
+  overnight-edge hours math), v49.7's clear-on-close payload predicate + overnight-edge estimate
+  math (5 assertions), the v49.4 catch-up predicate (8 assertions), the v49.5 edit-save predicate
+  (4 assertions), `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify item-building
+  (8 assertions, v49.1) — all pass. The modal/DOM wiring itself (per-row inputs, skip-when-covered
+  branching, the new force-submit gate) was verified with `node --check` only, not exercised
+  against the real UI/Supabase — worth a real-device pass: send an employee who's already
+  estimated to office (modal should skip straight to confirm), send one who hasn't (modal shows,
+  per-row, editable), and force-submit someone still clocked in (modal now required, persists,
+  shows up as "est. out …" same as a normal self-submit).
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
   2. `migration_submit_notify.sql` — already run. `pt_settings.submit_notify_enabled` /
      `submit_notify_emails`.
-  3. **`migration_estimated_clock_out.sql` — NOT YET RUN.** Adds nullable
-     `punches.estimated_clock_out`. The app.js/index.html for v49.7 is already pushed to `main` —
-     run this in the Supabase SQL editor before deploying/updating the live site, since the code
-     assumes the column exists (writes to it unconditionally once an employee hits the
-     still-clocked-in gate).
+  3. `migration_estimated_clock_out.sql` — **run** (confirmed by Julio, Sept 4, 2026). Adds
+     nullable `punches.estimated_clock_out`.
   - v49.3 through v49.6 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Run `migration_estimated_clock_out.sql` in the Supabase SQL editor** before the next deploy
-   of `main` — the code is already pushed and assumes the column exists.
-2. **Real-device check on v49.6 + v49.7** together — confirm both estimate-modal flows (FYI-only
-   on submit-to-office, required+persisted on the employee's own submit) and that the "est. out"
-   note reads correctly in dark mode across all four render surfaces.
+1. **Real-device check on v49.6 – v49.8** together — see the specific scenarios called out in
+   Active State above. Now unblocked — migration is run, so this can happen against the live
+   column.
+2. **Fix the `consolidate()` overlap-summing bug in exports** (planned this session, not yet
+   built — separate from v49.8). `generatePDF()`/`generateMasterPDF()`'s `consolidate()` (and
+   `doMasterExcelZip()`'s day-cell summing) silently sum hours from punches that overlap in time
+   instead of flagging them — found via a real case (Sandy Enriquez, Wed Sep 2: two near-duplicate
+   punches summed into one deceptive 18.00-hour row on the printed PDF). Plan: extract one shared
+   `consolidatePunchesByDay()`, split overlapping punches into their own flagged rows (PDF) /
+   surface an in-app warning instead of a console-only one (Excel), rather than silently merging.
+   Sandy's actual duplicate punch still needs a manual fix in the admin panel regardless of this.
 3. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
@@ -129,12 +109,10 @@
 
 ## 4. Blockers / Notes
 
-- **v49.7 is pushed to `main` but not deployable yet — migration required first.** `app.js`
-  writes to `punches.estimated_clock_out` unconditionally once an employee hits the
-  still-clocked-in submit gate; that column doesn't exist until
-  `migration_estimated_clock_out.sql` runs. Don't deploy this `main` to Netlify without running
-  it first (or the write will just error — no data-loss risk, but the gate would be broken in
-  production).
+- **Duplicate/overlapping punches can silently inflate payroll exports.** Root cause + fix plan
+  captured in Next Steps #2 above. The underlying data bug (how an employee ends up with two
+  overlapping punches — likely a double clock-in/race condition) is separate from the export-side
+  fix and still needs a manual per-incident correction via the admin panel.
 - **Report-tab export vs. Submissions-panel export still diverge.** Only the Submissions-panel
   export stamps `pt_timecard_status.stage='exported'`; the Report-tab export (likely the more
   habitually-used one for actually running payroll) never does. v49.4 stopped that gap from
@@ -168,16 +146,82 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.7 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.8 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
 
 ---
 
-## 🚧 v49.7 — Estimated end time required when an employee submits while still clocked in
+## ✅ v49.8 — Per-employee estimated clock-out (send-to-office skip + force-submit gate)
 
-**Status:** coded, verified, and pushed to `main`. **Not yet deployable** — needs
-`migration_estimated_clock_out.sql` run in the Supabase SQL editor before the site is next
-deployed, since the code assumes the new column already exists.
+**Context:** Julio's screenshot of a real supervisor screen: Victor Manual Aguilar had already
+submitted his own timecard with his own estimated end time (v49.7). Sending his timecard to
+office still popped the "Employees still clocked in" modal asking the supervisor to pick a time
+from scratch, as if nothing had been provided. Separately, that modal only ever had **one** time
+field shared across every employee it listed — a batch send with 3 people still in would apply
+the exact same estimated end time to all 3, regardless of when they actually clocked in. Tracing
+it further surfaced a related gap in the opposite direction: `forceSubmitEmployee()` — the action
+where a supervisor genuinely submits *on an employee's behalf* — had no estimate check at all,
+even though that's the one case that should require it (it stands in for the employee's own
+submit, which v49.7 already gates).
+
+**Design (discussed before building):** send-to-office (`EMP→SUP`, FYI-only, nothing persisted)
+should never make the supervisor re-enter a time the employee already gave — skip the modal
+outright when every open punch is covered, and default-fill from the employee's estimate
+(overridable) when it does need to show. Force-submit (`OPEN→EMP`, the supervisor acting as the
+employee) is the one place that should actually require and persist an estimate, mirroring
+`submitMyTimecard()`.
+
+**What shipped (`app.js`, `index.html`):**
+- **`showEstModal()`/`buildEstEmployeeList()` → per-row.** The single global `#est-time-input`
+  (removed from `index.html`) is gone; `buildEstEmployeeList()` now renders one
+  `<input type="time" class="est-row-input" data-punch-id="...">` per open punch, defaulting via
+  new `estDefaultTimeStr(p)` — that punch's `employeeEstimatedOut` (v49.7) if set (labeled
+  "Employee's estimate"), else "now" rounded to 15 min (labeled "No estimate on file"), same
+  fallback as before. Each row has its own live hours preview (`estRowHours(p, timeVal)`,
+  handling the overnight edge same as the PDF flow), updated by a delegated `change` listener
+  keyed off `data-punch-id`. `proceedWithEstimate()` now validates and collects
+  `{ [punchDbId]: 'HH:MM' }` and passes that object to `onProceed` instead of one shared string.
+- **Fixed a latent rounding bug** in the "round now to nearest 15 min" fallback, caught by the
+  new assertion harness while rewriting it: the old code did `m>=60?0:m` on the rounded minutes
+  only, so a time like 14:53 (rounds up to the 60-minute mark) reset to `:00` **without**
+  incrementing the hour — defaulting to 14:00, earlier than the actual current time, rather than
+  15:00. Now just calls `Date.setMinutes(m,0,0)` and lets the `Date` object roll the overflow
+  into the hour correctly.
+- **`submitSiteToOffice()` / `supSendEmployeeToOffice()`** (send-to-office): now check
+  `openPunches.some(p=>!p.employeeEstimatedOut)` before showing the modal at all — if every open
+  punch is already covered, skip straight to the normal `confirmSubmitSiteToOffice()`/
+  `confirmSendEmployeeToOffice()` dialog. Still FYI-only when the modal does show (uncovered
+  punches present) — `onProceed` ignores the returned estimates, same as v49.6.
+- **`forceSubmitEmployee()`** (new gate): after the existing auto-clock/pending-waive check, if
+  any of the punches being forced are still open, `showEstModal()` is now required (new
+  `estNoteForce(empName)` copy — "You're force-submitting this on {name}'s behalf…") and
+  **persists** `estimated_clock_out` per punch on confirm — same write pattern as
+  `submitMyTimecard()` (overnight-edge roll, `dbId` update, in-memory sync). The original
+  `showCustomConfirm(...)` block was extracted into `confirmForceSubmit(empId,empName,openSites,
+  period,periodLabel)` so both the gated and ungated paths call the same confirm step.
+- **PDF-preview flow** (`openExportConfirm`) and **employee's own MyTC submit**
+  (`submitMyTimecard`) — updated to read per-punch values from the new `estimates` object instead
+  of one shared `timeVal`, which is a strict accuracy improvement for both (each stamped/written
+  with its own estimate) with no behavior change otherwise. `exportRange.estimatedOut` changed
+  from the shared time string to a plain boolean (still only ever used as a truthy gate); the PDF
+  footnote text dropped the embedded specific time value since there's no longer one shared time
+  to name — each row's own estimated time already appears next to "(est.)" in the CLOCK OUT
+  column.
+- Bumped version badge/`app_version` to v49.8.
+
+**Verified:** `node --check` on `app.js` + a 6-assertion harness against the extracted
+`estDefaultTimeStr`/`estRowHours` logic: employee estimate used as the row default; no-estimate
+fallback rounds correctly including the hour-rollover case that exposed the rounding bug above;
+same-day and overnight-edge hours math. The DOM wiring itself (per-row rendering, the
+skip-when-covered branching, the new force-submit gate/extraction) was not exercised against the
+real UI/Supabase — worth a real-device pass, see Active State.
+
+---
+
+## ✅ v49.7 — Estimated end time required when an employee submits while still clocked in
+
+**Status:** coded, verified, pushed to `main`, and deployable — `migration_estimated_clock_out.sql`
+has been run in Supabase (confirmed by Julio, Sept 4, 2026).
 
 **Context:** `submitMyTimecard()` only ever gated on unresolved auto-clocked punches — an
 employee could submit their timecard mid-shift with an open punch and no record of when they
