@@ -1131,16 +1131,22 @@ async function openMyTimecard(emp,offset){
 
 /* v45.0: does this employee have an unsubmitted LAST period? Re-checked fresh every time the
    current period loads. v47.0: per-site model — show the catch-up banner if ANY site is still
-   open (can submit) or pullable (can retract). No longer blocked by a locked site elsewhere. */
+   open (can submit). v49.4: this used to also nag while a site was merely "pullable" (submitted
+   but not yet admin-exported) — using the same EXPORTED threshold as the myTcLocked edit-safety-
+   net below. For supervisor-employees that threshold is admin-only (EXPORTED only ever gets
+   stamped via the Submissions-panel export flow, never the older Report-tab export), so the
+   banner could get permanently stuck reading "Unsubmitted" on an already-submitted period no
+   matter how many times the employee pulled back and resubmitted. Catch-up is now purely "have
+   you submitted yet" (SUP, for everyone) — a separate concern from how long the edit/pull-back
+   safety net stays open (still EXPORTED for supervisor-employees, see myTcLocked/renderMyTcSubmitBar,
+   intentionally unchanged). */
 async function refreshMyTcCatchupState(emp){
   const period=getPeriodByOffset(1);
   myTcCatchupPeriod=period;
   myTcCatchupNeeded=false;
   const rows=await getEmployeeStatusRows(emp.id,period.start);
-  const isSupEmp=emp.dept==='Supervisor';
-  const lockThreshold=isSupEmp?TC_STAGE.EXPORTED:TC_STAGE.SUP;
-  // v47.0: per-site — if ALL sites are at or past the lock threshold, nothing to catch up on.
-  // But if even one site is still open or pullable, show the banner.
+  // v49.4: if ALL worked sites have reached at least sup_submitted, nothing to catch up on —
+  // regardless of dept. A site still 'open' (or with no row at all) is what needs a nudge.
   const {data,error}=await sb.from('punches').select('jobsite')
     .eq('employee_id',emp.id)
     .gte('clock_in',period.start.toISOString())
@@ -1152,8 +1158,8 @@ async function refreshMyTcCatchupState(emp){
   myTcCatchupNeeded=sitesWorked.some(s=>{
     const r=rowsBySite[s];
     if(!r||r.stage===TC_STAGE.OPEN)return true; // open — needs submit
-    if(!stageAtLeast(r.stage,lockThreshold))return true; // submitted but pullable
-    return false;
+    if(!stageAtLeast(r.stage,TC_STAGE.SUP))return true; // never reached submitted
+    return false; // sup_submitted or exported — already submitted, not the employee's action item
   });
 }
 
@@ -5119,7 +5125,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v48.0',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.4',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5168,7 +5174,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v48.0',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.4',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

@@ -1,7 +1,7 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.3 *(Flag + fix punches that missed the scheduled-start selection popup)*
-**Last handoff update:** September 3, 2026
+**Version:** v49.4 *(Fix: supervisor-employee "Unsubmitted timecard" banner stuck forever)*
+**Last handoff update:** September 4, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
 > Everything under "Reference & History" is background: architecture, DB schema, standing build
@@ -11,6 +11,18 @@
 
 ## 1. Current Status — what was just completed
 
+- **v49.4** — Fixed a bug where a supervisor-employee's (`dept==='Supervisor'`) My Timecard
+  catch-up banner ("⚠️ Unsubmitted timecard for …") could never clear for a past period, no
+  matter how many times they pulled back and resubmitted. Root cause: the v45.0 catch-up check
+  (`refreshMyTcCatchupState` in `app.js`) required reaching `TC_STAGE.EXPORTED` for
+  supervisor-employees before considering a period "done" — but `EXPORTED` is stamped *only* by
+  the admin Submissions-panel export flow, never the older Report-tab export, so the banner could
+  get permanently stuck on an already-submitted period. Now the catch-up nag clears at
+  `sup_submitted` for everyone, matching regular employees; the separate edit/pull-back
+  safety-net threshold (still `EXPORTED` for supervisor-employees) is untouched. Reported by
+  Julio on his own timecard for the Aug 10–23, 2026 period. Also synced the drifted
+  `app_version` backup-payload constants (stuck at `v48.0` since that version) and the
+  `index.html` badge up to `v49.4`.
 - **v49.3** — Retroactive flag + fix for early punches that never answered the v48.0
   scheduled-start popup (phone backgrounded/locked in the ~600ms window silently skipped it).
   Soft amber "Confirm your start time" banner on My Timecard (fix one tap away, not a
@@ -28,35 +40,50 @@
 
 ## 2. Active State
 
-- **Branch:** `main` — working tree clean, all of the above committed (HEAD `d242690`).
-- **Modified files:** none uncommitted.
+- **Branch:** `main`.
+- **Modified files (uncommitted as of this update):** `app.js` (catch-up fix + `app_version`
+  bump), `index.html` (version badge → v49.4). Not yet committed/pushed.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. Verification is `node --check app.js` (passes) plus ad-hoc
-  assertion harnesses: `needsStartTimeConfirm()` (9 assertions, v49.3) and the submission-notify
-  item-building logic (8 assertions, v49.1) both pass. The Edge Function was `tsc`-checked
-  against a Deno shim only — not runtime-tested outside Supabase.
+  `styles.css` served as-is. `node --check app.js` passes. Ad-hoc assertion harnesses (established
+  pattern, run against extracted/mirrored logic — the real functions depend on live
+  Supabase/DOM state): the v49.4 catch-up predicate (8 assertions, including the exact bug case),
+  `needsStartTimeConfirm()` (9 assertions, v49.3), submission-notify item-building (8 assertions,
+  v49.1) — all pass. The v49.4 fix has **not** been checked against the real UI/Supabase — worth
+  Julio confirming the banner actually clears on his account after this deploys (or immediately,
+  independent of the deploy, by an admin exporting his Aug 10–23 Bluevale row from the
+  Submissions panel → Last period, which stamps `exported` and unblocks him right now either way).
 - **Migrations — all already run in production by Julio:**
   1. `migration_v48_start_time.sql` — `punches.declared_start_time` + 5 `pt_settings` columns.
   2. `migration_submit_notify.sql` — `pt_settings.submit_notify_enabled` / `submit_notify_emails`.
-  - v49.3 adds **no** migration (reuses `declared_start_time`).
+  - v49.3 and v49.4 add **no** migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+1. **Commit + push v49.4**, then have an admin re-check the Submissions panel for any other
+   supervisor-employees who may have the same stuck-banner symptom on past periods (anyone whose
+   period was paid out via the Report tab rather than the Submissions-panel export will have been
+   affected) — the code fix stops new nags but doesn't retroactively touch already-mis-flagged
+   rows (it doesn't need to; the fix is purely in the read-side check).
+2. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-2. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+3. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
-3. **Close out the submission-notification watch** once it's held up over a full pay period, then
-   move on to the standing security items (see Blockers) or Bank Hours (shelved from v44.0).
 
 ## 4. Blockers / Notes
 
+- **Report-tab export vs. Submissions-panel export still diverge.** Only the Submissions-panel
+  export stamps `pt_timecard_status.stage='exported'`; the Report-tab export (likely the more
+  habitually-used one for actually running payroll) never does. v49.4 stopped that gap from
+  nagging employees, but the underlying inconsistency — an admin can "finish" a period via Report
+  tab and `pt_timecard_status` never reflects it — is still open. Worth deciding whether the
+  Report-tab export should also stamp status, or whether Submissions-panel export should become
+  the only sanctioned path for closing out a period.
 - **Supabase RLS is disabled.** The anon key currently allows full read/write/delete on
   `punches` and likely every other table. Do **NOT** enable RLS (or click Supabase's "Resolve
   issue") without writing policies first — with the anon key and no policies it takes the whole
@@ -66,7 +93,7 @@
   Hashing is on the security short-list.
 - **No kiosk lock screen** — the app doesn't return to PIN entry after inactivity.
 - **v49.3 limitation (not built):** the retroactive start-time fix modal has no Cancel — a
-  mis-tap commits to picking some time. See Next Step 1.
+  mis-tap commits to picking some time. See v49.3 in Current Status above.
 - **Standing build gotchas** (full text under Reference & History → Standing Build Rules):
   dark-mode needs explicit `var(--txt*)` colors on every text element; keep `#app` free of
   `transform`/`filter`/`contain` so `position:fixed` bars work; use the JS scroll-rail pattern
@@ -83,8 +110,47 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.3 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.4 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.4 — Fix: supervisor-employee "Unsubmitted timecard" banner stuck forever
+
+**Context:** Julio reported his own My Timecard kept showing an amber "⚠️ Unsubmitted timecard
+for Aug 10 – Aug 23, 2026" banner (and the matching PIN-entry popup) even though every punch in
+that period showed a "Submitted" badge and the submit bar showed "✓ Submitted." Pulling back and
+resubmitting had no effect.
+
+**Root cause:** the v45.0 catch-up check (`refreshMyTcCatchupState`) decided "still needs your
+action" using the *same* threshold as the myTcLocked edit-safety-net: `TC_STAGE.EXPORTED` for
+supervisor-employees (`dept==='Supervisor'`), `TC_STAGE.SUP` for everyone else. But `EXPORTED` is
+stamped only by the admin Submissions-panel export flow (`openSubmissionsExport`) — the older,
+still commonly-used Report-tab export (`doMasterExcelZip`/`generatePDF` via the Report tab) never
+touches `pt_timecard_status` at all (a documented, deliberate gap from v44.0). So for a
+supervisor-employee, the banner could only ever clear via an admin action outside their control,
+one that may never happen for a given period if payroll was run through the Report tab instead —
+no amount of pulling back/resubmitting could fix it. Regular employees never hit this because
+their threshold (`sup_submitted`) is reached by their own submit.
+
+**What shipped (`app.js`):** `refreshMyTcCatchupState()` now decides catch-up-needed purely on
+"have you submitted yet" — `TC_STAGE.SUP`, for everyone, dropping the `isSupEmp`/`lockThreshold`
+branch entirely. The separate edit-lock/pull-back safety net (`myTcLocked` in `openMyTimecard()`,
+and `renderMyTcSubmitBar()`'s site categorization) is unchanged and still uses `EXPORTED` for
+supervisor-employees — a supervisor-employee can still pull back and correct a submitted-but-not-
+yet-exported period, exactly as before; they just no longer get nagged about it as "unsubmitted."
+Also synced the `app_version` backup-payload constants (two spots in `app.js`, stuck at `v48.0`
+since that version shipped) and the `index.html` version badge up to `v49.4`.
+
+**Verified:** `node --check` on `app.js` + an 8-assertion harness against the extracted catch-up
+predicate, covering: regular employee at SUP/OPEN (unchanged both ways), supervisor-employee at
+SUP-but-not-exported (the actual bug — now correctly `false`), supervisor-employee at
+EXPORTED/OPEN (unchanged both ways), a worked site with no status row at all (unchanged, still
+flags), and two multi-site cases (one open blocks, all-submitted clears). Not exercised against
+the live UI/Supabase — see Active State for the two ways to confirm it resolved for Julio.
+
+**Not built:** the underlying Report-tab-vs-Submissions-panel export divergence that created the
+opportunity for this bug is still open — see Blockers/Notes.
 
 ---
 
