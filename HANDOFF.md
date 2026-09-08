@@ -24,6 +24,9 @@
   instead of `r.sup_submitted_at`. Before export nothing changes; after a re-export the
   supervisor's flag clears in step with the admin's. `exported_at` was already on the
   supervisor's status rows (`select('*')`), so no query change. Version badge/`app_version` → v49.14.
+  **Verified on the live app Sept 8, 2026** — a re-export clears the pill in both the admin
+  Submissions panel and the supervisor Time Log. Same session: Sandy Enriquez's Wed-Sep-2
+  duplicate punch was manually corrected in the admin correction modal.
 - **v49.13 — one "changed since export" flag, not two; re-export clears it.** `app.js`/`index.html`
   only, no migration, deployable. Two Julio asks, from a screenshot of an employee showing both
   "⚠️ After submit" and "⚠️ Updated since sent" stacked on the same punches:
@@ -92,15 +95,13 @@
   assertions), v49.8's `estDefaultTimeStr`/`estRowHours` (6 assertions), v49.7's clear-on-close
   payload predicate + overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate
   (8 assertions), the v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9
-  assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass. Not yet
-  exercised against the real UI/Supabase (now unblocked — the fix migration has run): **v49.14** —
-  confirm a re-export now clears the pill in *both* the admin Submissions panel (already verified
-  for v49.13) and the supervisor Time Log for the same employees; **v49.13** — confirm only one
-  flag shows ("Updated since sent/export", no "After submit" anywhere); **v49.12** — confirm the
-  pill appears after editing an already-sent / already-exported punch, the admin correction
-  modal's "Changed after export" flag, and the changed-only re-export subset. Also worth covering
-  v49.9 – v49.11's still-open real-export/real-PDF checks in the same pass. (v49.13's admin-panel
-  clearing and v49.12's flag appearance are confirmed working in real testing.)
+  assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass.
+  **Real-device check DONE (Sept 8, 2026):** v49.12 (flag appears after an edit), v49.13
+  (double-flag gone; admin Submissions panel pill clears on re-export) and v49.14 (supervisor
+  Time Log "Updated since sent" also clears on the re-export) all confirmed working against the
+  live app. Still open from earlier versions: v49.9 – v49.11's real-export/real-PDF checks
+  (overlapping-punch flag on a real PDF, master PDF estimate fallback, jsPDF glyph fix) if they
+  haven't been eyeballed on a real export yet.
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
@@ -117,30 +118,23 @@
 
 ## 3. Next Steps
 
-1. **Real-device/real-export check on v49.6 – v49.14** together — see the specific scenarios
-   called out in Active State above. The fix migration has run, so the flags are now live and
-   trustworthy. v49.13 (double-flag gone, admin panel clears on re-export) and v49.12 (flag
-   appears on edit) are confirmed working; **still to verify: v49.14** — that a re-export also
-   clears "Updated since sent" in the *supervisor* Time Log, not just the admin panel. Watch the
-   flag volume across the roster now that the backfill is correct — a burst of stale flags would
-   mean the backfill didn't take.
-2. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
-   correction modal — v49.9 makes it visible on exports, it doesn't touch the underlying data.
-   Worth a quick scan for other employees with the same symptom while in there — v49.9's overlap
-   flag will now surface them on the next export.
-3. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
+1. **Watch the "Updated since sent/export" flag volume across the roster** over the next pay
+   period now that v49.12–v49.14 are verified and the backfill is correct. A sudden burst of
+   stale flags on untouched timecards would mean something's re-stamping `updated_at`
+   unexpectedly (or the backfill didn't fully take) — but the Sept 8 device check was clean.
+2. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
    Submissions-panel `stage='exported'` divergence** noted below — worth checking whether any
    already-"final" periods exported via Excel are missing their stamp because of it.
-4. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+3. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
-5. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+4. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-6. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+5. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
@@ -222,17 +216,18 @@ stamps — v49.13's `exported_at` re-stamp is the mechanism this rides on.
 supervisor flag predicate: lit when a punch changed after send and hasn't been re-exported since;
 still lit when the site was exported *before* the edit; **clears once re-exported after the
 edit**; falls back to `sup_submitted_at` if `exported_at` is somehow missing on an exported row;
-not lit with no change or while still at emp-stage; null row → null. Not yet checked against the
-real UI — see Active State.
+not lit with no change or while still at emp-stage; null row → null. **Confirmed on the live app
+Sept 8, 2026** — a re-export clears the supervisor Time Log pill (and the admin panel's) for the
+affected employees.
 
 ---
 
 ## ✅ v49.13 — Collapse two overlapping "after submit / changed" flags into one; re-export clears it
 
 **Status:** coded, `node --check` + a 6-assertion harness pass, pushed to `main`, deployable —
-no migration. The "Updated since sent/export" flag it relies on is now trustworthy —
-`migration_punch_updated_at_fix.sql` was run in Supabase Sept 8, 2026. Real-device verification
-still pending (see Active State).
+no migration. **Verified on the live app Sept 8, 2026:** only one flag shows (no "After submit"
+anywhere), and a re-export clears the admin Submissions panel pill. (The supervisor-log side of
+the re-export clearing needed the v49.14 follow-up — see above.)
 
 **Context:** Julio's screenshot showed an employee's punches carrying two red badges at once —
 the v44.0 "⚠️ After submit" badge and the v49.12 "⚠️ Updated since sent" badge — because a
@@ -541,8 +536,8 @@ risk of them drifting apart again.
 employee, same day, two *different* sites — physically impossible but not caught, since bucketing
 is still per-jobsite); a hard export-blocking gate for overlaps (kept to "never invisible," not a
 blocker — matches the existing review-gate pattern being reserved for auto-clock/lunch-waive
-only). Sandy's actual duplicate punch still needs a manual admin-panel fix — this change makes
-the anomaly visible, it doesn't touch existing data.
+only). Sandy's actual duplicate punch (Wed Sep 2) was manually fixed in the admin correction
+modal on Sept 8, 2026 — this change made the anomaly visible, the fix was a data correction.
 
 **Verified:** `node --check` on `app.js` + a 14-assertion harness against
 `consolidatePunchesByDay()` (mirrored, with `adjustedTimes`/`paidHours` mocked as identity since
