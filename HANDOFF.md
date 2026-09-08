@@ -34,16 +34,14 @@
      Now a re-export means `exported_at` = "when the current file was produced", and the flag goes
      quiet for that batch.
   - Bumped version badge/`app_version` to v49.13.
-- **⚠️ Still pending from v49.12: `migration_punch_updated_at_fix.sql` needs to run in Supabase.**
-  The original `migration_punch_updated_at.sql` created the `trg_punch_updated_at` trigger
-  *before* its own backfill (`UPDATE punches SET updated_at = clock_in`); the trigger fired on
-  the backfill's own statement and stamped every row with `now()` instead — the false-positive
-  flood Julio saw (every employee "⚠️ Updated since export"). `migration_punch_updated_at_fix.sql`
-  disables the trigger, redoes the backfill, re-enables it. SQL-only, nothing to redeploy. The
-  original migration file was also corrected in place (backfill before trigger) for a fresh
-  environment — no effect on Julio's DB, which already ran the buggy version; only `_fix.sql`
-  repairs the data. **Until this runs, every "Updated since sent/export" flag is a false positive**,
-  including the v49.13 behaviour above.
+- **✅ v49.12's `migration_punch_updated_at_fix.sql` has now been run in Supabase** (Julio, Sept 8,
+  2026). The original `migration_punch_updated_at.sql` created the `trg_punch_updated_at` trigger
+  *before* its own backfill, so the trigger clobbered the backfill and stamped every row with
+  `now()` — the false-positive flood (every employee "⚠️ Updated since export"). The `_fix.sql`
+  disabled the trigger, redid the backfill (`updated_at = clock_in`), re-enabled it. **The
+  "Updated since sent/export" flags are now trustworthy** — a lit flag means punch data actually
+  changed since that submit/export. Real-device verification of v49.12/v49.13 behaviour is now
+  unblocked (see Next Steps).
 - **v49.12 — "updated since submit/export" flags** (`migration_punch_updated_at.sql` run in
   Supabase, adds `punches.updated_at` + DB trigger). Red pill in the supervisor log
   (`refreshSupLog`, vs. `sup_submitted_at`) and admin Submissions panel (`refreshSubmissionsPanel`,
@@ -77,36 +75,36 @@
   payload predicate + overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate
   (8 assertions), the v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9
   assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass. Not yet
-  exercised against the real UI/Supabase (blocked until `migration_punch_updated_at_fix.sql`
-  runs — until then every flag is a false positive): **v49.13** — confirm only one flag now shows
-  ("Updated since sent/export", no "After submit" anywhere), and confirm that re-exporting a
-  flagged employee (either re-export button) clears the pill on the next panel refresh; **v49.12**
-  — confirm the pill appears after editing an already-sent / already-exported punch, the admin
-  correction modal's "Changed after export" flag, and the changed-only re-export subset. Also
-  worth covering v49.9 – v49.11's still-open real-export/real-PDF checks in the same pass.
+  exercised against the real UI/Supabase (now unblocked — the fix migration has run): **v49.13** —
+  confirm only one flag now shows ("Updated since sent/export", no "After submit" anywhere), and
+  confirm that re-exporting a flagged employee (either re-export button) clears the pill on the
+  next panel refresh; **v49.12** — confirm the pill appears after editing an already-sent /
+  already-exported punch, the admin correction modal's "Changed after export" flag, and the
+  changed-only re-export subset. Also worth covering v49.9 – v49.11's still-open
+  real-export/real-PDF checks in the same pass.
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
   2. `migration_submit_notify.sql` — already run. `pt_settings.submit_notify_enabled` /
      `submit_notify_emails`.
   3. `migration_estimated_clock_out.sql` — already run.
-  4. `migration_punch_updated_at.sql` — run, but the backfill inside it didn't take effect due to
-     a statement-ordering bug (see Current Status above). Adds `punches.updated_at`.
-  5. **`migration_punch_updated_at_fix.sql` — NOT YET RUN.** Corrects the backfill left broken by
-     #4. Run this next in the Supabase SQL editor.
+  4. `migration_punch_updated_at.sql` — run. Adds `punches.updated_at` + the update trigger. Its
+     backfill was clobbered by a statement-ordering bug — see #5.
+  5. `migration_punch_updated_at_fix.sql` — **run (Sept 8, 2026).** Corrected the backfill broken
+     by #4; `punches.updated_at` is now correctly seeded to each row's `clock_in`.
   - v49.3 through v49.6, v49.11, v49.13 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Run `migration_punch_updated_at_fix.sql` in the Supabase SQL editor** — corrects the
-   backfill broken by the original migration's statement-ordering bug (see Current Status). The
-   "⚠️ Updated since export"/"Updated since sent" pills won't be trustworthy until this runs.
-2. **Real-device/real-export check on v49.6 – v49.13** together — see the specific scenarios
-   called out in Active State above. For v49.12/v49.13 specifically, do this *after* the fix
-   migration above, not before — right now every flag reads as a false positive. For v49.13:
-   verify the double-flag is gone and that a re-export clears "Updated since export".
+1. **Real-device/real-export check on v49.6 – v49.13** together — see the specific scenarios
+   called out in Active State above. The fix migration has run, so the flags are now live and
+   trustworthy. For v49.13: verify the double-flag is gone (only "Updated since sent/export"
+   shows, no "After submit" in the supervisor log, correction modal, or Submissions panel) and
+   that re-exporting a flagged employee clears "Updated since export" on the next panel refresh.
+   Watch the flag volume across the roster now that the backfill is correct — a burst of stale
+   flags would mean the backfill didn't take.
 3. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
    correction modal — v49.9 makes it visible on exports, it doesn't touch the underlying data.
    Worth a quick scan for other employees with the same symptom while in there — v49.9's overlap
@@ -171,9 +169,9 @@ backfilled, v44.0 and earlier are the original log._
 ## ✅ v49.13 — Collapse two overlapping "after submit / changed" flags into one; re-export clears it
 
 **Status:** coded, `node --check` + a 6-assertion harness pass, pushed to `main`, deployable —
-no migration. **But** the "Updated since sent/export" flag it now relies on is still showing
-false positives until `migration_punch_updated_at_fix.sql` runs in Supabase (v49.12 post-ship
-bug — see Current Status / Blockers).
+no migration. The "Updated since sent/export" flag it relies on is now trustworthy —
+`migration_punch_updated_at_fix.sql` was run in Supabase Sept 8, 2026. Real-device verification
+still pending (see Active State).
 
 **Context:** Julio's screenshot showed an employee's punches carrying two red badges at once —
 the v44.0 "⚠️ After submit" badge and the v49.12 "⚠️ Updated since sent" badge — because a
@@ -223,7 +221,7 @@ see Active State (and blocked on the fix migration regardless).
 
 **Also committed alongside (was uncommitted in the working tree):** `migration_punch_updated_at_fix.sql`
 (new) and the in-place ordering fix to `migration_punch_updated_at.sql` — both are the v49.12
-post-ship SQL fix, documented under v49.12 below. `_fix.sql` still needs to run in Supabase.
+post-ship SQL fix, documented under v49.12 below. `_fix.sql` was run in Supabase Sept 8, 2026.
 
 ---
 
@@ -323,7 +321,8 @@ re-enables the trigger, run once against the already-affected production DB; (2)
 migration file corrected in place (backfill now runs before the trigger is created) so a fresh
 environment wouldn't hit the same bug — that in-place fix has no effect on a DB that already ran
 the buggy version; only the `_fix.sql` file corrects already-affected data. No app.js/index.html
-change — this was a SQL-only bug, nothing to redeploy.
+change — this was a SQL-only bug, nothing to redeploy. **`_fix.sql` was run in Supabase Sept 8,
+2026** — the backfill is now correct and the flags are trustworthy.
 
 ---
 
