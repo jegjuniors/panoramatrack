@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.13 *(one "changed since export" flag instead of two overlapping ones — the older v44.0 "After submit" flag removed; re-export now re-stamps `exported_at` so the flag clears once corrected data is re-exported — no migration, deployable)*
+**Version:** v49.14 *(supervisor "Updated since sent" flag now also clears on an admin re-export — it compares against `exported_at` once a site is exported, not `sup_submitted_at` alone — no migration, deployable)*
 **Last handoff update:** September 8, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,6 +11,19 @@
 
 ## 1. Current Status — what was just completed
 
+- **v49.14 — supervisor "Updated since sent" flag clears on an admin re-export too.** `app.js`/
+  `index.html` only, no migration, deployable. Follow-up to v49.13, caught in real testing:
+  after a re-export the admin Submissions panel cleared its "Updated since export" pill (v49.13
+  works) but the **supervisor** Time Log still showed "⚠️ Updated since sent" for the same
+  employees. Cause: the supervisor flag compared each punch's `updated_at` against
+  `sup_submitted_at` (when *the supervisor* sent to office), and a re-export re-stamps
+  `exported_at` but never `sup_submitted_at`. Fix: new `officeSnapshotAt(statusRow)` helper —
+  returns `exported_at` once a site is `exported`, else `sup_submitted_at` ("the most recent
+  point the office had a current copy"). Both spots in `refreshSupLog` (the card-level
+  `changedSinceSent` pill and the per-punch badge) now compare against `officeSnapshotAt(r)`
+  instead of `r.sup_submitted_at`. Before export nothing changes; after a re-export the
+  supervisor's flag clears in step with the admin's. `exported_at` was already on the
+  supervisor's status rows (`select('*')`), so no query change. Version badge/`app_version` → v49.14.
 - **v49.13 — one "changed since export" flag, not two; re-export clears it.** `app.js`/`index.html`
   only, no migration, deployable. Two Julio asks, from a screenshot of an employee showing both
   "⚠️ After submit" and "⚠️ Updated since sent" stacked on the same punches:
@@ -33,7 +46,8 @@
      *original* export time forever — regenerating the file with corrected data never cleared it.
      Now a re-export means `exported_at` = "when the current file was produced", and the flag goes
      quiet for that batch.
-  - Bumped version badge/`app_version` to v49.13.
+  - Bumped version badge/`app_version` to v49.13. **Note:** v49.13 only cleared the *admin* panel's
+    flag on re-export; v49.14 (above) extends the same clearing to the supervisor log.
 - **✅ v49.12's `migration_punch_updated_at_fix.sql` has now been run in Supabase** (Julio, Sept 8,
   2026). The original `migration_punch_updated_at.sql` created the `trg_punch_updated_at` trigger
   *before* its own backfill, so the trigger clobbered the backfill and stamped every row with
@@ -56,16 +70,20 @@
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.13 committed and pushed (`app.js`, `index.html`, `HANDOFF.md`, plus
-  the previously-uncommitted v49.12 SQL fix files `migration_punch_updated_at_fix.sql` and the
-  in-place correction to `migration_punch_updated_at.sql`).
+- **Branch:** `main` — v49.14 committed and pushed. Earlier this session: v49.13 (the two-flag
+  collapse + re-export re-stamps `exported_at`) and the v49.12 SQL-fix files
+  (`migration_punch_updated_at_fix.sql` + the in-place correction to `migration_punch_updated_at.sql`).
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.13 included).
-  Ad-hoc assertion harnesses (established pattern): v49.13's re-export stamp-pair builder (6
-  assertions — both exported site-rows of a fully-exported employee get stamped, a not-yet-exported
-  site-row in a mixed employee is skipped, an employee with no exported rows / empty rows / an
-  unknown id all produce nothing without crashing, and a multi-employee batch stamps only the
-  exported rows across the set); v49.12's `changedSince`/`anyChangedSince`/
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.14 included).
+  Ad-hoc assertion harnesses (established pattern): v49.14's `officeSnapshotAt` + the supervisor
+  flag predicate (7 assertions — lit when a punch changed after send and not yet re-exported,
+  still lit when exported *before* the edit, clears once re-exported *after* the edit, falls back
+  to `sup_submitted_at` if `exported_at` is somehow missing, not lit with no change / at
+  emp-stage, null row → null); v49.13's re-export stamp-pair builder (6 assertions — both
+  exported site-rows of a fully-exported employee get stamped, a not-yet-exported site-row in a
+  mixed employee is skipped, an employee with no exported rows / empty rows / an unknown id all
+  produce nothing without crashing, and a multi-employee batch stamps only the exported rows
+  across the set); v49.12's `changedSince`/`anyChangedSince`/
   `employeeChangedSinceExport` (11 assertions — flags a change after the threshold, doesn't flag
   before it or with no threshold yet, doesn't crash on a missing `updatedAt`, the core scenario
   of an existing punch edited after submission being caught, the export-side helper correctly
@@ -75,13 +93,14 @@
   payload predicate + overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate
   (8 assertions), the v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9
   assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass. Not yet
-  exercised against the real UI/Supabase (now unblocked — the fix migration has run): **v49.13** —
-  confirm only one flag now shows ("Updated since sent/export", no "After submit" anywhere), and
-  confirm that re-exporting a flagged employee (either re-export button) clears the pill on the
-  next panel refresh; **v49.12** — confirm the pill appears after editing an already-sent /
-  already-exported punch, the admin correction modal's "Changed after export" flag, and the
-  changed-only re-export subset. Also worth covering v49.9 – v49.11's still-open
-  real-export/real-PDF checks in the same pass.
+  exercised against the real UI/Supabase (now unblocked — the fix migration has run): **v49.14** —
+  confirm a re-export now clears the pill in *both* the admin Submissions panel (already verified
+  for v49.13) and the supervisor Time Log for the same employees; **v49.13** — confirm only one
+  flag shows ("Updated since sent/export", no "After submit" anywhere); **v49.12** — confirm the
+  pill appears after editing an already-sent / already-exported punch, the admin correction
+  modal's "Changed after export" flag, and the changed-only re-export subset. Also worth covering
+  v49.9 – v49.11's still-open real-export/real-PDF checks in the same pass. (v49.13's admin-panel
+  clearing and v49.12's flag appearance are confirmed working in real testing.)
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
@@ -92,36 +111,36 @@
      backfill was clobbered by a statement-ordering bug — see #5.
   5. `migration_punch_updated_at_fix.sql` — **run (Sept 8, 2026).** Corrected the backfill broken
      by #4; `punches.updated_at` is now correctly seeded to each row's `clock_in`.
-  - v49.3 through v49.6, v49.11, v49.13 added no migration.
+  - v49.3 through v49.6, v49.11, v49.13, v49.14 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Real-device/real-export check on v49.6 – v49.13** together — see the specific scenarios
+1. **Real-device/real-export check on v49.6 – v49.14** together — see the specific scenarios
    called out in Active State above. The fix migration has run, so the flags are now live and
-   trustworthy. For v49.13: verify the double-flag is gone (only "Updated since sent/export"
-   shows, no "After submit" in the supervisor log, correction modal, or Submissions panel) and
-   that re-exporting a flagged employee clears "Updated since export" on the next panel refresh.
-   Watch the flag volume across the roster now that the backfill is correct — a burst of stale
-   flags would mean the backfill didn't take.
-3. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
+   trustworthy. v49.13 (double-flag gone, admin panel clears on re-export) and v49.12 (flag
+   appears on edit) are confirmed working; **still to verify: v49.14** — that a re-export also
+   clears "Updated since sent" in the *supervisor* Time Log, not just the admin panel. Watch the
+   flag volume across the roster now that the backfill is correct — a burst of stale flags would
+   mean the backfill didn't take.
+2. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
    correction modal — v49.9 makes it visible on exports, it doesn't touch the underlying data.
    Worth a quick scan for other employees with the same symptom while in there — v49.9's overlap
    flag will now surface them on the next export.
-4. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
+3. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
    Submissions-panel `stage='exported'` divergence** noted below — worth checking whether any
    already-"final" periods exported via Excel are missing their stamp because of it.
-5. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+4. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
-6. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+5. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-7. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+6. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
@@ -161,8 +180,50 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.13 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.14 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.14 — Supervisor "Updated since sent" flag also clears on an admin re-export
+
+**Status:** coded, `node --check` + a 7-assertion harness pass, pushed to `main`, deployable — no
+migration. `app.js`/`index.html` only.
+
+**Context:** immediately after v49.13 shipped, real testing showed the fix was half-applied.
+A re-export cleared the "⚠️ Updated since export" pill in the admin Submissions panel (v49.13's
+`exported_at` re-stamp works), but the **supervisor** Time Log still showed "⚠️ Updated since
+sent" for the same employees. Julio flagged the inconsistency.
+
+**Cause:** the supervisor-log flag (`refreshSupLog` — both the card-level `changedSinceSent` pill
+and the per-punch badge) compared each punch's `updated_at` against **`sup_submitted_at`** — when
+*the supervisor* sent the site to office. v49.13's re-export re-stamps `exported_at` but
+deliberately never touches `sup_submitted_at` (the supervisor didn't re-send). So from the
+supervisor's row the punches were still "newer than when I sent this," forever.
+
+**Fix (`app.js`):**
+- New helper `officeSnapshotAt(statusRow)` next to `changedSince`/`anyChangedSince`: returns
+  `statusRow.exported_at` when `stage === 'exported'` and it's set, else `statusRow.sup_submitted_at`.
+  Reads as "the most recent point the office had a current copy of this site's punches."
+- Both flag checks in `refreshSupLog` now pass `officeSnapshotAt(r)` to `changedSince` instead of
+  `r.sup_submitted_at`. Before a site is exported this is identical to the old behaviour; once
+  exported it compares against `exported_at`, which a re-export moves forward — so the
+  supervisor's flag clears in lockstep with the admin panel's.
+- `exported_at` is already present on the supervisor's status rows (`getAllStatusForPeriod` does
+  `select('*')`), so no query change.
+- Version badge/`app_version` → v49.14.
+
+**Not changed:** the admin Submissions panel and correction modal already compared against
+`exported_at` (that's why they cleared correctly in v49.13) — untouched. The per-punch
+`isOutOfSubmission`-style "after submit" flag is still gone (v49.13). No change to what a re-export
+stamps — v49.13's `exported_at` re-stamp is the mechanism this rides on.
+
+**Verified:** `node --check app.js` + a 7-assertion harness on `officeSnapshotAt` and the
+supervisor flag predicate: lit when a punch changed after send and hasn't been re-exported since;
+still lit when the site was exported *before* the edit; **clears once re-exported after the
+edit**; falls back to `sup_submitted_at` if `exported_at` is somehow missing on an exported row;
+not lit with no change or while still at emp-stage; null row → null. Not yet checked against the
+real UI — see Active State.
 
 ---
 

@@ -440,6 +440,18 @@ function changedSince(punch,sinceIso){
 function anyChangedSince(punches,sinceIso){
   return (punches||[]).some(p=>changedSince(p,sinceIso));
 }
+// v49.14: the most recent point the office had a current copy of this site's punches —
+// exported_at once it's been exported, else the supervisor's sup_submitted_at. The supervisor
+// log's "Updated since sent" flag compares against THIS (not sup_submitted_at alone) so that an
+// admin re-export — which re-stamps exported_at but never sup_submitted_at (see startReExport) —
+// clears the supervisor's flag in step with the admin Submissions panel's, instead of leaving
+// it lit forever after the office has already re-pulled the corrected data.
+function officeSnapshotAt(statusRow){
+  if(!statusRow)return null;
+  return (statusRow.stage===TC_STAGE.EXPORTED&&statusRow.exported_at)
+    ? statusRow.exported_at
+    : statusRow.sup_submitted_at;
+}
 
 // Running-total paid hours for the My Timecard panel (v44.0).
 //  - Excludes still-active punches (no clock-out yet) — same as paidHours returning null.
@@ -2168,10 +2180,13 @@ async function refreshSupLog(){
     const stage=minStage(mySiteRows); // least-advanced site = what still needs attention
     const chip=supStageChip(stage);
     // v49.12: any punch at a site this supervisor already sent to office (sup_submitted+)
-    // whose data changed since that send — new/updated punches the supervisor hasn't seen yet.
+    // whose data changed since the office last had a current copy — new/updated punches the
+    // supervisor (and, once exported, the office) hasn't seen yet. v49.14: compare against
+    // officeSnapshotAt (exported_at once exported), not sup_submitted_at alone, so an admin
+    // re-export clears this flag too.
     const changedSinceSent=records.some(l=>{
       const r=mySiteRows.find(rr=>rr.jobsite===l.jobsite);
-      return r&&stageAtLeast(r.stage,TC_STAGE.SUP)&&changedSince(l,r.sup_submitted_at);
+      return r&&stageAtLeast(r.stage,TC_STAGE.SUP)&&changedSince(l,officeSnapshotAt(r));
     });
     const totalHrs=records.reduce((s,l)=>s+(paidHours(l)||0),0);
     const flags=records.filter(l=>l.autoClocked).length;
@@ -2226,7 +2241,7 @@ async function refreshSupLog(){
       // same punches as this one, just via clock_in instead of updated_at.)
       {
         const _r=mySiteRows.find(r=>r.jobsite===l.jobsite);
-        if(_r&&stageAtLeast(_r.stage,TC_STAGE.SUP)&&changedSince(l,_r.sup_submitted_at))
+        if(_r&&stageAtLeast(_r.stage,TC_STAGE.SUP)&&changedSince(l,officeSnapshotAt(_r)))
           actBadges+=`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:2px;">⚠️ Updated since sent</span>`;
       }
       const isAssignedSite=(activeSup.jobsites||[]).includes(l.jobsite);
@@ -5425,7 +5440,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.13',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.14',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5474,7 +5489,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.13',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.14',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
