@@ -425,22 +425,14 @@ async function computeReadyCountForPeriod(period){
   return Object.keys(statusMap).filter(id=>isFullyReadyForExport(statusMap[id],[...(sitesWorkedByEmp[id]||[])])).length;
 }
 
-// Out-of-submission punch (v44.0): a punch whose clock-in is newer than the employee's
-// emp_submitted_at, while the timecard is at emp_submitted or later. Flags the supervisor
-// that the employee worked after handing in their card (no re-submit required).
-function isOutOfSubmission(entry,statusRow){
-  if(!statusRow||!statusRow.emp_submitted_at)return false;
-  if(!stageAtLeast(statusRow.stage,TC_STAGE.EMP))return false;
-  return entry.in>new Date(statusRow.emp_submitted_at);
-}
-
 // v49.12: has this punch's DATA changed (any insert/update, per the DB-maintained
-// `updated_at` — see migration_punch_updated_at.sql) since a given timestamp? Distinct from
-// isOutOfSubmission above, which only catches a brand-new clock-in landing after submission —
-// this also catches an EXISTING already-submitted/exported punch being edited afterward (the
-// case that prompted this: an estimated-hours punch later getting its real clock-out filled
-// in). Powers the "updated since submit/export" flags across the supervisor log, admin
-// Submissions panel, admin correction modal, and the changed-only re-export option.
+// `updated_at` — see migration_punch_updated_at.sql) since a given timestamp? Catches both a
+// brand-new clock-in landing after submission AND an EXISTING already-submitted/exported punch
+// being edited afterward (the case that prompted this: an estimated-hours punch later getting
+// its real clock-out filled in). Powers the "updated since submit/export" flags across the
+// supervisor log, admin Submissions panel, admin correction modal, and the changed-only
+// re-export option. (v49.13: replaced the older, narrower v44.0 `isOutOfSubmission` flag,
+// which only compared `clock_in` and produced a duplicate badge alongside this one.)
 function changedSince(punch,sinceIso){
   if(!sinceIso||!punch||!punch.updatedAt)return false;
   return punch.updatedAt>new Date(sinceIso);
@@ -2175,8 +2167,6 @@ async function refreshSupLog(){
     myStatusMap[empId]=mySiteRows;
     const stage=minStage(mySiteRows); // least-advanced site = what still needs attention
     const chip=supStageChip(stage);
-    // out-of-submission: match each punch to ITS OWN site's row (not a single shared row).
-    const oos=records.filter(l=>isOutOfSubmission(l,mySiteRows.find(r=>r.jobsite===l.jobsite)||null)).length;
     // v49.12: any punch at a site this supervisor already sent to office (sup_submitted+)
     // whose data changed since that send — new/updated punches the supervisor hasn't seen yet.
     const changedSinceSent=records.some(l=>{
@@ -2217,7 +2207,7 @@ async function refreshSupLog(){
     const sendBtn=sendableSites.length
       ? `<button class="btn-sm" onclick="event.stopPropagation();supSendEmployeeToOffice('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--green-l,#d8f0d8);color:var(--green,#2f7d31);border:0.5px solid var(--green,#2f7d31);margin-left:6px;">Send to office</button>`
       : '';
-    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${oos?` · <span style="color:#e07070;font-weight:600;">${oos} ⚠️ after submit</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
+    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
       const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
@@ -2230,10 +2220,10 @@ async function refreshSupLog(){
       if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
       else if(l.lunchWaived===true)actBadges+=`<span class="badge" style="background:#d8f0d8;color:#1f5e1f;margin-left:2px;">🍴 Waived</span>`;
       else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
-      // v44.0: punch landed after the employee handed in their card (matched to that punch's own site)
-      if(isOutOfSubmission(l,mySiteRows.find(r=>r.jobsite===l.jobsite)||null))actBadges+=`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:2px;">⚠️ After submit</span>`;
       // v49.12: this specific punch's data changed after this site was sent to office —
-      // per-punch counterpart to the employee-card-level pill above.
+      // per-punch counterpart to the employee-card-level pill above. (v49.13: the older
+      // v44.0 "⚠️ After submit" badge that used to sit here was removed — it fired on the
+      // same punches as this one, just via clock_in instead of updated_at.)
       {
         const _r=mySiteRows.find(r=>r.jobsite===l.jobsite);
         if(_r&&stageAtLeast(_r.stage,TC_STAGE.SUP)&&changedSince(l,_r.sup_submitted_at))
@@ -4832,7 +4822,6 @@ async function refreshAdminEmpCorrect(){
     const row=statusRows.find(r=>r.jobsite===e.jobsite)||null;
     const autoFlag=e.autoClocked&&!e.editedAfterAuto;
     const waiveFlag=isPendingWaive(e);
-    const oosFlag=isOutOfSubmission(e,row);
     // v49.x: same missed-start-time-selection case flagged in My Timecard and the Submissions
     // panel — surfaced here too, as the supervisor/GM's fallback fix when the employee can't
     // or didn't resolve it themselves.
@@ -4840,11 +4829,10 @@ async function refreshAdminEmpCorrect(){
     // v49.12: this punch's data changed after this site was exported (new or edited) —
     // matches the red pill next to "✓ Exported" one screen up in the Submissions panel.
     const changedFlag=row&&row.stage===TC_STAGE.EXPORTED&&changedSince(e,row.exported_at);
-    const flagged=autoFlag||waiveFlag||oosFlag||startFlag||changedFlag;
+    const flagged=autoFlag||waiveFlag||startFlag||changedFlag;
     const flagParts=[];
     if(autoFlag)flagParts.push('Unresolved auto-clock');
     if(waiveFlag)flagParts.push('Pending lunch waive');
-    if(oosFlag)flagParts.push('Punch after submit');
     if(startFlag)flagParts.push('Unconfirmed start time');
     if(changedFlag)flagParts.push('Changed after export');
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
@@ -4933,7 +4921,6 @@ async function refreshSubmissionsPanel(){
       const name=empNameById[empId]||`Employee #${empId}`;
       const totalHrs=(punchesByEmp[empId]||[]).reduce((s,p)=>s+(paidHours(p)||0),0);
       const sitePunches=punchesByEmpSite[empId+'|'+site]||[];
-      const oosCount=sitePunches.filter(p=>isOutOfSubmission(p,row)).length;
       const autoCount=sitePunches.filter(p=>p.autoClocked&&!p.editedAfterAuto).length;
       const waiveCount=sitePunches.filter(p=>isPendingWaive(p)).length;
       // v49.x: same tier as an unresolved auto-clock or pending waive — a missed start-time
@@ -4969,7 +4956,8 @@ async function refreshSubmissionsPanel(){
       if(neverSubmitted)flagParts.push('Never submitted');
       if(stuckEmp)flagParts.push('Needs supervisor review');
       // v47.1: "Waiting on:" no longer in flagParts — moved inline beside ✓ in statusHtml
-      if(oosCount)flagParts.push(`${oosCount} punch${oosCount!==1?'es':''} after submit`);
+      // v49.13: the "N punches after submit" flag was removed here — the "⚠️ Updated since
+      // export" pill in statusHtml (below) covers the same punches once a site is exported.
       if(autoCount)flagParts.push(`${autoCount} unresolved auto-clock${autoCount!==1?'s':''}`);
       if(waiveCount)flagParts.push(`${waiveCount} pending waive${waiveCount!==1?'s':''}`);
       if(unconfirmedCount)flagParts.push(`${unconfirmedCount} unconfirmed start time${unconfirmedCount!==1?'s':''}`);
@@ -5310,11 +5298,15 @@ function showExportEmptyBreakdown(scopeType,jobsite,statusMap,allLogs,sitesWorke
 }
 
 /* Re-export path — regenerates the same consolidated file(s) for employees whose every
-   worked site is already at stage='exported'. No stage stamping (they're already
-   exported); the no-op _pendingExportStampFn still refreshes the panel afterwards for
-   consistency. For per-site scope, further filtered to employees who worked that site.
+   worked site is already at stage='exported'. For per-site scope, further filtered to
+   employees who worked that site.
    v49.12: changedOnly further filters down to employees with an actual new/updated punch
-   since their export — see employeeChangedSinceExport(). */
+   since their export — see employeeChangedSinceExport().
+   v49.13: the re-export now re-stamps exported_at (via setTimecardStage — stage stays
+   'exported', the earlier emp/sup timestamps are preserved by the partial upsert) on every
+   re-exported employee's site-rows. The regenerated file reflects the current punch data, so
+   exported_at should too — and bumping it is what clears the "Updated since export" /
+   "Changed after export" flags for that batch. Both re-export buttons do this. */
 function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,period,changedOnly){
   let reExportIds=Object.keys(statusMap).filter(id=>{
     const rows=statusMap[id]||[];
@@ -5346,9 +5338,19 @@ function startReExport(scopeType,jobsite,statusMap,allLogs,sitesWorkedByEmp,peri
   document.getElementById('m-log-from').value=toDateStr(period.start);
   document.getElementById('m-log-to').value=toDateStr(period.end);
 
-  // v44.3: no stage-stamping on re-export — rows are already 'exported'. The stamp
-  // function still refreshes the panel so any concurrent-tab changes show through.
-  _pendingExportStampFn=async()=>{refreshSubmissionsPanel();};
+  // v49.13: re-stamp exported_at on every re-exported employee's exported site-rows so the
+  // "Updated since export" flags clear — the freshly generated file IS the exported data now.
+  // stage is already 'exported'; setTimecardStage's partial upsert leaves emp/sup timestamps
+  // intact. Fires only after the file actually generates (see _pendingExportStampFn callers).
+  const reStampIds=reExportIds.slice();
+  _pendingExportStampFn=async()=>{
+    const pairs=[];
+    reStampIds.forEach(id=>{
+      (statusMap[id]||[]).forEach(r=>{ if(r.stage===TC_STAGE.EXPORTED)pairs.push({empId:id,jobsite:r.jobsite}); });
+    });
+    await Promise.all(pairs.map(p=>setTimecardStage(p.empId,period,TC_STAGE.EXPORTED,p.jobsite)));
+    refreshSubmissionsPanel();
+  };
   showMasterFormatModal();
 }
 
@@ -5423,7 +5425,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.12',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.13',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5472,7 +5474,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.12',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.13',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

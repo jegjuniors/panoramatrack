@@ -1,7 +1,7 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.12 *("Updated since submit/export" flags — red pill in supervisor log + Submissions panel, per-punch detail, changed-only re-export option — migration run, deployable)*
-**Last handoff update:** September 4, 2026
+**Version:** v49.13 *(one "changed since export" flag instead of two overlapping ones — the older v44.0 "After submit" flag removed; re-export now re-stamps `exported_at` so the flag clears once corrected data is re-exported — no migration, deployable)*
+**Last handoff update:** September 8, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
 > Everything under "Reference & History" is background: architecture, DB schema, standing build
@@ -11,37 +11,44 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.12 — "updated since submit/export" flags. `migration_punch_updated_at.sql` has been run
-  in Supabase** (adds `punches.updated_at`, incl. the backfill) — deployable. Julio's ask: employees still clocked in when a
-  timecard is submitted show estimated hours (v49.7) and export as preliminary; they eventually
-  clock out for real, and may pick up more shifts over the weekend — supervisors and admins had no
-  way to see that punch data changed *after* they submitted/exported, short of manually re-checking.
-  - **Detection:** new `punches.updated_at`, auto-stamped by a DB trigger on every insert/update —
-    no app.js write site needed to change, so nothing can be missed. `changedSince(punch,
-    sinceIso)`/`anyChangedSince(punches,sinceIso)` (new helpers, next to `isOutOfSubmission`) are
-    the shared primitive everything below builds on. Deliberately distinct from the existing
-    `isOutOfSubmission`, which only catches a brand-new clock-in landing after submission — this
-    also catches an *existing* already-submitted punch being edited afterward, e.g. the estimated
-    punch getting its real clock-out filled in, which was the actual scenario described.
-  - **Supervisor log** (`refreshSupLog`): a red "⚠️ Updated since sent" pill next to the green "✓
-    Sent to office" chip when any punch at a `sup_submitted+` site changed after that site's
-    `sup_submitted_at`. Same badge repeated per-punch in the row table (mirrors the existing
-    "⚠️ After submit" badge pattern) — purely informational, doesn't block anything; punches are
-    already always editable regardless of stage.
-  - **Admin Submissions panel** (`refreshSubmissionsPanel`): same red pill next to "✓ Exported",
-    compared against that site's `exported_at` instead.
-  - **Admin correction modal** (`refreshAdminEmpCorrect`): new "Changed after export" flag added
-    to the existing per-punch flag list (unresolved auto-clock, pending waive, punch-after-submit,
-    unconfirmed start).
-  - **Changed-only re-export:** the existing re-export flow (`showExportEmptyBreakdown`/
-    `startReExport`, triggered when clicking Export finds nothing newly-ready because everyone's
-    already exported) now offers a **second** button alongside the original unconditional one —
-    "Re-export N changed employees only" vs. "Re-export N already-exported employees" — both
-    available at once, neither replaces the other. New `employeeChangedSinceExport()` helper scopes
-    correctly to a single jobsite or "all sites" depending on which Export button was clicked.
-    `showExportBreakdown()`/the export-breakdown modal (`index.html`) extended to support the
-    second button.
-  - Bumped version badge/`app_version` to v49.12.
+- **v49.13 — one "changed since export" flag, not two; re-export clears it.** `app.js`/`index.html`
+  only, no migration, deployable. Two Julio asks, from a screenshot of an employee showing both
+  "⚠️ After submit" and "⚠️ Updated since sent" stacked on the same punches:
+  1. **Removed the older v44.0 "After submit" flag entirely** (`isOutOfSubmission()` deleted, all
+     four call sites removed — the per-punch badge + card-summary count in `refreshSupLog`, the
+     `Punch after submit` flag-part in `refreshAdminEmpCorrect`, the `N punches after submit`
+     flag-part in `refreshSubmissionsPanel`). It fired on the same punches as v49.12's
+     `changedSince`/"Updated since sent/export" flag, just detected via `clock_in` instead of
+     `updated_at`, so it was a strict-subset duplicate once a card reached the later stage. The
+     v49.12 flag stays and is now the only one. Trade-off Julio accepted: between an employee
+     submitting and the supervisor sending to office there's no longer any flag for "employee
+     kept working after handing in their card" — once sent/exported, "Updated since sent/export"
+     covers new punches and edits both.
+  2. **`startReExport` now re-stamps `exported_at`** (via `setTimecardStage(…, EXPORTED, …)` —
+     `stage` is already `exported`, the partial upsert leaves `emp/sup_submitted_at` intact) on
+     every re-exported employee's exported site-rows, for **both** re-export buttons (the
+     unconditional "Re-export N already-exported" and the v49.12 "Re-export N changed only").
+     Fires from `_pendingExportStampFn`, so only after the file actually generates. Before this,
+     v44.3's "no stamping on re-export" meant the "Updated since export" flag compared against the
+     *original* export time forever — regenerating the file with corrected data never cleared it.
+     Now a re-export means `exported_at` = "when the current file was produced", and the flag goes
+     quiet for that batch.
+  - Bumped version badge/`app_version` to v49.13.
+- **⚠️ Still pending from v49.12: `migration_punch_updated_at_fix.sql` needs to run in Supabase.**
+  The original `migration_punch_updated_at.sql` created the `trg_punch_updated_at` trigger
+  *before* its own backfill (`UPDATE punches SET updated_at = clock_in`); the trigger fired on
+  the backfill's own statement and stamped every row with `now()` instead — the false-positive
+  flood Julio saw (every employee "⚠️ Updated since export"). `migration_punch_updated_at_fix.sql`
+  disables the trigger, redoes the backfill, re-enables it. SQL-only, nothing to redeploy. The
+  original migration file was also corrected in place (backfill before trigger) for a fresh
+  environment — no effect on Julio's DB, which already ran the buggy version; only `_fix.sql`
+  repairs the data. **Until this runs, every "Updated since sent/export" flag is a false positive**,
+  including the v49.13 behaviour above.
+- **v49.12 — "updated since submit/export" flags** (`migration_punch_updated_at.sql` run in
+  Supabase, adds `punches.updated_at` + DB trigger). Red pill in the supervisor log
+  (`refreshSupLog`, vs. `sup_submitted_at`) and admin Submissions panel (`refreshSubmissionsPanel`,
+  vs. `exported_at`), a "Changed after export" per-punch flag in the admin correction modal, and
+  the changed-only re-export button. Full detail in the changelog under Reference & History.
 - **v49.0–v49.11** — settings foundation + Edge Function for submission notifications, the
   scheduled-start confirm/flag/fix flow, several My Timecard/catch-up/edit-save bugfixes, the
   estimated-clock-out prompt (single-field FYI-only → persisting → per-row/skip-when-covered),
@@ -51,11 +58,16 @@
 
 ## 2. Active State
 
-- **Branch:** `main`, working tree clean — v49.12 (including `migration_punch_updated_at.sql`,
-  now run in Supabase) is committed and pushed.
+- **Branch:** `main` — v49.13 committed and pushed (`app.js`, `index.html`, `HANDOFF.md`, plus
+  the previously-uncommitted v49.12 SQL fix files `migration_punch_updated_at_fix.sql` and the
+  in-place correction to `migration_punch_updated_at.sql`).
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.12 included).
-  Ad-hoc assertion harnesses (established pattern): v49.12's `changedSince`/`anyChangedSince`/
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.13 included).
+  Ad-hoc assertion harnesses (established pattern): v49.13's re-export stamp-pair builder (6
+  assertions — both exported site-rows of a fully-exported employee get stamped, a not-yet-exported
+  site-row in a mixed employee is skipped, an employee with no exported rows / empty rows / an
+  unknown id all produce nothing without crashing, and a multi-employee batch stamps only the
+  exported rows across the set); v49.12's `changedSince`/`anyChangedSince`/
   `employeeChangedSinceExport` (11 assertions — flags a change after the threshold, doesn't flag
   before it or with no threshold yet, doesn't crash on a missing `updatedAt`, the core scenario
   of an existing punch edited after submission being caught, the export-side helper correctly
@@ -65,47 +77,53 @@
   payload predicate + overnight-edge estimate math (5 assertions), the v49.4 catch-up predicate
   (8 assertions), the v49.5 edit-save predicate (4 assertions), `needsStartTimeConfirm()` (9
   assertions, v49.3), submission-notify item-building (8 assertions, v49.1) — all pass. Not yet
-  exercised against the real UI/Supabase, now unblocked since the migration is run: confirm the
-  red pill appears in the supervisor log after editing an already-sent punch; confirm it appears
-  in the Submissions panel after editing an already-exported punch; confirm the admin correction
-  modal's new "Changed after export" flag; and confirm the changed-only re-export button appears
-  only when there's an actual change, generates the right subset of employees, and that "Re-export
-  everyone" still works unchanged alongside it. Also worth covering v49.9 – v49.11's still-open
-  real-export/real-PDF checks in the same pass if they haven't happened yet.
+  exercised against the real UI/Supabase (blocked until `migration_punch_updated_at_fix.sql`
+  runs — until then every flag is a false positive): **v49.13** — confirm only one flag now shows
+  ("Updated since sent/export", no "After submit" anywhere), and confirm that re-exporting a
+  flagged employee (either re-export button) clears the pill on the next panel refresh; **v49.12**
+  — confirm the pill appears after editing an already-sent / already-exported punch, the admin
+  correction modal's "Changed after export" flag, and the changed-only re-export subset. Also
+  worth covering v49.9 – v49.11's still-open real-export/real-PDF checks in the same pass.
 - **Migrations:**
   1. `migration_v48_start_time.sql` — already run. `punches.declared_start_time` + 5 `pt_settings`
      columns.
   2. `migration_submit_notify.sql` — already run. `pt_settings.submit_notify_enabled` /
      `submit_notify_emails`.
   3. `migration_estimated_clock_out.sql` — already run.
-  4. `migration_punch_updated_at.sql` — **run** (confirmed by Julio, Sept 4, 2026). Adds
-     `punches.updated_at` (DB trigger, auto-stamped on every update) plus the one-time backfill
-     of existing rows to their own `clock_in`.
-  - v49.3 through v49.6, v49.11 added no migration.
+  4. `migration_punch_updated_at.sql` — run, but the backfill inside it didn't take effect due to
+     a statement-ordering bug (see Current Status above). Adds `punches.updated_at`.
+  5. **`migration_punch_updated_at_fix.sql` — NOT YET RUN.** Corrects the backfill left broken by
+     #4. Run this next in the Supabase SQL editor.
+  - v49.3 through v49.6, v49.11, v49.13 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Real-device/real-export check on v49.6 – v49.12** together — see the specific scenarios
-   called out in Active State above. Now unblocked — migration is run.
-2. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
+1. **Run `migration_punch_updated_at_fix.sql` in the Supabase SQL editor** — corrects the
+   backfill broken by the original migration's statement-ordering bug (see Current Status). The
+   "⚠️ Updated since export"/"Updated since sent" pills won't be trustworthy until this runs.
+2. **Real-device/real-export check on v49.6 – v49.13** together — see the specific scenarios
+   called out in Active State above. For v49.12/v49.13 specifically, do this *after* the fix
+   migration above, not before — right now every flag reads as a false positive. For v49.13:
+   verify the double-flag is gone and that a re-export clears "Updated since export".
+3. **Sandy Enriquez's actual duplicate punch (Wed Sep 2) still needs a manual fix** in the admin
    correction modal — v49.9 makes it visible on exports, it doesn't touch the underlying data.
    Worth a quick scan for other employees with the same symptom while in there — v49.9's overlap
    flag will now surface them on the next export.
-3. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
+4. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
    Submissions-panel `stage='exported'` divergence** noted below — worth checking whether any
    already-"final" periods exported via Excel are missing their stamp because of it.
-4. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+5. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
-5. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+6. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-6. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+7. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
@@ -145,8 +163,67 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.12 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.13 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.13 — Collapse two overlapping "after submit / changed" flags into one; re-export clears it
+
+**Status:** coded, `node --check` + a 6-assertion harness pass, pushed to `main`, deployable —
+no migration. **But** the "Updated since sent/export" flag it now relies on is still showing
+false positives until `migration_punch_updated_at_fix.sql` runs in Supabase (v49.12 post-ship
+bug — see Current Status / Blockers).
+
+**Context:** Julio's screenshot showed an employee's punches carrying two red badges at once —
+the v44.0 "⚠️ After submit" badge and the v49.12 "⚠️ Updated since sent" badge — because a
+brand-new punch landing after the supervisor sent to office trips both: its `clock_in` is past
+`emp_submitted_at` (what `isOutOfSubmission` checks) *and* its `updated_at` is past
+`sup_submitted_at` (what `changedSince` checks). Second ask: after an early submit + export, when
+the admin re-exports the flagged employees with their corrected data, the flag should reset — it
+didn't, because re-export never re-stamped `exported_at`.
+
+**Change 1 — removed the v44.0 "After submit" flag entirely (`app.js`):**
+- Deleted `isOutOfSubmission()` and all four call sites: the per-punch badge + the `oos`
+  card-summary count in `refreshSupLog`, the `oosFlag`/`'Punch after submit'` flag-part in
+  `refreshAdminEmpCorrect`, and the `oosCount`/`'N punches after submit'` flag-part in
+  `refreshSubmissionsPanel`. None of the removed pieces were in any `blocked`/gating expression,
+  so send-to-office and override gating are unchanged — this was purely a display badge.
+- The v49.12 `changedSince`/`anyChangedSince` + "Updated since sent/export" flag is untouched and
+  is now the sole flag. It's a strict superset of the old one (it also catches edits to existing
+  punches, e.g. an estimated punch getting its real clock-out), so nothing is lost on the
+  sent/exported side.
+- **Trade-off, accepted by Julio:** in the window between an employee submitting and the
+  supervisor sending to office, there is no longer any flag for "employee kept working after
+  handing in their card" (no `sup_submitted_at` exists yet for `changedSince` to compare against).
+  Once the supervisor sends, the flag covers new punches and edits both.
+
+**Change 2 — re-export re-stamps `exported_at` (`app.js`, `startReExport`):**
+- `_pendingExportStampFn` for the re-export path was a no-op (`refreshSubmissionsPanel()` only) —
+  v44.3's deliberate "rows are already 'exported', don't re-stamp". Consequence: the "Updated
+  since export" flag (and the correction-modal "Changed after export" flag, and the changed-only
+  re-export count) all compare `updated_at` against the *original* `exported_at` forever, so
+  regenerating the file with corrected data never cleared them.
+- Now it builds `{empId, jobsite}` pairs for every re-exported employee's `stage==='exported'`
+  site-rows and calls `setTimecardStage(empId, period, EXPORTED, jobsite)` on each — `stage` stays
+  `exported`, and PostgREST's partial upsert (the same mechanism the first-time export stamp at
+  `openSubmissionsExport` relies on) leaves `emp_submitted_at`/`sup_submitted_at` intact. Applies
+  to **both** re-export buttons (unconditional + changed-only). Fires only after the file actually
+  generates, via the existing `_pendingExportStampFn` hook in `doMasterExcelZip()`/`generateMasterPDF()`.
+- Net: a re-export now means `exported_at` = "when the current file was produced", and every
+  changed-since flag for that batch goes quiet.
+
+**Verified:** `node --check app.js`; grep sweep confirms no functional `isOutOfSubmission` /
+`oosFlag` / `oosCount` / "after submit" references remain (only explanatory comments). 6-assertion
+harness on the extracted stamp-pair builder: both exported site-rows of a fully-exported employee
+are stamped; a not-yet-exported site-row on a mixed employee is skipped; an employee with no
+exported rows / empty rows / an unknown id each yield nothing without throwing; a multi-employee
+batch stamps only the exported rows across the set. Not exercised against the real UI/Supabase —
+see Active State (and blocked on the fix migration regardless).
+
+**Also committed alongside (was uncommitted in the working tree):** `migration_punch_updated_at_fix.sql`
+(new) and the in-place ordering fix to `migration_punch_updated_at.sql` — both are the v49.12
+post-ship SQL fix, documented under v49.12 below. `_fix.sql` still needs to run in Supabase.
 
 ---
 
@@ -234,6 +311,19 @@ helper never flags a not-yet-exported employee, and per-site vs. "all sites" sco
 (a change at a different site than the one being queried is correctly ignored in site-scope, but
 still counted in all-sites scope). Not exercised against the real UI/Supabase — genuinely can't
 be, until the migration runs. See Active State.
+
+**⚠️ Post-ship bug found via real usage:** Julio ran `migration_punch_updated_at.sql` and
+immediately saw every employee at a site flagged "⚠️ Updated since export," regardless of
+whether anything had actually changed. Root cause: the migration created the trigger *before*
+running its own backfill — since the trigger fires on every `UPDATE` including the backfill's
+own statement, it silently overrode `SET updated_at = clock_in` and stamped every row with `now()`
+instead, exactly the false-positive flood the backfill existed to prevent. Fixed two ways: (1)
+new `migration_punch_updated_at_fix.sql` — disables the trigger, redoes the backfill correctly,
+re-enables the trigger, run once against the already-affected production DB; (2) the original
+migration file corrected in place (backfill now runs before the trigger is created) so a fresh
+environment wouldn't hit the same bug — that in-place fix has no effect on a DB that already ran
+the buggy version; only the `_fix.sql` file corrects already-affected data. No app.js/index.html
+change — this was a SQL-only bug, nothing to redeploy.
 
 ---
 
