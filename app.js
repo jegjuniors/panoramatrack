@@ -1983,13 +1983,53 @@ function isCompleted(period){
 
 /* ─── Supervisor: Log period selection ─── */
 let _supPeriodMode='current'; // default to current period on open
+let _supPeriodSetSeq=0; // v49.15: bumped on every setSupPeriod — lets initLogDates' async
+                        // "open on Last" check back off if anything picked a period meanwhile
+const SUP_LAST_DEFAULT_DAYS=2; // v49.15: first N days of a new period may open the log on "Last"
 
 function initLogDates(){
   setSupPeriod('current');
+  // v49.15: in the first days of a new period, open on "Last" instead while any of last
+  // period's timecards at this supervisor's sites haven't been sent to the office yet —
+  // that's the period they're actually closing out, and "Current" is nearly empty.
+  const cur=getPeriodByOffset(0);
+  const cutoff=new Date(cur.start);cutoff.setDate(cutoff.getDate()+SUP_LAST_DEFAULT_DAYS);
+  if(new Date()>=cutoff||!activeSup)return;
+  const seq=_supPeriodSetSeq;
+  supLastPeriodUnsent(activeSup.jobsites||[]).then(pending=>{
+    if(!pending.length||seq!==_supPeriodSetSeq||_supPeriodMode!=='current')return;
+    setSupPeriod('last');
+    const n=new Set(pending.map(p=>p.empId)).size;
+    showNotif('ℹ','Showing last pay period',`${n} timecard${n!==1?'s':''} not yet sent to office`,'#c47f17',3200);
+  });
+}
+
+/* v49.15: last period's (empId, jobsite, stage) pairs at the given sites that haven't reached
+   the office yet (stage below sup_submitted; no status row = open). Optional empId narrows it
+   to one employee. Returns [] on any error — callers treat it as "nothing pending". */
+async function supLastPeriodUnsent(sites,empId){
+  if(!sites||!sites.length)return [];
+  const last=getPeriodByOffset(1);
+  let q=sb.from('punches').select('employee_id,jobsite').in('jobsite',sites)
+    .gte('clock_in',last.start.toISOString()).lte('clock_in',last.end.toISOString());
+  if(empId)q=q.eq('employee_id',empId);
+  const {data,error}=await q;
+  if(error){console.warn('supLastPeriodUnsent error:',error.message);return [];}
+  const statusMap=await getAllStatusForPeriod(last.start);
+  const seen=new Set(),out=[];
+  (data||[]).forEach(r=>{
+    if(!r.employee_id)return;
+    const key=r.employee_id+'|'+r.jobsite;if(seen.has(key))return;seen.add(key);
+    const row=(statusMap[r.employee_id]||[]).find(s=>s.jobsite===r.jobsite);
+    const stage=row?row.stage:TC_STAGE.OPEN;
+    if(!stageAtLeast(stage,TC_STAGE.SUP))out.push({empId:r.employee_id,jobsite:r.jobsite,stage});
+  });
+  return out;
 }
 
 function setSupPeriod(mode){
   _supPeriodMode=mode;
+  _supPeriodSetSeq++;
   const _ff=document.getElementById('s-filter-flags');if(_ff)_ff.value='';
   // highlight active button
   ['today','yesterday','current','last','prev2'].forEach(m=>{
@@ -2359,9 +2399,12 @@ async function submitSiteToOffice(){
   // v49.8: only interrupt the supervisor when at least one open punch has no employee-provided
   // estimate (v49.7) to show — if everyone still in already gave their own estimate, there's
   // nothing to review, so skip straight to the send confirmation.
+  // v49.15: scoped to the period being sent (and this supervisor's sites) — unscoped, the first
+  // day of a new period flagged everyone's Monday-morning punch while sending LAST period.
   const readyEmpIds=[...new Set(readyPairs.map(p=>p.empId))];
   const {data:openData}=await sb.from('punches').select('*')
-    .in('employee_id',readyEmpIds).is('clock_out',null);
+    .in('employee_id',readyEmpIds).in('jobsite',sites).is('clock_out',null)
+    .gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString());
   const openPunches=(openData||[]).map(dbRowToEntry);
   if(openPunches.some(p=>!p.employeeEstimatedOut)){
     showEstModal(openPunches,async()=>{
@@ -2462,8 +2505,10 @@ async function supSendEmployeeToOffice(empId,empName){
   const siteList=sendable.map(r=>r.jobsite).sort().join(', ');
   // v49.6: same still-clocked-in heads-up as the batch send \u2014 FYI only, nothing stored.
   // v49.8: skip it if the employee already gave their own estimate \u2014 nothing to review.
+  // v49.15: scoped to the period + sites being sent (see submitSiteToOffice).
   const {data:openData}=await sb.from('punches').select('*')
-    .eq('employee_id',empId).is('clock_out',null);
+    .eq('employee_id',empId).in('jobsite',sendable.map(r=>r.jobsite)).is('clock_out',null)
+    .gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString());
   const openPunches=(openData||[]).map(dbRowToEntry);
   if(openPunches.some(p=>!p.employeeEstimatedOut)){
     showEstModal(openPunches,async()=>{
@@ -2497,10 +2542,28 @@ function confirmSendEmployeeToOffice(empId,empName,period,periodLabel,sendable,s
    sites that employee hasn't submitted yet (open → emp_submitted). Blocked by unresolved
    auto-clocks / pending lunch waives, same gate as everywhere else in the app. No audit
    marker is kept — once forced, it's indistinguishable from a normal employee submission. */
-async function forceSubmitEmployee(empId,empName){
+async function forceSubmitEmployee(empId,empName,skipLastPeriodCheck){
   if(!activeSup)return;
   const sites=activeSup.jobsites||[];
   const period=supStatusPeriod();
+
+  // v49.15: the log opens on "Current", so on the first day of a new period it's easy to
+  // force-submit the NEW (barely started) period when the intent was to close out last one.
+  // If this employee still hasn't submitted last period at these sites, check first.
+  if(!skipLastPeriodCheck&&_supPeriodMode!=='last'&&_supPeriodMode!=='prev2'){
+    const last=getPeriodByOffset(1);
+    const pending=(await supLastPeriodUnsent(sites,empId)).filter(p=>p.stage===TC_STAGE.OPEN);
+    if(pending.length){
+      const fmtP=p=>`${p.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${p.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
+      showCustomConfirm(
+        `Force submit the current period?`,
+        `You're viewing the current pay period (${fmtP(period)}), but ${empName} still hasn't submitted last period (${fmtP(last)}). To submit last period, cancel and switch the log to "Last" first.`,
+        `Only continue if you really mean to submit ${empName}'s in-progress current period.`,
+        'Submit current anyway','var(--amber)',
+        ()=>forceSubmitEmployee(empId,empName,true));
+      return;
+    }
+  }
   const periodLabel=`${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
 
   // Fresh punches for this employee at the supervisor's sites, within the status period.
@@ -5440,7 +5503,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.14',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.15',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5489,7 +5552,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.14',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.15',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

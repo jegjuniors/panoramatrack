@@ -1,7 +1,7 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.14 *(supervisor "Updated since sent" flag now also clears on an admin re-export — it compares against `exported_at` once a site is exported, not `sup_submitted_at` alone — no migration, deployable)*
-**Last handoff update:** September 8, 2026
+**Version:** v49.15 *(first-day-of-new-period fixes: send-to-office's still-clocked-in check is scoped to the period being sent; supervisor log opens on "Last" early in a new period; Force submit warns when aimed at the new period — no migration, deployable)*
+**Last handoff update:** September 29, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
 > Everything under "Reference & History" is background: architecture, DB schema, standing build
@@ -11,74 +11,38 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.14 — supervisor "Updated since sent" flag clears on an admin re-export too.** `app.js`/
-  `index.html` only, no migration, deployable. Follow-up to v49.13, caught in real testing:
-  after a re-export the admin Submissions panel cleared its "Updated since export" pill (v49.13
-  works) but the **supervisor** Time Log still showed "⚠️ Updated since sent" for the same
-  employees. Cause: the supervisor flag compared each punch's `updated_at` against
-  `sup_submitted_at` (when *the supervisor* sent to office), and a re-export re-stamps
-  `exported_at` but never `sup_submitted_at`. Fix: new `officeSnapshotAt(statusRow)` helper —
-  returns `exported_at` once a site is `exported`, else `sup_submitted_at` ("the most recent
-  point the office had a current copy"). Both spots in `refreshSupLog` (the card-level
-  `changedSinceSent` pill and the per-punch badge) now compare against `officeSnapshotAt(r)`
-  instead of `r.sup_submitted_at`. Before export nothing changes; after a re-export the
-  supervisor's flag clears in step with the admin's. `exported_at` was already on the
-  supervisor's status rows (`select('*')`), so no query change. Version badge/`app_version` → v49.14.
-  **Verified on the live app Sept 8, 2026** — a re-export clears the pill in both the admin
-  Submissions panel and the supervisor Time Log. Same session: Sandy Enriquez's Wed-Sep-2
-  duplicate punch was manually corrected in the admin correction modal.
-- **v49.13 — one "changed since export" flag, not two; re-export clears it.** `app.js`/`index.html`
-  only, no migration, deployable. Two Julio asks, from a screenshot of an employee showing both
-  "⚠️ After submit" and "⚠️ Updated since sent" stacked on the same punches:
-  1. **Removed the older v44.0 "After submit" flag entirely** (`isOutOfSubmission()` deleted, all
-     four call sites removed — the per-punch badge + card-summary count in `refreshSupLog`, the
-     `Punch after submit` flag-part in `refreshAdminEmpCorrect`, the `N punches after submit`
-     flag-part in `refreshSubmissionsPanel`). It fired on the same punches as v49.12's
-     `changedSince`/"Updated since sent/export" flag, just detected via `clock_in` instead of
-     `updated_at`, so it was a strict-subset duplicate once a card reached the later stage. The
-     v49.12 flag stays and is now the only one. Trade-off Julio accepted: between an employee
-     submitting and the supervisor sending to office there's no longer any flag for "employee
-     kept working after handing in their card" — once sent/exported, "Updated since sent/export"
-     covers new punches and edits both.
-  2. **`startReExport` now re-stamps `exported_at`** (via `setTimecardStage(…, EXPORTED, …)` —
-     `stage` is already `exported`, the partial upsert leaves `emp/sup_submitted_at` intact) on
-     every re-exported employee's exported site-rows, for **both** re-export buttons (the
-     unconditional "Re-export N already-exported" and the v49.12 "Re-export N changed only").
-     Fires from `_pendingExportStampFn`, so only after the file actually generates. Before this,
-     v44.3's "no stamping on re-export" meant the "Updated since export" flag compared against the
-     *original* export time forever — regenerating the file with corrected data never cleared it.
-     Now a re-export means `exported_at` = "when the current file was produced", and the flag goes
-     quiet for that batch.
-  - Bumped version badge/`app_version` to v49.13. **Note:** v49.13 only cleared the *admin* panel's
-    flag on re-export; v49.14 (above) extends the same clearing to the supervisor log.
-- **✅ v49.12's `migration_punch_updated_at_fix.sql` has now been run in Supabase** (Julio, Sept 8,
-  2026). The original `migration_punch_updated_at.sql` created the `trg_punch_updated_at` trigger
-  *before* its own backfill, so the trigger clobbered the backfill and stamped every row with
-  `now()` — the false-positive flood (every employee "⚠️ Updated since export"). The `_fix.sql`
-  disabled the trigger, redid the backfill (`updated_at = clock_in`), re-enabled it. **The
-  "Updated since sent/export" flags are now trustworthy** — a lit flag means punch data actually
-  changed since that submit/export. Real-device verification of v49.12/v49.13 behaviour is now
-  unblocked (see Next Steps).
-- **v49.12 — "updated since submit/export" flags** (`migration_punch_updated_at.sql` run in
-  Supabase, adds `punches.updated_at` + DB trigger). Red pill in the supervisor log
-  (`refreshSupLog`, vs. `sup_submitted_at`) and admin Submissions panel (`refreshSubmissionsPanel`,
-  vs. `exported_at`), a "Changed after export" per-punch flag in the admin correction modal, and
-  the changed-only re-export button. Full detail in the changelog under Reference & History.
-- **v49.0–v49.11** — settings foundation + Edge Function for submission notifications, the
-  scheduled-start confirm/flag/fix flow, several My Timecard/catch-up/edit-save bugfixes, the
-  estimated-clock-out prompt (single-field FYI-only → persisting → per-row/skip-when-covered),
-  the export overlap-summing fix (+ a crashing Excel-export bug found along the way), the
-  master-admin PDF estimate fallback, and removing the supervisor PDF checklist (+ a jsPDF glyph
-  bug fix). Full detail for each is in the changelog under Reference & History below.
+- **v49.15 — first-day-of-new-period fixes.** `app.js`/`index.html` only, no migration,
+  deployable. Julio noticed on the Monday a new pay period began: while closing out *last* period,
+  the estimated-clock-out modal popped up for employees who had just clocked in that morning.
+  1. **Send-to-office still-clocked-in check is now period-scoped.** Both `submitSiteToOffice`
+     (batch) and `supSendEmployeeToOffice` (per-employee) queried *every* open punch for the
+     employee(s), with no date filter, so a new-period punch triggered the modal when sending last
+     period. Both now also filter by `clock_in` within the period being sent and by the
+     supervisor's sites being sent.
+  2. **Supervisor log opens on "Last" in the first 2 days of a new period** (`SUP_LAST_DEFAULT_DAYS`)
+     when any of last period's (employee, site) timecards at the supervisor's sites haven't reached
+     the office (stage < `sup_submitted`). This happens in `initLogDates`, asynchronously after the
+     usual `setSupPeriod('current')`, and backs off via `_supPeriodSetSeq` if anything else picks a
+     period in the meantime (e.g. `goToSupReport`). Shows an "ℹ Showing last pay period" toast.
+  3. **Force submit guard.** `forceSubmitEmployee` on Current/Today/Yesterday now checks whether
+     that employee still has an **open** (unsubmitted) last period at these sites. If so, it asks
+     "Force submit the current period?" and points the supervisor to "Last". "Submit current anyway"
+     re-enters with `skipLastPeriodCheck`. Force submit only looks at in-period punches, so the
+     original modal was most likely a force-submit made on the default "Current" view, which would
+     have submitted the **new** period.
+  - New shared helper `supLastPeriodUnsent(sites, empId?)`. Version badge/`app_version` → v49.15.
+- **v49.12–v49.14** — "Updated since sent/export" flags (with the `updated_at` migration + its fix,
+  run Sept 8), a single flag instead of two, and re-export clearing it on both the admin and
+  supervisor sides. All verified on the live app Sept 8. Detail in the changelog.
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.14 committed and pushed. Earlier this session: v49.13 (the two-flag
-  collapse + re-export re-stamps `exported_at`) and the v49.12 SQL-fix files
-  (`migration_punch_updated_at_fix.sql` + the in-place correction to `migration_punch_updated_at.sql`).
+- **Branch:** `main` — v49.15 committed and pushed.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.14 included).
-  Ad-hoc assertion harnesses (established pattern): v49.14's `officeSnapshotAt` + the supervisor
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.15 included).
+  Ad-hoc assertion harnesses (established pattern): v49.15's `supLastPeriodUnsent` (4 assertions —
+  dedupes (emp, site) pairs, missing status row = open, `emp_submitted` still counts as unsent,
+  `sup_submitted`/`exported` excluded, empId narrowing, empty sites → []); v49.14's `officeSnapshotAt` + the supervisor
   flag predicate (7 assertions — lit when a punch changed after send and not yet re-exported,
   still lit when exported *before* the edit, clears once re-exported *after* the edit, falls back
   to `sup_submitted_at` if `exported_at` is somehow missing, not lit with no change / at
@@ -112,20 +76,25 @@
      backfill was clobbered by a statement-ordering bug — see #5.
   5. `migration_punch_updated_at_fix.sql` — **run (Sept 8, 2026).** Corrected the backfill broken
      by #4; `punches.updated_at` is now correctly seeded to each row's `clock_in`.
-  - v49.3 through v49.6, v49.11, v49.13, v49.14 added no migration.
+  - v49.3 through v49.6, v49.11, v49.13, v49.14, v49.15 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Watch the "Updated since sent/export" flag volume across the roster** over the next pay
+1. **Check the employees force-submitted on Monday Sept 21.** If any show "Submitted" for the
+   *current* period (Sept 21 – Oct 4) instead of last, send them back (or have them pull back).
+   **Real-device check v49.15 on the next period start (Mon Oct 5):** the log should open on "Last",
+   force submit on "Current" should warn, and sending last period shouldn't ask about Monday's
+   open punches.
+2. **Watch the "Updated since sent/export" flag volume across the roster** over the next pay
    period now that v49.12–v49.14 are verified and the backfill is correct. A sudden burst of
    stale flags on untouched timecards would mean something's re-stamping `updated_at`
    unexpectedly (or the backfill didn't fully take) — but the Sept 8 device check was clean.
-2. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
+3. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
    Submissions-panel `stage='exported'` divergence** noted below — worth checking whether any
    already-"final" periods exported via Excel are missing their stamp because of it.
-3. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+4. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
@@ -174,10 +143,28 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.14 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.15 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
 
 ---
+
+## ✅ v49.15 — First-day-of-new-period fixes (still-clocked-in check, log default, force-submit guard)
+
+- **Symptom (Julio, Mon Sept 21 — the first day of a new period):** the estimated-clock-out modal
+  appeared while force-submitting/sending last period, for employees who had clocked in that morning.
+- **Send-to-office scoping:** `submitSiteToOffice` and `supSendEmployeeToOffice` looked up open
+  punches with only `.is('clock_out',null)`, with no period or site filter. Both now add
+  `.in('jobsite',…)` and `clock_in` within `period.start`–`period.end`.
+- **Log default:** `initLogDates` still sets Current first. Then, if today is before
+  `cur.start + SUP_LAST_DEFAULT_DAYS` (2) and `supLastPeriodUnsent(activeSup.jobsites)` is
+  non-empty, it switches to Last and shows a toast. The `_supPeriodSetSeq` guard (bumped in
+  `setSupPeriod`) keeps it from overriding a period picked in the meantime.
+- **Force submit guard:** `forceSubmitEmployee(empId, empName, skipLastPeriodCheck)`. On a
+  non-Last/Prev2 view, if the employee has a last-period (emp, site) at stage `open`, it confirms
+  before submitting the current period.
+- **`supLastPeriodUnsent(sites, empId?)`** returns `[{empId, jobsite, stage}]` for last-period
+  punches at `sites` whose status is below `sup_submitted` (no row = `open`). It returns [] on error.
+- No migration. Version badge/`app_version` → v49.15.
 
 ## ✅ v49.14 — Supervisor "Updated since sent" flag also clears on an admin re-export
 
