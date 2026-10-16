@@ -1,7 +1,7 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.15 *(first-day-of-new-period fixes: send-to-office's still-clocked-in check is scoped to the period being sent; supervisor log opens on "Last" early in a new period; Force submit warns when aimed at the new period — no migration, deployable)*
-**Last handoff update:** September 29, 2026
+**Version:** v49.16 *(employee "Notes" box on My Timecard — shown to supervisors/admins and printed on both PDFs, never on Excel — **needs `migration_timecard_notes.sql` run in Supabase before deploying**)*
+**Last handoff update:** October 16, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
 > Everything under "Reference & History" is background: architecture, DB schema, standing build
@@ -11,36 +11,53 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.15 — first-day-of-new-period fixes.** `app.js`/`index.html` only, no migration,
-  deployable. Julio noticed on the Monday a new pay period began: while closing out *last* period,
-  the estimated-clock-out modal popped up for employees who had just clocked in that morning.
-  1. **Send-to-office still-clocked-in check is now period-scoped.** Both `submitSiteToOffice`
-     (batch) and `supSendEmployeeToOffice` (per-employee) queried *every* open punch for the
-     employee(s), with no date filter, so a new-period punch triggered the modal when sending last
-     period. Both now also filter by `clock_in` within the period being sent and by the
-     supervisor's sites being sent.
-  2. **Supervisor log opens on "Last" in the first 2 days of a new period** (`SUP_LAST_DEFAULT_DAYS`)
-     when any of last period's (employee, site) timecards at the supervisor's sites haven't reached
-     the office (stage < `sup_submitted`). This happens in `initLogDates`, asynchronously after the
-     usual `setSupPeriod('current')`, and backs off via `_supPeriodSetSeq` if anything else picks a
-     period in the meantime (e.g. `goToSupReport`). Shows an "ℹ Showing last pay period" toast.
-  3. **Force submit guard.** `forceSubmitEmployee` on Current/Today/Yesterday now checks whether
-     that employee still has an **open** (unsubmitted) last period at these sites. If so, it asks
-     "Force submit the current period?" and points the supervisor to "Last". "Submit current anyway"
-     re-enters with `skipLastPeriodCheck`. Force submit only looks at in-period punches, so the
-     original modal was most likely a force-submit made on the default "Current" view, which would
-     have submitted the **new** period.
-  - New shared helper `supLastPeriodUnsent(sites, empId?)`. Version badge/`app_version` → v49.15.
+- **v49.16 — employee notes on My Timecard.** Julio's ask: let an employee write notes about
+  their timecard. **⚠️ Requires `migration_timecard_notes.sql` to be run in Supabase first** (new
+  table `pt_timecard_notes`) — deploying the code without it just means notes silently fail to
+  load/save (every helper degrades to "no note"), nothing else breaks.
+  - **My Timecard** (`index.html` + `app.js`): a "Notes for this pay period" textarea (500-char cap)
+    between the hours total and "+ Add a missed punch". Loads per period in view (current or
+    last-period catch-up), saves on blur with a "Saving… / Saved ✓ / Couldn't save" indicator,
+    blank = delete the row. **Always editable, even when the card is locked** — it's an
+    explanation, not payroll data. Same box for supervisor-employees.
+  - **Supervisor Time Log** (`refreshSupLog`): 📝 beside the employee name + a boxed
+    "Employee note" block at the top of the expanded card (notes fetched with the same period as
+    the status rows). **Admin correction modal**: the block at the top. **Admin Submissions
+    panel**: 📝 marker on the employee row (full text is in the correction modal).
+  - **PDFs only, never Excel.** `generatePDF` (supervisor) and `generateMasterPDF` (admin) print an
+    "EMPLOYEE NOTES:" block after the totals/footnotes and above the signature line, wrapped to
+    page width; the row-overflow check reserves room for it (`pdfNoteReserve`) so it can't hit the
+    signature. Notes are fetched by *range overlap* (`period_start <= report end AND period_end >=
+    report start`), so any report range finds the notes that apply; an employee with notes from
+    more than one period in the range gets a "Mon D - Mon D:" prefix on each.
+    `generateMasterPDF` is now `async` (fetch before drawing); `doExport` fetches into
+    `exportRange.notes` before the sync `generatePDF()`.
+  - **Safety:** notes go through a new `escHtml()` before hitting `innerHTML`; PDF text goes through
+    `pdfSafeText()` (jsPDF's WinAnsi fonts print emoji/other glyphs as wrong characters — the v49.11
+    "⚠ → &" bug — so unsupported characters print as `?`).
+  - **Not built (deliberate):** no "note changed after send" flag, no history, nothing on Excel, no
+    per-punch notes.
+  - Version badge/`app_version` → v49.16.
+- **v49.15** — first-day-of-new-period fixes: send-to-office's still-clocked-in check scoped to
+  the period being sent, supervisor log opens on "Last" in the first 2 days of a period, Force
+  submit warns when aimed at the new period. No migration. Detail in the changelog.
 - **v49.12–v49.14** — "Updated since sent/export" flags (with the `updated_at` migration + its fix,
   run Sept 8), a single flag instead of two, and re-export clearing it on both the admin and
   supervisor sides. All verified on the live app Sept 8. Detail in the changelog.
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.15 committed and pushed.
+- **Branch:** `main` — v49.16 committed and pushed (code deployable, but see the migration below).
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.15 included).
-  Ad-hoc assertion harnesses (established pattern): v49.15's `supLastPeriodUnsent` (4 assertions —
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.16 included).
+  Ad-hoc assertion harnesses (established pattern): v49.16's notes helpers (38 assertions, run
+  against the *real* helper block extracted from `app.js` with a mocked Supabase client — HTML
+  escaping incl. a `<script>` note, PDF-safe text keeps curly quotes/dashes/Latin-1 and swaps emoji
+  for `?`, save = trimmed upsert on `employee_id,period_start` with period_end, 500-char cap, blank
+  note deletes, upsert/delete errors return `ok:false`, read errors degrade to "no note", blank
+  notes skipped, range fetch uses `period_start <= to AND period_end >= from`, PDF lines wrap and
+  match employee ids as string or number, multi-period notes get the date prefix, reserve height
+  math); v49.15's `supLastPeriodUnsent` (4 assertions —
   dedupes (emp, site) pairs, missing status row = open, `emp_submitted` still counts as unsent,
   `sup_submitted`/`exported` excluded, empId narrowing, empty sites → []); v49.14's `officeSnapshotAt` + the supervisor
   flag predicate (7 assertions — lit when a punch changed after send and not yet re-exported,
@@ -76,34 +93,44 @@
      backfill was clobbered by a statement-ordering bug — see #5.
   5. `migration_punch_updated_at_fix.sql` — **run (Sept 8, 2026).** Corrected the backfill broken
      by #4; `punches.updated_at` is now correctly seeded to each row's `clock_in`.
+  6. **`migration_timecard_notes.sql` — NOT YET RUN.** Creates `pt_timecard_notes` (employee_id,
+     period_start, period_end, note, updated_at; unique on employee_id+period_start; RLS disabled
+     like the rest). Run in the Supabase SQL editor before relying on v49.16's notes.
   - v49.3 through v49.6, v49.11, v49.13, v49.14, v49.15 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
 
 ## 3. Next Steps
 
-1. **Check the employees force-submitted on Monday Sept 21.** If any show "Submitted" for the
+1. **Run `migration_timecard_notes.sql` in the Supabase SQL editor, then real-device check v49.16:**
+   write a note on My Timecard (tap away → "Saved ✓"; reopen → it's still there; switch to last
+   period → box reflects that period), confirm it shows in the supervisor Time Log (📝 + boxed
+   block), the admin correction modal, and the Submissions-panel 📝; export a supervisor PDF and a
+   master PDF and eyeball the "EMPLOYEE NOTES:" block (a long ~500-char note near the signature
+   line on a full page is the case most worth checking — layout can't be rendered here); confirm
+   an Excel export has no note. Also try a note with an emoji (PDF should show `?`, not garbage).
+2. **Check the employees force-submitted on Monday Sept 21.** If any show "Submitted" for the
    *current* period (Sept 21 – Oct 4) instead of last, send them back (or have them pull back).
    **Real-device check v49.15 on the next period start (Mon Oct 5):** the log should open on "Last",
    force submit on "Current" should warn, and sending last period shouldn't ask about Monday's
    open punches.
-2. **Watch the "Updated since sent/export" flag volume across the roster** over the next pay
+3. **Watch the "Updated since sent/export" flag volume across the roster** over the next pay
    period now that v49.12–v49.14 are verified and the backfill is correct. A sudden burst of
    stale flags on untouched timecards would mean something's re-stamping `updated_at`
    unexpectedly (or the backfill didn't fully take) — but the Sept 8 device check was clean.
-3. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
+4. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
    Submissions-panel `stage='exported'` divergence** noted below — worth checking whether any
    already-"final" periods exported via Excel are missing their stamp because of it.
-4. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+5. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
-4. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+6. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-5. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+7. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
@@ -143,8 +170,58 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.15 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.16 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.16 — Employee notes on My Timecard (supervisor/admin visible, printed on PDFs)
+
+**Status:** coded, `node --check` + 38-assertion harness pass, pushed to `main`. **Needs
+`migration_timecard_notes.sql` run in Supabase.** Not yet exercised against the real UI/PDF.
+
+**Context:** Julio wanted a "Notes" text entry on My Timecard so an employee can leave notes about
+their timecard. Design confirmed before building: visible to supervisors and admins and printed on
+the PDFs, **not** on Excel (the payroll template has no spare cell); one note per employee per pay
+period; always editable (even after submit/export — it's an explanation, not payroll data).
+
+**Storage:** new table `pt_timecard_notes` (`employee_id`, `period_start`, `period_end`, `note`,
+`updated_at`; unique on `employee_id,period_start`; RLS disabled like the rest). A separate table
+rather than a column on `pt_timecard_status`, which is one row per employee per period **per
+jobsite** and only exists once a card is submitted. `period_end` is stored so the PDFs can find
+every note overlapping an arbitrary report range.
+
+**Code (`app.js`, `index.html`):**
+- Helper block next to `setTimecardStage`: `NOTE_MAX` (500), `escHtml`, `pdfSafeText`,
+  `getEmployeeNote`, `getNotesForPeriod`, `getNotesForRange`, `saveEmployeeNote`, `noteBlockHtml`,
+  `pdfNoteLinesFor`, `pdfNoteReserve`. Every read degrades to "no note" on error; saves return
+  `{ok,error}`.
+- **My Timecard:** `#mytc-notes` box in `index.html`; `loadMyTcNote()` (called at the end of
+  `openMyTimecard`, race-guarded on employee/period identity, won't overwrite text being typed) and
+  `saveMyTcNote()` (on blur; skips no-op saves via `_myTcNoteSaved`; period/employee captured at
+  call time so a period switch mid-save can't misfile it). The box is cleared at the top of
+  `openMyTimecard` so a previous period's note never flashes.
+- **Supervisor Time Log (`refreshSupLog`):** `getNotesForPeriod(statusPeriod.start)` alongside the
+  status fetch; 📝 in the card header + `noteBlockHtml` at the top of the card body.
+- **Admin correction modal (`refreshAdminEmpCorrect`):** note fetched in the existing
+  `Promise.all`, block prepended above the punch list. **Submissions panel
+  (`refreshSubmissionsPanel`):** note map fetched in the existing `Promise.all`; 📝 beside the name.
+- **PDFs:** `doExport` sets `exportRange.notes` before the (sync) `generatePDF()`;
+  `generateMasterPDF` became `async` and fetches at the top (its only caller is the format-picker
+  button, which ignores the return). Both print "EMPLOYEE NOTES:" + wrapped lines after the
+  totals/footnotes, above the signature line, and reserve the height in the page-overflow check
+  (`PH-50-noteReserve`). Multi-period notes for one employee get a "Mon D - Mon D:" prefix.
+- **Safety:** `escHtml` on every on-screen note; `pdfSafeText` swaps non-WinAnsi characters
+  (emoji etc.) for `?` — same jsPDF font limitation as the v49.11 "⚠ → &" bug.
+- Version badge/`app_version` → v49.16.
+
+**Not built (deliberate):** a flag when a note changes after send/export, note history, notes on
+Excel, per-punch notes.
+
+**Verified:** `node --check app.js`; 38-assertion harness running the real helper block extracted
+from `app.js` against a mocked Supabase client (see Active State for the coverage list). Not
+exercised against the real UI/Supabase/jsPDF — layout of a long note near the signature line in
+particular can't be rendered here.
 
 ---
 

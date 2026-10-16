@@ -325,6 +325,84 @@ async function setTimecardStage(empId,period,stage,jobsite){
   return {ok:true};
 }
 
+/* ─── Timecard notes (v49.16) — pt_timecard_notes, one per employee per pay period ─────────
+   Written by the employee from My Timecard; read-only for supervisors/admins (supervisor Time
+   Log, admin correction modal, Submissions panel marker) and printed on both PDFs (never on
+   the Excel pack). Always editable — it's an explanation, not payroll data. */
+const NOTE_MAX=500;
+function escHtml(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+// jsPDF's built-in fonts only cover WinAnsi — an emoji or other glyph outside it renders as a
+// wrong character (see the v49.11 ⚠ → & bug). Swap anything unsupported for "?" before printing.
+function pdfSafeText(s){
+  return String(s==null?'':s).replace(/[^\x20-\x7E\xA0-\xFF\n–—‘’“”•…]/g,'?');
+}
+// One employee's note for one period → text ('' if none). Failures read as "no note".
+async function getEmployeeNote(empId,periodStart){
+  const {data,error}=await sb.from('pt_timecard_notes').select('note')
+    .eq('employee_id',empId).eq('period_start',toDateStr(periodStart)).maybeSingle();
+  if(error){console.warn('getEmployeeNote error:',error.message);return '';}
+  return (data&&data.note)||'';
+}
+// Everyone's note for one period → { employee_id: note }.
+async function getNotesForPeriod(periodStart){
+  const {data,error}=await sb.from('pt_timecard_notes').select('employee_id,note')
+    .eq('period_start',toDateStr(periodStart));
+  if(error){console.warn('getNotesForPeriod error:',error.message);return {};}
+  const map={};
+  (data||[]).forEach(r=>{if(r.note)map[r.employee_id]=r.note;});
+  return map;
+}
+// Every note whose pay period overlaps a report range (fromStr/toStr are 'YYYY-MM-DD'), so a
+// PDF for any range — a pay period, or a custom one — picks up the notes that apply to it.
+async function getNotesForRange(fromStr,toStr){
+  if(!fromStr||!toStr)return [];
+  const {data,error}=await sb.from('pt_timecard_notes').select('employee_id,period_start,period_end,note')
+    .lte('period_start',toStr).gte('period_end',fromStr).order('period_start',{ascending:true});
+  if(error){console.warn('getNotesForRange error:',error.message);return [];}
+  return (data||[]).filter(r=>r.note);
+}
+// Save (or clear, when blank) one employee's note for a period. Returns {ok,error}.
+async function saveEmployeeNote(empId,period,text){
+  const note=String(text||'').trim().slice(0,NOTE_MAX);
+  const ps=toDateStr(period.start);
+  if(!note){
+    const {error}=await sb.from('pt_timecard_notes').delete().eq('employee_id',empId).eq('period_start',ps);
+    if(error){console.warn('saveEmployeeNote delete error:',error.message);return {ok:false,error};}
+    return {ok:true};
+  }
+  const {error}=await sb.from('pt_timecard_notes').upsert(
+    {employee_id:empId,period_start:ps,period_end:toDateStr(period.end),note,updated_at:new Date().toISOString()},
+    {onConflict:'employee_id,period_start'});
+  if(error){console.warn('saveEmployeeNote error:',error.message);return {ok:false,error};}
+  return {ok:true};
+}
+// Wrapped note block for the supervisor/admin screens.
+function noteBlockHtml(note,marginBottom){
+  if(!note)return '';
+  return `<div style="background:var(--bg3);border:0.5px solid var(--bdr2);border-left:3px solid var(--amber);border-radius:var(--radius);padding:8px 10px;margin:0 0 ${marginBottom||0}px;">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--txt2);margin-bottom:3px;">📝 Employee note</div>
+    <div style="font-size:12px;color:var(--txt);line-height:1.45;white-space:pre-wrap;word-break:break-word;">${escHtml(note)}</div>
+  </div>`;
+}
+// PDF side: lines to print for one employee, from the rows getNotesForRange returned. When an
+// employee has notes from more than one pay period in the range, each gets a period prefix.
+function pdfNoteLinesFor(doc,noteRows,empId,width){
+  const mine=(noteRows||[]).filter(r=>String(r.employee_id)===String(empId));
+  if(!mine.length)return [];
+  const fmtD=s=>new Date(s+'T00:00:00').toLocaleDateString([],{month:'short',day:'numeric'});
+  const lines=[];
+  doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+  mine.forEach(r=>{
+    const prefix=mine.length>1?`${fmtD(r.period_start)} - ${fmtD(r.period_end)}: `:'';
+    doc.splitTextToSize(pdfSafeText(prefix+r.note),width).forEach(l=>lines.push(l));
+  });
+  return lines;
+}
+const PDF_NOTE_LINE_H=3.6;
+function pdfNoteReserve(lines){return lines.length?lines.length*PDF_NOTE_LINE_H+8:0;}
+
 // v49.x: fires the submission-notify Edge Function so the office gets emailed whenever a
 // supervisor sends timecards in (batch send, per-employee send, or a supervisor's own
 // self-submission — see HANDOFF.md). Deliberately NOT called from the admin override path.
@@ -1114,6 +1192,10 @@ async function openMyTimecard(emp,offset){
   document.getElementById('mytc-period').textContent=
     `${isCatchup?'Reviewing last pay period':'Current pay period'}: ${from.toLocaleDateString([],{month:'short',day:'numeric'})} – ${to.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
   document.getElementById('mytc-list').innerHTML='<p style="text-align:center;color:var(--txt2);padding:20px;font-size:13px;">Loading…</p>';
+  // v49.16: clear the notes box while the new period loads so a stale period's note never shows
+  document.getElementById('mytc-notes-input').value='';
+  document.getElementById('mytc-notes-status').textContent='';
+  _myTcNoteSaved='';
   showScreen('screen-mytc');
 
   // v47.0: per-site lock model. Build a map of {jobsite: stage} from the status rows.
@@ -1157,6 +1239,39 @@ async function openMyTimecard(emp,offset){
   renderMyTcTotal();
   renderMyTcList();
   renderMyTcPeriodBar();
+  loadMyTcNote();
+}
+
+/* v49.16: notes box on My Timecard. Loads for the period in view; saves on blur. Always
+   editable (even when the card is locked) — see the Timecard notes block near setTimecardStage. */
+let _myTcNoteSaved=''; // last text known to be in the DB for the period in view (skips no-op saves)
+async function loadMyTcNote(){
+  const emp=myTcEmp,period=myTcPeriod;
+  if(!emp||!period)return;
+  const text=await getEmployeeNote(emp.id,period.start);
+  if(myTcEmp!==emp||myTcPeriod!==period)return; // switched period/employee while loading
+  const el=document.getElementById('mytc-notes-input');
+  if(!el||document.activeElement===el)return; // don't clobber something being typed
+  el.value=text;
+  _myTcNoteSaved=text.trim();
+}
+async function saveMyTcNote(){
+  const emp=myTcEmp,period=myTcPeriod;
+  const el=document.getElementById('mytc-notes-input');
+  const status=document.getElementById('mytc-notes-status');
+  if(!emp||!period||!el)return;
+  const text=el.value.trim().slice(0,NOTE_MAX);
+  if(text===_myTcNoteSaved)return;
+  status.style.color='var(--txt3)';status.textContent='Saving…';
+  const res=await saveEmployeeNote(emp.id,period,text);
+  if(myTcEmp!==emp||myTcPeriod!==period)return;
+  if(res.ok){
+    _myTcNoteSaved=text;
+    status.style.color='var(--green)';status.textContent='Saved ✓';
+    setTimeout(()=>{if(status.textContent==='Saved ✓')status.textContent='';},2500);
+  } else {
+    status.style.color='var(--red)';status.textContent='Couldn’t save — check connection, then tap the box and tap away to retry';
+  }
 }
 
 /* v45.0: does this employee have an unsubmitted LAST period? Re-checked fresh every time the
@@ -2191,6 +2306,7 @@ async function refreshSupLog(){
   // surfaces out-of-submission punches + Force Submit for stragglers at this supervisor's sites.
   const statusPeriod=supStatusPeriod();
   const statusMap=await getAllStatusForPeriod(statusPeriod.start);
+  const notesMap=await getNotesForPeriod(statusPeriod.start); // v49.16: employee notes for this period
   if(_mySeq!==_supLogSeq)return; // re-guard: the extra async call could have been superseded
 
   // Update export preview with same date range
@@ -2297,12 +2413,14 @@ async function refreshSupLog(){
     }).join('');
 
     const cardId=`emp-card-${empId}`;
+    const empNote=notesMap[empId]||''; // v49.16
     return `<div class="emp-card" style="border-left:3px solid ${chip.border};">
       <div class="emp-card-header" onclick="toggleEmpCard('${cardId}')">
         <div>
           <p style="font-size:14px;font-weight:600;color:var(--txt);margin:0;">${data.name}
             <span class="badge" style="background:${chip.bg};color:${chip.color};margin-left:6px;font-size:10px;vertical-align:middle;">${chip.label}</span>
             ${changedSinceSent?`<span class="badge" style="background:#f7dede;color:#7a2020;margin-left:6px;font-size:10px;vertical-align:middle;">⚠️ Updated since sent</span>`:''}
+            ${empNote?`<span title="Employee left a note — open the card to read it" style="margin-left:6px;font-size:13px;vertical-align:middle;">📝</span>`:''}
             ${forceBtn}${sendBtn}${sendBackBtn}
           </p>
           <p class="emp-summary">${summary}</p>
@@ -2310,6 +2428,7 @@ async function refreshSupLog(){
         <span style="font-size:18px;color:var(--txt3);" id="${cardId}-chevron">▸</span>
       </div>
       <div class="emp-card-body" id="${cardId}">
+        ${noteBlockHtml(empNote,8)}
         <div style="overflow-x:auto;">
           <table style="min-width:420px;">
             <thead><tr><th>Clock in</th><th>Jobsite</th><th>Clock out</th><th>Activity</th><th>Hrs</th><th></th></tr></thead>
@@ -3595,7 +3714,7 @@ function consolidatePunchesByDay(punches){
   return rows.sort((a,b)=>a.date-b.date||a.jobsite.localeCompare(b.jobsite));
 }
 
-function generateMasterPDF(){
+async function generateMasterPDF(){
   const {jsPDF}=window.jspdf;
   const logs=_masterLogs||masterExportRange.logs||[];
   if(!logs.length){showCustomAlert('No data','No punch records to export.');return}
@@ -3604,6 +3723,10 @@ function generateMasterPDF(){
   const fmtTime=d=>d instanceof Date?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'—';
   const fromV=document.getElementById('m-log-from').value;
   const toV=document.getElementById('m-log-to').value;
+  // v49.16: employee notes overlapping this report range, printed on each employee's timecard.
+  // (This function became async for the fetch — its only caller is the format-picker button,
+  // which ignores the return value. A failed fetch just means no notes.)
+  const noteRows=await getNotesForRange(fromV,toV);
   const periodFrom=fromV?new Date(fromV+'T00:00:00').toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'}):'';
   const periodTo=toV?new Date(toV+'T00:00:00').toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'}):'';
 
@@ -3667,6 +3790,9 @@ function generateMasterPDF(){
       const emp=empMap[empId];
       const rows=consolidatePunchesByDay(emp.punches);
       const allSites=[...emp.sites].sort().join(', ');
+      // v49.16: this employee's note(s), wrapped to the page width; reserve room for them below
+      const noteLines=pdfNoteLinesFor(doc,noteRows,empId,CW);
+      const noteReserve=pdfNoteReserve(noteLines);
       let y=MT;
 
       // ── HEADER BAND ──
@@ -3723,7 +3849,7 @@ function generateMasterPDF(){
         if(!taskLines.length)taskLines.push('—');
         const rH=Math.max(ROW_H,taskLines.length*lineH+2);
 
-        if(y+rH>PH-50){
+        if(y+rH>PH-50-noteReserve){
           doc.addPage();y=MT;
           doc.setFillColor(...GREEN);doc.rect(ML,y,CW,7,'F');
           doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...WHITE);
@@ -3794,6 +3920,14 @@ function generateMasterPDF(){
         doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(214,123,17);
         doc.text('Hours marked (est.) are still clocked in — shown using the employee’s own estimated end time and are PRELIMINARY until they actually clock out.',ML,y);
         y+=4.5;doc.setTextColor(...BLACK);
+      }
+      // ── Employee notes (v49.16) ──
+      if(noteLines.length){
+        doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...BLACK);
+        doc.text('EMPLOYEE NOTES:',ML,y);y+=4;
+        doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+        noteLines.forEach(l=>{doc.text(l,ML,y);y+=PDF_NOTE_LINE_H;});
+        y+=2;
       }
 
       // ── Signature line ──
@@ -4486,6 +4620,9 @@ function proceedIncludeDups(){
 // checkDupsAndProceed()/proceedSkipDups()/proceedIncludeDups() above.
 async function doExport(){
   const isPrelim=exportRange.isPrelim;
+  // v49.16: employee notes overlapping this report range — printed on each employee's timecard.
+  // generatePDF() is synchronous, so they're fetched here (a failed fetch just means no notes).
+  exportRange.notes=await getNotesForRange(toDateStr(exportRange.from),toDateStr(exportRange.to));
   try{
     generatePDF();
   }catch(pdfErr){
@@ -4600,6 +4737,9 @@ function generatePDF(){
     const emp=empMap[empId];
     const rows=consolidatePunchesByDay(emp.punches);
     const allSites=[...emp.sites].sort().join(', ');
+    // v49.16: this employee's note(s), wrapped to the page width; reserve room for them below
+    const noteLines=pdfNoteLinesFor(doc,exportRange.notes,empId,CW);
+    const noteReserve=pdfNoteReserve(noteLines);
     let y=MT;
 
     // ── HEADER BAND ──
@@ -4691,8 +4831,8 @@ function generatePDF(){
       const lineH=4;
       const rH=Math.max(ROW_H, taskLines.length*lineH+2);
 
-      // Check if we'd overflow the page — leave room for total + footnotes + sig
-      if(y+rH>PH-50){
+      // Check if we'd overflow the page — leave room for total + footnotes + notes + sig
+      if(y+rH>PH-50-noteReserve){
         // Add a continuation page
         doc.addPage();
         y=MT;
@@ -4790,6 +4930,14 @@ function generatePDF(){
       doc.text('Hours marked (est.) are based on an estimated clock-out provided by the supervisor at time of preliminary submission.',ML,y);
       y+=5;doc.setTextColor(...BLACK);
     }
+    // ── Employee notes (v49.16) ──
+    if(noteLines.length){
+      doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...BLACK);
+      doc.text('EMPLOYEE NOTES:',ML,y);y+=4;
+      doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+      noteLines.forEach(l=>{doc.text(l,ML,y);y+=PDF_NOTE_LINE_H;});
+      y+=2;
+    }
     // ── Signature line ──
     const sigY=Math.max(y+10,PH-MT-25);
     doc.setFont('helvetica','normal');
@@ -4878,13 +5026,14 @@ async function refreshAdminEmpCorrect(){
     `${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
   // v47.6: also fetch this employee's status rows so out-of-submission can be checked per punch
   // (needs each punch's own jobsite's row — same helper the My Timecard panel uses).
-  const [punchRes,statusRows]=await Promise.all([
+  const [punchRes,statusRows,empNote]=await Promise.all([
     sb.from('punches').select('*')
       .eq('employee_id',_adminCorrectEmpId)
       .gte('clock_in',period.start.toISOString())
       .lte('clock_in',period.end.toISOString())
       .order('clock_in',{ascending:false}),
-    getEmployeeStatusRows(_adminCorrectEmpId,period.start)
+    getEmployeeStatusRows(_adminCorrectEmpId,period.start),
+    getEmployeeNote(_adminCorrectEmpId,period.start) // v49.16: employee's note for this period
   ]);
   const {data,error}=punchRes;
   const list=document.getElementById('admin-correct-list');
@@ -4895,7 +5044,7 @@ async function refreshAdminEmpCorrect(){
   // v47.6: per-punch flags — the same categories the Submissions panel already rolls up
   // into the employee-level "⚠️ ..." summary one screen up, surfaced per punch here so the admin
   // can see exactly which record needs attention instead of opening each one to check.
-  list.innerHTML=entries.map(e=>{
+  list.innerHTML=noteBlockHtml(empNote,6)+entries.map(e=>{
     const hrs=paidHours(e);
     const row=statusRows.find(r=>r.jobsite===e.jobsite)||null;
     const autoFlag=e.autoClocked&&!e.editedAfterAuto;
@@ -4948,9 +5097,10 @@ async function refreshSubmissionsPanel(){
   const periodLabel=`${period.start.toLocaleDateString([],{month:'short',day:'numeric'})} – ${period.end.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}`;
   const lbl=document.getElementById('sub-period-label');if(lbl)lbl.textContent=periodLabel;
 
-  const [statusMap,punchRes]=await Promise.all([
+  const [statusMap,punchRes,notesMap]=await Promise.all([
     getAllStatusForPeriod(period.start),
-    sb.from('punches').select('*').gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString())
+    sb.from('punches').select('*').gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString()),
+    getNotesForPeriod(period.start) // v49.16: employees with a note get a 📝 marker on their row
   ]);
   if(punchRes.error){container.innerHTML='<p style="color:var(--red);">Error loading punches: '+punchRes.error.message+'</p>';return;}
   const allPunches=(punchRes.data||[]).map(dbRowToEntry);
@@ -5065,7 +5215,7 @@ async function refreshSubmissionsPanel(){
 
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:0.5px solid var(--bdr);gap:8px;flex-wrap:wrap;">
         <div style="min-width:0;">
-          <span onclick="openAdminEmpCorrect('${empId}','${name.replace(/'/g,"\\'")}')" style="font-size:13px;color:var(--blue-d);font-weight:600;cursor:pointer;text-decoration:underline;text-decoration-color:var(--bdr2);">${name}</span>${statusHtml}
+          <span onclick="openAdminEmpCorrect('${empId}','${name.replace(/'/g,"\\'")}')" style="font-size:13px;color:var(--blue-d);font-weight:600;cursor:pointer;text-decoration:underline;text-decoration-color:var(--bdr2);">${name}</span>${notesMap[empId]?'<span title="Employee left a note — open their name to read it" style="margin-left:6px;font-size:13px;">📝</span>':''}${statusHtml}
           ${hasFlag?`<div style="font-size:11px;color:${blocked?'#e07070':'var(--amber)'};margin-top:2px;">⚠️ ${flagParts.join(' · ')}</div>`:''}
         </div>
         <div style="display:flex;align-items:center;flex-shrink:0;">
@@ -5503,7 +5653,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.15',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.16',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5552,7 +5702,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.15',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.16',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
