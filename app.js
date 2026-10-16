@@ -222,6 +222,23 @@ function needsStartTimeConfirm(entry){
   const opts=computeStartTimeOptions(entry.in);
   return !!(opts&&opts.length);
 }
+// v49.17: did an edit actually move the clock-in? The edit modals fill their datetime-local field
+// via toLocal(), which drops seconds, so the value handed back on save is always a whole minute
+// while the stored punch (e.g. 06:51:37.412) is not. Comparing exact milliseconds (v49.5) made
+// EVERY save look like a clock-in change and wiped declared_start_time, re-flagging the punch.
+// Compare at the same minute precision the field has.
+function clockInMinuteChanged(oldIn,newIn){
+  return Math.floor(newIn.getTime()/60000)!==Math.floor(oldIn.getTime()/60000);
+}
+// v49.17: supervisor send-to-office gate. Splits "ready" (empId, jobsite) pairs into those that
+// can go and those held back because that employee has a punch at that site still needing a
+// start-time selection (same tier as an unresolved auto-clock/pending waive for the admin).
+function splitHeldByStartTime(pairs,punches){
+  const heldKeys=new Set((punches||[]).filter(p=>needsStartTimeConfirm(p)).map(p=>String(p.empId)+'|'+p.jobsite));
+  const ok=[],held=[];
+  (pairs||[]).forEach(p=>(heldKeys.has(String(p.empId)+'|'+p.jobsite)?held:ok).push(p));
+  return {ok,held};
+}
 // Effective {in,out} after applying enabled rules. Synthetic punches untouched.
 function adjustedTimes(entry){
   let inT=entry.declaredStart||entry.in;
@@ -1727,7 +1744,9 @@ async function saveMyTcEdit(){
     // actually moved — previously this reset unconditionally on every save, so editing just the
     // jobsite/activities/clock-out on an already-resolved punch silently wiped declared_start_time
     // and re-flagged it as needing confirmation with no indication anything regressed.
-    const clockInChanged=newIn.getTime()!==oldIn.getTime();
+    // v49.17: compare at the modal's minute precision (clockInMinuteChanged) — the exact-ms
+    // comparison v49.5 used was true on every save, defeating the fix above.
+    const clockInChanged=clockInMinuteChanged(oldIn,newIn);
     const upd={clock_in:newIn.toISOString(),jobsite,activities:acts,manual_entry:true};
     if(clockInChanged)upd.declared_start_time=null;
     upd.clock_out=newOut?newOut.toISOString():null;
@@ -2247,6 +2266,15 @@ function supStageChip(stage){
   return {label:'Not submitted',bg:'var(--bg3)',color:'var(--txt2)',border:'var(--bdr2)'};
 }
 
+// v49.17: entries from the most recent refreshSupLog() render — openSupStartFix looks the punch up
+// by dbId (same pattern as _adminCorrectEntries for the admin modal's "Set start").
+let _supLogEntries=[];
+function openSupStartFix(dbId){
+  const e=_supLogEntries.find(p=>String(p.dbId)===String(dbId));
+  if(!e)return;
+  openStartTimeFix(e,refreshSupLog);
+}
+
 async function refreshSupLog(){
   const _mySeq=++_supLogSeq;
   await checkAutoServer();if(!activeSup)return;
@@ -2318,6 +2346,7 @@ async function refreshSupLog(){
     return;
   }
 
+  _supLogEntries=logs; // v49.17: so openSupStartFix(dbId) can look a punch back up from its button
   // Group by employee
   const empMap={};
   logs.forEach(l=>{
@@ -2347,6 +2376,7 @@ async function refreshSupLog(){
     const totalHrs=records.reduce((s,l)=>s+(paidHours(l)||0),0);
     const flags=records.filter(l=>l.autoClocked).length;
     const waivePend=records.filter(l=>isPendingWaive(l)).length;
+    const startPend=records.filter(l=>needsStartTimeConfirm(l)).length; // v49.17
     const still=records.filter(l=>!l.out).length;
     // Force Submit (v44.0 Build 3, widened v44.2): sites among this supervisor's own jobsites
     // where this employee has punches this period but no valid submission — either no status
@@ -2378,7 +2408,7 @@ async function refreshSupLog(){
     const sendBtn=sendableSites.length
       ? `<button class="btn-sm" onclick="event.stopPropagation();supSendEmployeeToOffice('${empId}','${data.name.replace(/'/g,"\\'")}')" style="background:var(--green-l,#d8f0d8);color:var(--green,#2f7d31);border:0.5px solid var(--green,#2f7d31);margin-left:6px;">Send to office</button>`
       : '';
-    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
+    const summary=`${records.length} punch${records.length!==1?'es':''} · ${totalHrs.toFixed(1)}h${flags?` · <span style="color:#e07070;font-weight:600;">${flags} ⚠️ needs review</span>`:''}${waivePend?` · <span style="color:#c47f17;font-weight:600;">${waivePend} 🍴 lunch waive</span>`:''}${startPend?` · <span style="color:#c47f17;font-weight:600;">${startPend} ⚠️ start time</span>`:''}${still?` · <span style="color:var(--green);">${still} still in</span>`:''}`;
     const rows=records.map(l=>{
       const idx=timeLog.indexOf(l);
       const ph=paidHours(l);const hrs=ph!=null?ph.toFixed(2):'—';
@@ -2391,6 +2421,10 @@ async function refreshSupLog(){
       if(isPendingWaive(l))actBadges+=`<span class="badge" style="background:#fff2d6;color:#7a5200;margin-left:2px;">🍴 Waive pending</span>`;
       else if(l.lunchWaived===true)actBadges+=`<span class="badge" style="background:#d8f0d8;color:#1f5e1f;margin-left:2px;">🍴 Waived</span>`;
       else if(l.lunchWaiveRequested&&l.lunchWaived===false)actBadges+=`<span class="badge" style="background:#f0d8d8;color:#7a2020;margin-left:2px;">🍴 Waive denied</span>`;
+      // v49.17: early clock-in whose scheduled-start selection was never saved (the supervisor
+      // can set it with the "Set start" button on this row; it also holds back Send to office).
+      const needsStart=needsStartTimeConfirm(l);
+      if(needsStart)actBadges+=`<span class="badge" style="background:var(--amber-l);color:var(--amber);margin-left:2px;">⚠️ Start time?</span>`;
       // v49.12: this specific punch's data changed after this site was sent to office —
       // per-punch counterpart to the employee-card-level pill above. (v49.13: the older
       // v44.0 "⚠️ After submit" badge that used to sit here was removed — it fired on the
@@ -2408,7 +2442,7 @@ async function refreshSupLog(){
         <td style="font-size:12px;">${outTxt}</td>
         <td style="font-size:12px;">${actBadges}</td>
         <td style="font-size:12px;font-weight:600;">${hrs}</td>
-        <td><button class="btn-sm" onclick="openEditModal('db:${l.dbId||idx}')">Edit</button></td>
+        <td><div style="display:flex;gap:4px;flex-wrap:wrap;">${(needsStart&&l.dbId)?`<button class="btn-sm" onclick="openSupStartFix('${l.dbId}')" style="background:var(--amber);color:#fff;border:0;">Set start</button>`:''}<button class="btn-sm" onclick="openEditModal('db:${l.dbId||idx}')">Edit</button></div></td>
       </tr>`;
     }).join('');
 
@@ -2490,7 +2524,7 @@ async function submitSiteToOffice(){
   // sites and work in (empId, jobsite) pairs — an employee can be ready at one of the
   // supervisor's sites and still open at another.
   const statusMap=await getAllStatusForPeriod(period.start);
-  const readyPairs=[]; // {empId, jobsite}
+  let readyPairs=[]; // {empId, jobsite} — v49.17: let, may shrink below (start-time hold-back)
   let alreadySent=0;
   empIds.forEach(id=>{
     const rows=(statusMap[id]||[]).filter(r=>sites.includes(r.jobsite));
@@ -2520,24 +2554,45 @@ async function submitSiteToOffice(){
   // nothing to review, so skip straight to the send confirmation.
   // v49.15: scoped to the period being sent (and this supervisor's sites) — unscoped, the first
   // day of a new period flagged everyone's Monday-morning punch while sending LAST period.
+  // v49.17: fetch ALL of these employees' period punches at this supervisor's sites (not just the
+  // open ones) so the same query also drives the unconfirmed-start-time hold-back: anyone with an
+  // early punch whose scheduled-start selection was never saved stays behind (like a straggler)
+  // until the supervisor taps "Set start" on it — it directly affects paid hours.
   const readyEmpIds=[...new Set(readyPairs.map(p=>p.empId))];
-  const {data:openData}=await sb.from('punches').select('*')
-    .in('employee_id',readyEmpIds).in('jobsite',sites).is('clock_out',null)
+  const {data:periodData,error:periodErr}=await sb.from('punches').select('*')
+    .in('employee_id',readyEmpIds).in('jobsite',sites)
     .gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString());
-  const openPunches=(openData||[]).map(dbRowToEntry);
+  if(periodErr){showCustomAlert('Error','Could not check punches: '+periodErr.message);return;}
+  const periodPunches=(periodData||[]).map(dbRowToEntry);
+  const split=splitHeldByStartTime(readyPairs,periodPunches);
+  let heldNote='';
+  if(split.held.length){
+    const nameOf=id=>(employees.find(e=>String(e.id)===String(id))||{}).name||'Unknown';
+    const heldNames=[...new Set(split.held.map(p=>nameOf(p.empId)))].sort();
+    if(!split.ok.length){
+      showCustomAlert('Fix start times first',
+        `${heldNames.join(', ')} ${heldNames.length!==1?'have':'has'} an unconfirmed start time. Open ${heldNames.length!==1?'their cards':'their card'} and tap "Set start" on the highlighted punch${heldNames.length!==1?'es':''}, then send.`);
+      return;
+    }
+    heldNote=`Held back — unconfirmed start time (tap "Set start" on their punch, then send): ${heldNames.join(', ')}.`;
+    readyPairs=split.ok;
+  }
+  const keepKeys=new Set(readyPairs.map(p=>String(p.empId)+'|'+p.jobsite));
+  const openPunches=periodPunches.filter(p=>!p.out&&keepKeys.has(String(p.empId)+'|'+p.jobsite));
   if(openPunches.some(p=>!p.employeeEstimatedOut)){
     showEstModal(openPunches,async()=>{
-      confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount);
+      confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount,heldNote);
     },EST_NOTE_FYI);
     return;
   }
-  confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount);
+  confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount,heldNote);
 }
 
-function confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount){
-  const sub=openCount
+function confirmSubmitSiteToOffice(readyPairs,period,periodLabel,openCount,heldNote){
+  let sub=openCount
     ? `${openCount} employee${openCount!==1?'s have':' has'} not submitted yet and will stay open for a later pass.`
     : 'All employees at your sites have submitted.';
+  if(heldNote)sub+=' '+heldNote;
   showCustomConfirm(
     `Submit ${readyPairs.length} timecard${readyPairs.length!==1?'s':''} to the office?`,
     `This sends the submitted timecards for ${periodLabel} to head office and locks them for those employees. This can't be undone from here.`,
@@ -2625,10 +2680,21 @@ async function supSendEmployeeToOffice(empId,empName){
   // v49.6: same still-clocked-in heads-up as the batch send \u2014 FYI only, nothing stored.
   // v49.8: skip it if the employee already gave their own estimate \u2014 nothing to review.
   // v49.15: scoped to the period + sites being sent (see submitSiteToOffice).
-  const {data:openData}=await sb.from('punches').select('*')
-    .eq('employee_id',empId).in('jobsite',sendable.map(r=>r.jobsite)).is('clock_out',null)
+  // v49.17: now loads ALL of this employee's period punches at those sites (was open-only) so
+  // the same query also gates on unconfirmed start times — an early punch whose scheduled-start
+  // selection was never saved directly affects paid hours, so it must be set before sending.
+  const {data:periodData,error:periodErr}=await sb.from('punches').select('*')
+    .eq('employee_id',empId).in('jobsite',sendable.map(r=>r.jobsite))
     .gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString());
-  const openPunches=(openData||[]).map(dbRowToEntry);
+  if(periodErr){showCustomAlert('Error','Could not check punches: '+periodErr.message);return;}
+  const periodPunches=(periodData||[]).map(dbRowToEntry);
+  const startFix=periodPunches.filter(p=>needsStartTimeConfirm(p));
+  if(startFix.length){
+    showCustomAlert('Fix start time first',
+      `${empName} has ${startFix.length} punch${startFix.length!==1?'es':''} with an unconfirmed start time at ${siteList}. Tap "Set start" on the highlighted punch${startFix.length!==1?'es':''} in their card, then send.`);
+    return;
+  }
+  const openPunches=periodPunches.filter(p=>!p.out);
   if(openPunches.some(p=>!p.employeeEstimatedOut)){
     showEstModal(openPunches,async()=>{
       confirmSendEmployeeToOffice(empId,empName,period,periodLabel,sendable,siteList);
@@ -2707,11 +2773,13 @@ async function forceSubmitEmployee(empId,empName,skipLastPeriodCheck){
   const relevant=punches.filter(p=>openSites.includes(p.jobsite));
   const autos=relevant.filter(p=>p.autoClocked&&!p.editedAfterAuto);
   const waives=relevant.filter(p=>isPendingWaive(p));
-  if(autos.length||waives.length){
+  const startFix=relevant.filter(p=>needsStartTimeConfirm(p)); // v49.17
+  if(autos.length||waives.length||startFix.length){
     const parts=[];
     if(autos.length)parts.push(`${autos.length} unresolved auto-clock-out${autos.length!==1?'s':''}`);
     if(waives.length)parts.push(`${waives.length} pending lunch waive${waives.length!==1?'s':''}`);
-    showCustomAlert('Fix these first',`${empName} has ${parts.join(' and ')} at ${openSites.join(', ')}. Resolve via Edit before force-submitting.`);
+    if(startFix.length)parts.push(`${startFix.length} unconfirmed start time${startFix.length!==1?'s':''}`);
+    showCustomAlert('Fix these first',`${empName} has ${parts.join(', ')} at ${openSites.join(', ')}. Resolve before force-submitting — use Edit for auto-clock-outs and lunch waives, and "Set start" for start times.`);
     return;
   }
 
@@ -4161,7 +4229,9 @@ async function saveEdit(){
   // actually moved — previously this reset unconditionally on every save, so editing just the
   // jobsite/activities/clock-out on an already-resolved punch silently wiped declared_start_time
   // and re-flagged it as needing confirmation with no indication anything regressed.
-  const clockInChanged=newIn.getTime()!==oldIn.getTime();
+  // v49.17: minute-precision compare (see clockInMinuteChanged) — the exact-ms version fired on
+  // every save because the modal's datetime-local field drops seconds.
+  const clockInChanged=clockInMinuteChanged(oldIn,newIn);
   // Write to DB
   if(e.dbId){
     const upd={clock_in:newIn.toISOString(),jobsite:newJobsite,activities:newActs};
@@ -5653,7 +5723,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.16',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.17',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5702,7 +5772,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.16',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.17',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');

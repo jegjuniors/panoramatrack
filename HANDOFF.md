@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.16 *(employee "Notes" box on My Timecard — shown to supervisors/admins and printed on both PDFs, never on Excel — **needs `migration_timecard_notes.sql` run in Supabase before deploying**)*
+**Version:** v49.17 *(start-time flag: supervisors now see/fix it and it holds back Send to office + Force submit; fixed a bug where any punch edit wiped the confirmed start time and re-flagged it — no migration. v49.16's notes feature still needs `migration_timecard_notes.sql` run in Supabase)*
 **Last handoff update:** October 16, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,33 +11,37 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.16 — employee notes on My Timecard.** Julio's ask: let an employee write notes about
-  their timecard. **⚠️ Requires `migration_timecard_notes.sql` to be run in Supabase first** (new
-  table `pt_timecard_notes`) — deploying the code without it just means notes silently fail to
-  load/save (every helper degrades to "no note"), nothing else breaks.
-  - **My Timecard** (`index.html` + `app.js`): a "Notes for this pay period" textarea (500-char cap)
-    between the hours total and "+ Add a missed punch". Loads per period in view (current or
-    last-period catch-up), saves on blur with a "Saving… / Saved ✓ / Couldn't save" indicator,
-    blank = delete the row. **Always editable, even when the card is locked** — it's an
-    explanation, not payroll data. Same box for supervisor-employees.
-  - **Supervisor Time Log** (`refreshSupLog`): 📝 beside the employee name + a boxed
-    "Employee note" block at the top of the expanded card (notes fetched with the same period as
-    the status rows). **Admin correction modal**: the block at the top. **Admin Submissions
-    panel**: 📝 marker on the employee row (full text is in the correction modal).
-  - **PDFs only, never Excel.** `generatePDF` (supervisor) and `generateMasterPDF` (admin) print an
-    "EMPLOYEE NOTES:" block after the totals/footnotes and above the signature line, wrapped to
-    page width; the row-overflow check reserves room for it (`pdfNoteReserve`) so it can't hit the
-    signature. Notes are fetched by *range overlap* (`period_start <= report end AND period_end >=
-    report start`), so any report range finds the notes that apply; an employee with notes from
-    more than one period in the range gets a "Mon D - Mon D:" prefix on each.
-    `generateMasterPDF` is now `async` (fetch before drawing); `doExport` fetches into
-    `exportRange.notes` before the sync `generatePDF()`.
-  - **Safety:** notes go through a new `escHtml()` before hitting `innerHTML`; PDF text goes through
-    `pdfSafeText()` (jsPDF's WinAnsi fonts print emoji/other glyphs as wrong characters — the v49.11
-    "⚠ → &" bug — so unsupported characters print as `?`).
-  - **Not built (deliberate):** no "note changed after send" flag, no history, nothing on Excel, no
-    per-punch notes.
-  - Version badge/`app_version` → v49.16.
+- **v49.17 — start-time ("fix start time") flag: bug fix + supervisor side.** `app.js`/`index.html`
+  only, no migration. From Julio's screenshots: the flag showed on the employee's My Timecard and
+  to the admin but **not the supervisor**, and **a manual punch edit made the flag reappear**.
+  1. **Edit bug (root cause):** `toLocal()` fills the edit modal's datetime-local field without
+     seconds, but stored punches have seconds (e.g. 6:51:37.412). v49.5's "only wipe
+     `declared_start_time` if the clock-in changed" compared exact milliseconds, so it was
+     *always* "changed" and every save of an early punch (any field — jobsite, activities,
+     clock-out) wiped the confirmed start time. New `clockInMinuteChanged(oldIn,newIn)` compares at
+     the field's minute precision; used in both `saveMyTcEdit` (My Timecard) and the
+     supervisor/admin `saveEdit`. (The v49.5 harness only used whole-minute times, so it missed it.)
+  2. **Supervisor visibility + fix:** `refreshSupLog` now shows an amber "⚠️ Start time?" badge per
+     punch, a "N ⚠️ start time" count in the card summary, and a **"Set start"** button next to Edit
+     (`openSupStartFix(dbId)` → the existing `openStartTimeFix`, via a new `_supLogEntries` list).
+  3. **Gating (supervisor):** per-employee **Send to office** is blocked while that employee has an
+     unconfirmed start time at the sites being sent ("Fix start time first"); the batch **Submit
+     site to office** *holds those employees back* (like a straggler) and says who in the confirm
+     text, or alerts if everyone is held; **Force submit** adds it to its existing "Fix these
+     first" gate. Same tier as the admin's blocked Override. The employee's own Submit is still
+     soft (unchanged — they may be unreachable). Send/force-submit now fetch *all* the employee's
+     period punches (was open-only) so one query serves both this and the still-clocked-in modal.
+  4. **Existing data:** punches already wiped by the bug are simply unconfirmed again — they now
+     show up in the supervisor log, and the admin correction modal's "Set start" still works.
+  - New helpers `clockInMinuteChanged`, `splitHeldByStartTime` (next to `needsStartTimeConfirm`).
+  - **Not changed:** "+ Add a missed punch" with an early clock-in still flags (no kiosk popup ever
+    ran for a manual punch) — one extra tap on "Fix". The supervisor *PDF preview* export isn't
+    gated on it.
+  - Version badge/`app_version` → v49.17.
+- **v49.16 — employee notes on My Timecard** (supervisor/admin visible, printed on both PDFs, never
+  Excel; new table `pt_timecard_notes`). **⚠️ Requires `migration_timecard_notes.sql` to be run in
+  Supabase** — without it notes silently fail to load/save, nothing else breaks. Detail in the
+  changelog.
 - **v49.15** — first-day-of-new-period fixes: send-to-office's still-clocked-in check scoped to
   the period being sent, supervisor log opens on "Last" in the first 2 days of a period, Force
   submit warns when aimed at the new period. No migration. Detail in the changelog.
@@ -47,10 +51,16 @@
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.16 committed and pushed (code deployable, but see the migration below).
+- **Branch:** `main` — v49.17 committed and pushed (deployable; v49.16's notes still need their migration, see below).
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.16 included).
-  Ad-hoc assertion harnesses (established pattern): v49.16's notes helpers (38 assertions, run
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.17 included).
+  Ad-hoc assertion harnesses (established pattern): v49.17's start-time helpers (18 assertions, run
+  against the *real* functions extracted from `app.js` — the exact-ms compare reproduces the old
+  bug on a 6:51:37.412 punch while `clockInMinuteChanged` correctly says "unchanged"; a real
+  one-minute move, 59.999s edge and a move to 7:00 still count as changed; `needsStartTimeConfirm`
+  unchanged; `splitHeldByStartTime` holds only the flagged (employee, site) pairs, matches string
+  vs number ids, doesn't hold the same employee's other site, tolerates null input, and holds
+  nothing when the feature is off); v49.16's notes helpers (38 assertions, run
   against the *real* helper block extracted from `app.js` with a mocked Supabase client — HTML
   escaping incl. a `<script>` note, PDF-safe text keeps curly quotes/dashes/Latin-1 and swaps emoji
   for `?`, save = trimmed upsert on `employee_id,period_start` with period_end, 500-char cap, blank
@@ -102,35 +112,43 @@
 
 ## 3. Next Steps
 
-1. **Run `migration_timecard_notes.sql` in the Supabase SQL editor, then real-device check v49.16:**
+1. **Real-device check v49.17:** (a) on an employee with an early punch that has a confirmed start
+   time, edit only its jobsite/activities/clock-out — the "⚠ Confirm your start time" banner must
+   *not* reappear (and editing the clock-in itself should still re-flag it); (b) as a supervisor, an
+   unconfirmed early punch shows "⚠️ Start time?" + "Set start" in the Time Log and the card summary
+   count; "Set start" resolves it; (c) per-employee Send to office is blocked with that punch
+   unresolved, batch "Submit site to office" holds that employee back (and says so), and Force
+   submit lists it in "Fix these first". **Then** have the admin/supervisor re-set any start times
+   the old bug wiped (they'll now show up flagged in the supervisor log).
+2. **Run `migration_timecard_notes.sql` in the Supabase SQL editor, then real-device check v49.16:**
    write a note on My Timecard (tap away → "Saved ✓"; reopen → it's still there; switch to last
    period → box reflects that period), confirm it shows in the supervisor Time Log (📝 + boxed
    block), the admin correction modal, and the Submissions-panel 📝; export a supervisor PDF and a
    master PDF and eyeball the "EMPLOYEE NOTES:" block (a long ~500-char note near the signature
    line on a full page is the case most worth checking — layout can't be rendered here); confirm
    an Excel export has no note. Also try a note with an emoji (PDF should show `?`, not garbage).
-2. **Check the employees force-submitted on Monday Sept 21.** If any show "Submitted" for the
+3. **Check the employees force-submitted on Monday Sept 21.** If any show "Submitted" for the
    *current* period (Sept 21 – Oct 4) instead of last, send them back (or have them pull back).
    **Real-device check v49.15 on the next period start (Mon Oct 5):** the log should open on "Last",
    force submit on "Current" should warn, and sending last period shouldn't ask about Monday's
    open punches.
-3. **Watch the "Updated since sent/export" flag volume across the roster** over the next pay
+4. **Watch the "Updated since sent/export" flag volume across the roster** over the next pay
    period now that v49.12–v49.14 are verified and the backfill is correct. A sudden burst of
    stale flags on untouched timecards would mean something's re-stamping `updated_at`
    unexpectedly (or the backfill didn't fully take) — but the Sept 8 device check was clean.
-4. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
+5. **Confirm whether the Excel-export crash (fixed in v49.9) explains any of the Report-tab vs.
    Submissions-panel `stage='exported'` divergence** noted below — worth checking whether any
    already-"final" periods exported via Excel are missing their stamp because of it.
-5. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
+6. Have an admin re-check the Submissions panel for any other supervisor-employees who may have
    the same v49.4 stuck-banner symptom on past periods (anyone whose period was paid out via the
    Report tab rather than the Submissions-panel export will have been affected) — the code fix
    stops new nags but doesn't retroactively touch already-mis-flagged rows.
-6. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
+7. **Watch v49.3 flag volume.** Any early clock-in (even a couple minutes) technically "needed"
    a start-time selection under the v48.0 logic, so the new banner/block may surface more punches
    across the roster than the one employee/two days that prompted it. If it's noisy, revisit the
    grace-window behaviour and/or add a context-specific **Cancel** button to the retroactive fix
    modal (`openStartTimeFix` currently reuses the forced, no-dismiss v48.0 popup markup).
-7. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
+8. **App-wide safe-area pass.** v49.2 was a one-off restore; every other `.screen` and every
    fixed-overlay modal still uses flat inline padding and isn't safe-area-aware. A single
    consolidated pass is easier to keep from silently reverting than scattered one-offs.
 
@@ -170,8 +188,53 @@
 # Reference & History
 
 _Everything below is background context, kept from the former `CURRENT_STATE.md`. The
-version entries are newest-first; v47.5–v49.16 are current, v44.1–v47.4 history was never
+version entries are newest-first; v47.5–v49.17 are current, v44.1–v47.4 history was never
 backfilled, v44.0 and earlier are the original log._
+
+---
+
+## ✅ v49.17 — Start-time flag: stop the edit bug, give supervisors visibility + a fix + a gate
+
+**Status:** coded, `node --check` + 18-assertion harness pass, pushed to `main`, deployable — no
+migration. Not yet exercised against the real UI.
+
+**Context:** Julio's screenshots showed (1) the "fix start time" flag on an employee's My
+Timecard and in the admin view but **not for the supervisor**, and (2) the flag **reappearing
+after an employee manually edited a punch**. Investigated report-only first, then built all four
+proposed fixes.
+
+**Root causes:**
+- *Supervisor blind spot:* `needsStartTimeConfirm` was only checked in My Timecard, the admin
+  Submissions panel and the admin correction modal. The v49.3 design said "supervisor/GM
+  fallback", but the Submissions panel is master-admin-only, so the supervisor half was never
+  built — no flag, no fix button, and the supervisor's Send to office / Force submit gates only
+  ever checked auto-clocks and waives.
+- *Edit bug:* `toLocal()` (edit-modal prefill) drops seconds; stored punches keep them. v49.5's
+  `clockInChanged=newIn.getTime()!==oldIn.getTime()` therefore fired on every save of a punch
+  whose seconds weren't `:00` — i.e. nearly all live punches — wiping `declared_start_time` on
+  *any* edit (jobsite, activities, clock-out), in both `saveMyTcEdit` and the supervisor/admin
+  `saveEdit`. The v49.5 harness used whole-minute times, so it never saw it.
+
+**Changes (`app.js`):**
+- `clockInMinuteChanged(oldIn,newIn)` (minute-precision compare) replaces the ms compare in both
+  edit-save paths. A genuinely moved clock-in still clears the declared start time.
+- `refreshSupLog`: per-punch "⚠️ Start time?" badge, "N ⚠️ start time" in the card summary
+  (`startPend`), and a "Set start" button beside Edit (`openSupStartFix` → `openStartTimeFix`,
+  looked up via `_supLogEntries`, refreshes the log on done). Edit/Set-start share one flex cell.
+- Gating: `supSendEmployeeToOffice` blocks with "Fix start time first"; `submitSiteToOffice` uses
+  new `splitHeldByStartTime(pairs,punches)` to hold back the flagged (employee, site) pairs
+  (note in the confirm text; alert if none left to send); `forceSubmitEmployee` adds start times
+  to its existing "Fix these first" alert. Both send paths now load all the employee(s)' period
+  punches at the relevant sites (was open-only), and fail safe with an error alert if that query
+  errors rather than silently skipping the gate.
+- Version badge/`app_version` → v49.17.
+
+**Deliberately unchanged:** employee self-submit stays soft (v49.3 design — they may be
+unreachable); "+ Add a missed punch" with an early time still flags (no live popup ever ran);
+supervisor PDF-preview export isn't gated on it; no data repair script — wiped start times show
+up flagged and are fixed with "Set start".
+
+**Verified:** `node --check`; 18 assertions on the real extracted functions (see Active State).
 
 ---
 
