@@ -48,8 +48,7 @@
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.17 committed and pushed. **v49.18 is coded and staged in the working
-  tree (`app.js`, `index.html`, `HANDOFF.md`) but NOT committed/pushed** — waiting on Julio's go-ahead.
+- **Branch:** `main` — v49.18 committed and pushed (deployable; not yet checked on a real device).
   v49.16's notes still need their migration, see below.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
   `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.18 included).
