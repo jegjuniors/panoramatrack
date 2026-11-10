@@ -34,6 +34,11 @@
     --orange:#c04010;
   }
 }
+/* ── Logo: the image has an opaque black background — in light mode, round it into an intentional dark card ── */
+[data-theme="light"] .pt-logo{border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.25);}
+@media(prefers-color-scheme:light){
+  [data-theme="auto"] .pt-logo{border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.25);}
+}
 /* ── Light: fix hardcoded dark colours ── */
 [data-theme="light"] body{background:#e4e8e4;}
 [data-theme="light"] input[type=text],[data-theme="light"] input[type=password],[data-theme="light"] input[type=datetime-local],[data-theme="light"] input[type=date],[data-theme="light"] select{background:#ffffff;}

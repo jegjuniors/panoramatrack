@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.18 *(employee "Export my timecard (PDF)" on My Timecard, submitted-only, shared via the phone share sheet — no migration. v49.16's notes feature still needs `migration_timecard_notes.sql` run in Supabase)*
+**Version:** v49.19 *(light-mode logo shown as a rounded dark card — CSS only. v49.18: employee "Export my timecard (PDF)" on My Timecard, submitted-only, shared via the phone share sheet — no migration. v49.16's notes feature still needs `migration_timecard_notes.sql` run in Supabase)*
 **Last handoff update:** November 10, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -11,6 +11,12 @@
 
 ## 1. Current Status — what was just completed
 
+- **v49.19 — light-mode logo card.** `styles.css` + `index.html` only (no migration). The logo WebP
+  has an opaque black background, so in light mode it showed as a harsh black rectangle. The 5
+  in-app logo `<img>`s (kiosk, two login screens, supervisor + admin headers) now carry class
+  `pt-logo`; light/auto-light gives them `border-radius:8px` + a soft shadow. The black loading
+  overlay logo is untouched. Version badge/`app_version` → v49.19. **Uncommitted.** A proper fix
+  later = transparent logo with dark "Panorama" text swapped by theme (needs the original SVG/PNG).
 - **v49.18 — "Export my timecard (PDF)" on My Timecard (employee).** `app.js`/`index.html` only,
   **no migration, no Edge Function.** A button on the My Timecard screen produces a PDF copy of the
   employee's own timecard in the same look as the supervisor/master PDFs, shared via the phone's
@@ -48,7 +54,7 @@
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.18 committed and pushed (deployable; not yet checked on a real device).
+- **Branch:** `main` — v49.18 pushed; v49.19 (logo card) coded, `node --check` OK, **uncommitted**, not checked on a device.
   v49.16's notes still need their migration, see below.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
   `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.18 included).
@@ -118,6 +124,7 @@
 
 ## 3. Next Steps
 
+0a. **Real-device check v49.19 logo:** kiosk + headers in Light and Auto(light OS) show a rounded dark card; Dark mode unchanged.
 0. **Real-device check v49.18 (employee PDF export):** (a) on an *unsubmitted* card, tap
    "📄 Export my timecard (PDF)" → "Submit your timecard first" alert; after submitting, pull back →
    blocked again. (b) On a submitted card: tap Export → "ready" confirm → "Share / save PDF" opens
