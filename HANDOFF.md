@@ -1,6 +1,6 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.19 *(light-mode logo shown as a rounded dark card — CSS only. v49.18: employee "Export my timecard (PDF)" on My Timecard, submitted-only, shared via the phone share sheet — no migration. v49.16's notes feature still needs `migration_timecard_notes.sql` run in Supabase)*
+**Version:** v49.19 *(light-mode logo shown as a rounded dark card — CSS only. v49.18: employee "Export my timecard (PDF)" on My Timecard, submitted-only, shared via the phone share sheet — no migration. v49.16's notes migration has been run — notes work in the live app)*
 **Last handoff update:** November 10, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
@@ -42,9 +42,8 @@
   submit, and a bug where any punch edit wiped the confirmed start time is fixed. No migration.
   Detail in the changelog.
 - **v49.16 — employee notes on My Timecard** (supervisor/admin visible, printed on both PDFs, never
-  Excel; new table `pt_timecard_notes`). **⚠️ Requires `migration_timecard_notes.sql` to be run in
-  Supabase** — without it notes silently fail to load/save, nothing else breaks. Detail in the
-  changelog.
+  Excel; new table `pt_timecard_notes`). `migration_timecard_notes.sql` **has been run** (Julio
+  confirmed Nov 10, 2026: notes are working in the live app). Detail in the changelog.
 - **v49.15** — first-day-of-new-period fixes: send-to-office's still-clocked-in check scoped to
   the period being sent, supervisor log opens on "Last" in the first 2 days of a period, Force
   submit warns when aimed at the new period. No migration. Detail in the changelog.
@@ -115,9 +114,10 @@
      backfill was clobbered by a statement-ordering bug — see #5.
   5. `migration_punch_updated_at_fix.sql` — **run (Sept 8, 2026).** Corrected the backfill broken
      by #4; `punches.updated_at` is now correctly seeded to each row's `clock_in`.
-  6. **`migration_timecard_notes.sql` — NOT YET RUN.** Creates `pt_timecard_notes` (employee_id,
+  6. **`migration_timecard_notes.sql` — run (confirmed working Nov 10, 2026).** Creates `pt_timecard_notes` (employee_id,
      period_start, period_end, note, updated_at; unique on employee_id+period_start; RLS disabled
-     like the rest). Run in the Supabase SQL editor before relying on v49.16's notes.
+     like the rest). Ran before Oct 30, 2026 (presumably), so it got Supabase's old automatic Data
+     API grants — it has no explicit GRANTs in the file, which is fine for the live table only.
   - v49.3 through v49.6, v49.11, v49.13, v49.14, v49.15 added no migration.
 - **Submission-notification feature:** code-complete, Edge Function deployed, `RESEND_API_KEY`
   secret set, settings UI wired, confirmed working. Still being watched over a full pay period.
@@ -144,7 +144,7 @@
    unresolved, batch "Submit site to office" holds that employee back (and says so), and Force
    submit lists it in "Fix these first". **Then** have the admin/supervisor re-set any start times
    the old bug wiped (they'll now show up flagged in the supervisor log).
-2. **Run `migration_timecard_notes.sql` in the Supabase SQL editor, then real-device check v49.16:**
+2. **Real-device check v49.16** (migration already run; notes confirmed working):
    write a note on My Timecard (tap away → "Saved ✓"; reopen → it's still there; switch to last
    period → box reflects that period), confirm it shows in the supervisor Time Log (📝 + boxed
    block), the admin correction modal, and the Submissions-panel 📝; export a supervisor PDF and a
@@ -186,11 +186,59 @@
   should remain (admin can "finish" a period via Report tab and `pt_timecard_status` never
   reflects it) — worth deciding whether Report-tab export should also stamp status, or whether
   Submissions-panel export should become the only sanctioned path for closing out a period.
+- **Supabase Data API grants (effective Oct 30, 2026 — notice emailed to Julio).** Supabase no
+  longer auto-grants Data API access to *new* tables in `public`. **Existing tables are untouched** —
+  nothing in the live app breaks. But any **new table** (or any migration / new project / preview
+  branch / local `supabase db reset` that creates one) needs explicit GRANTs in the same migration,
+  or the Data API returns "permission denied" with the exact GRANT to run. This app talks to
+  Supabase with the **anon** key (`app.js` line 3) and the Edge Function uses **service_role**, so
+  every new table needs both. Because the app both reads *and writes* via anon, grant the full
+  set to anon (Supabase's email example only grants SELECT to anon — not enough here):
+  ```sql
+  grant select, insert, update, delete on public.<table> to anon;
+  grant select, insert, update, delete on public.<table> to authenticated;
+  grant select, insert, update, delete on public.<table> to service_role;
+  ```
+  `generated always as identity` columns need no extra sequence grant (a `serial`/`bigserial`
+  column would need `grant usage, select on sequence …`). Granting anon full access matches the
+  current wide-open RLS-off posture — it is not a new exposure, but it is another reason the RLS
+  pass below matters. Also check Supabase → Settings → Data API to confirm which tables are
+  exposed. **Not an open item for the live DB:** `pt_timecard_notes` already exists and works.
+  But `migration_timecard_notes.sql` and `v37.1_supabase.sql` (the base schema) contain no GRANTs,
+  so re-running either on a fresh project / preview branch / `db reset` would need them added.
+- **Backlog — employee email collection (parked Nov 10, 2026, design discussed only, no code).**
+  Idea: when an employee with no email on file clocks in, show a dialog asking for it, store it on
+  `employees`, and show it in the add/edit employee modal (`openEmpModal`, `app.js:4573`). Needs a
+  nullable `email` column (migration; no new grants since the table exists), mapping at the
+  `app.js:641` employee load, and the modal save payload must always include `email` or editing a
+  name would blank it. Open design choices: never block the punch (record it first, ask after —
+  recommended); skippable and re-asked each clock-in until filled (recommended) vs once a day vs
+  mandatory; type-twice/confirm step against typos; sequence after the start-time-picker and
+  credited-time popups instead of stacking; clock-in only; same prompt for supervisors/admin; an
+  "Update my email" link on My Timecard. Unverified addresses are a concern if the emails will
+  carry timecard PDFs (deferred "email-the-PDF"). Emails would live in the publicly readable
+  `employees` table, so the RLS Option B work below is a sensible prerequisite.
 - **Supabase RLS is disabled.** The anon key currently allows full read/write/delete on
   `punches` and likely every other table. Do **NOT** enable RLS (or click Supabase's "Resolve
   issue") without writing policies first — with the anon key and no policies it takes the whole
   app offline. Needs a deliberate pass: RLS + policies (or move writes behind a server function)
   + key rotation.
+  **Backlog — planned approach (Option B), parked Nov 10, 2026 until Julio can test on a weekend
+  when nobody is clocking in.** Auth is entirely client-side today (full `employees` table incl.
+  `pin`/`supervisor_password` loaded into the browser; `MASTER_PASSWORD` hardcoded at `app.js:19`),
+  so RLS policies alone can't tell users apart — every caller is `anon`. Option B closes the worst
+  leaks without the full rewrite: (1) verify PIN / supervisor password / master password
+  server-side via a `security definer` Postgres function or Edge Function; (2) change
+  `app.js:641` `select('*')` on `employees` to an explicit column list (a column-level REVOKE
+  makes `select('*')` fail with permission denied); (3) deploy that app version first and verify
+  real logins on a phone while old access still works; (4) **last**, `REVOKE select (pin,
+  supervisor_password) ON employees FROM anon` — rollback is one `GRANT`, keep it ready; (5) move
+  the master password out of the JS and change it. No extra cost (functions are included; a
+  second Supabase project is optional — a free one works, or Pro bills extra project compute).
+  If a staging project is used, the base schema needs explicit GRANTs (see Data API grants note)
+  and the hardcoded URL/key at `app.js:3-4` need a swap. Full per-role RLS with signed tokens
+  (Option C, ~5–8 versions) stays a later project. Do this *before* collecting employee emails
+  if possible — emails would join the same publicly readable table.
 - **Plaintext secrets in DB:** employee PINs and `supervisor_password` are stored plaintext.
   Hashing is on the security short-list.
 - **No kiosk lock screen** — the app doesn't return to PIN entry after inactivity.
@@ -280,8 +328,8 @@ up flagged and are fixed with "Set start".
 
 ## ✅ v49.16 — Employee notes on My Timecard (supervisor/admin visible, printed on PDFs)
 
-**Status:** coded, `node --check` + 38-assertion harness pass, pushed to `main`. **Needs
-`migration_timecard_notes.sql` run in Supabase.** Not yet exercised against the real UI/PDF.
+**Status:** coded, `node --check` + 38-assertion harness pass, pushed to `main`. Migration run;
+notes confirmed working in the live app (Nov 10, 2026).
 
 **Context:** Julio wanted a "Notes" text entry on My Timecard so an employee can leave notes about
 their timecard. Design confirmed before building: visible to supervisors and admins and printed on

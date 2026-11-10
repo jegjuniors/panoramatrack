@@ -19,6 +19,10 @@ timecards; a master admin exports payroll (PDF + Excel pack).
   by hand (e.g. `submission-notify-edge-function.ts`), not deployed from this repo.
 - **Migrations:** hand-written `.sql` files in the repo root, run by the maintainer (Julio) in
   the Supabase SQL editor. Always call out when a change needs one.
+  **Any migration that creates a table must also `GRANT select, insert, update, delete` on it to
+  `anon`, `authenticated` and `service_role`** — since Oct 30, 2026 Supabase no longer auto-grants
+  Data API access to new `public` tables (existing tables unaffected). The app uses the anon key
+  for reads *and* writes, so SELECT-only isn't enough. See HANDOFF.md → "Supabase Data API grants".
 
 ## Verification
 
