@@ -1,7 +1,7 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.17 *(start-time flag: supervisors now see/fix it and it holds back Send to office + Force submit; fixed a bug where any punch edit wiped the confirmed start time and re-flagged it — no migration. v49.16's notes feature still needs `migration_timecard_notes.sql` run in Supabase)*
-**Last handoff update:** October 16, 2026
+**Version:** v49.18 *(employee "Export my timecard (PDF)" on My Timecard, submitted-only, shared via the phone share sheet — no migration. v49.16's notes feature still needs `migration_timecard_notes.sql` run in Supabase)*
+**Last handoff update:** November 10, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
 > Everything under "Reference & History" is background: architecture, DB schema, standing build
@@ -11,33 +11,30 @@
 
 ## 1. Current Status — what was just completed
 
-- **v49.17 — start-time ("fix start time") flag: bug fix + supervisor side.** `app.js`/`index.html`
-  only, no migration. From Julio's screenshots: the flag showed on the employee's My Timecard and
-  to the admin but **not the supervisor**, and **a manual punch edit made the flag reappear**.
-  1. **Edit bug (root cause):** `toLocal()` fills the edit modal's datetime-local field without
-     seconds, but stored punches have seconds (e.g. 6:51:37.412). v49.5's "only wipe
-     `declared_start_time` if the clock-in changed" compared exact milliseconds, so it was
-     *always* "changed" and every save of an early punch (any field — jobsite, activities,
-     clock-out) wiped the confirmed start time. New `clockInMinuteChanged(oldIn,newIn)` compares at
-     the field's minute precision; used in both `saveMyTcEdit` (My Timecard) and the
-     supervisor/admin `saveEdit`. (The v49.5 harness only used whole-minute times, so it missed it.)
-  2. **Supervisor visibility + fix:** `refreshSupLog` now shows an amber "⚠️ Start time?" badge per
-     punch, a "N ⚠️ start time" count in the card summary, and a **"Set start"** button next to Edit
-     (`openSupStartFix(dbId)` → the existing `openStartTimeFix`, via a new `_supLogEntries` list).
-  3. **Gating (supervisor):** per-employee **Send to office** is blocked while that employee has an
-     unconfirmed start time at the sites being sent ("Fix start time first"); the batch **Submit
-     site to office** *holds those employees back* (like a straggler) and says who in the confirm
-     text, or alerts if everyone is held; **Force submit** adds it to its existing "Fix these
-     first" gate. Same tier as the admin's blocked Override. The employee's own Submit is still
-     soft (unchanged — they may be unreachable). Send/force-submit now fetch *all* the employee's
-     period punches (was open-only) so one query serves both this and the still-clocked-in modal.
-  4. **Existing data:** punches already wiped by the bug are simply unconfirmed again — they now
-     show up in the supervisor log, and the admin correction modal's "Set start" still works.
-  - New helpers `clockInMinuteChanged`, `splitHeldByStartTime` (next to `needsStartTimeConfirm`).
-  - **Not changed:** "+ Add a missed punch" with an early clock-in still flags (no kiosk popup ever
-    ran for a manual punch) — one extra tap on "Fix". The supervisor *PDF preview* export isn't
-    gated on it.
-  - Version badge/`app_version` → v49.17.
+- **v49.18 — "Export my timecard (PDF)" on My Timecard (employee).** `app.js`/`index.html` only,
+  **no migration, no Edge Function.** A button on the My Timecard screen produces a PDF copy of the
+  employee's own timecard in the same look as the supervisor/master PDFs, shared via the phone's
+  share sheet (`navigator.share` with a file; falls back to a normal download on desktop).
+  1. **Gate:** only once *every* site the employee worked in the period is at `emp_submitted` or
+     later (`canExportMyTimecard`). The button always shows; unsubmitted → alert "Submit your
+     timecard first" (names the still-open sites). A pull-back re-locks it. Checked against a fresh
+     DB fetch of punches + status rows, not the panel cache.
+  2. **Two taps, on purpose:** tap Export → fetch + gate + build the PDF → "Your timecard PDF is
+     ready" confirm → tap **Share / save PDF**. `navigator.share` must run inside a tap and iOS can
+     reject it after a network fetch, so the share is split from the build (`exportMyTimecard` /
+     `shareMyTcPdf`). Cancelling the share sheet (AbortError) does nothing.
+  3. **Own renderer (option C):** new `renderEmployeeTimecardPdf`; `generatePDF` and
+     `generateMasterPDF` are untouched. Differences: "EMPLOYEE COPY" badge + "Generated …" in the
+     header, "SUBMITTED: <date>" in place of the supervisor line, signature line reads "Employee
+     signature". Open punches use the employee's own estimate with "(est.)" (same as master PDF).
+  4. **Pending lunch waives (option A):** the PDF uses `paidHours`, so lunch is *deducted* until a
+     supervisor approves — the PDF can be lower than the optimistic on-screen total. Affected day
+     rows get a "*" and a footnote (`myTcPendingWaiveInfo`).
+  - Version badge/`app_version` → v49.18. Email-the-PDF was discussed and deliberately left for a
+    later version (see Next Steps).
+- **v49.17** — start-time flag: supervisors now see/fix it, it holds back Send to office + Force
+  submit, and a bug where any punch edit wiped the confirmed start time is fixed. No migration.
+  Detail in the changelog.
 - **v49.16 — employee notes on My Timecard** (supervisor/admin visible, printed on both PDFs, never
   Excel; new table `pt_timecard_notes`). **⚠️ Requires `migration_timecard_notes.sql` to be run in
   Supabase** — without it notes silently fail to load/save, nothing else breaks. Detail in the
@@ -51,10 +48,20 @@
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.17 committed and pushed (deployable; v49.16's notes still need their migration, see below).
+- **Branch:** `main` — v49.17 committed and pushed. **v49.18 is coded and staged in the working
+  tree (`app.js`, `index.html`, `HANDOFF.md`) but NOT committed/pushed** — waiting on Julio's go-ahead.
+  v49.16's notes still need their migration, see below.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
-  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.17 included).
-  Ad-hoc assertion harnesses (established pattern): v49.17's start-time helpers (18 assertions, run
+  `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.18 included).
+  Ad-hoc assertion harnesses (established pattern): v49.18's export helpers (17 assertions, run
+  against the *real* functions extracted from `app.js` with the real jsPDF 2.5.1 from npm — gate:
+  no punches / no status row / `open` row block, `emp_submitted`/`sup_submitted`/`exported` pass,
+  multi-site with one site still open blocks and names it, a status row for a different site
+  doesn't count; filename sanitizing; pending-waive info counts only closed, undecided,
+  non-estimated punches and its day|site key matches the consolidated row; pending waive still
+  deducts lunch (office number); a 5-row card + 500-char note renders on 1 page, a long card
+  paginates with the continuation header and puts TOTAL/footnotes/notes/signature on the last
+  page — text-extracted with `pdftotext`, **not eyeballed as an image**); v49.17's start-time helpers (18 assertions, run
   against the *real* functions extracted from `app.js` — the exact-ms compare reproduces the old
   bug on a 6:51:37.412 punch while `clockInMinuteChanged` correctly says "unchanged"; a real
   one-minute move, 59.999s edge and a move to 7:00 still count as changed; `needsStartTimeConfirm`
@@ -112,6 +119,17 @@
 
 ## 3. Next Steps
 
+0. **Real-device check v49.18 (employee PDF export):** (a) on an *unsubmitted* card, tap
+   "📄 Export my timecard (PDF)" → "Submit your timecard first" alert; after submitting, pull back →
+   blocked again. (b) On a submitted card: tap Export → "ready" confirm → "Share / save PDF" opens
+   the share sheet on **iOS (installed PWA) and Android**; cancelling the sheet does nothing; on
+   desktop it downloads. (c) Eyeball the PDF as an image: header badge/"Generated" text don't
+   collide, "SUBMITTED:" row, a multi-site employee, an open punch with an estimate (shows
+   "(est.)"), a day with a pending lunch waive (shows `*` + footnote and the hours include the
+   lunch deduction), and a long ~500-char note near the signature line. (d) Confirm an unsaved note
+   still being typed gets saved and printed. **Possible follow-up:** email the PDF — needs an
+   `employees.email` column + a new Edge Function (Resend attachments work; keep it
+   stored-address-only and re-check `pt_timecard_status` server-side). Deliberately not built.
 1. **Real-device check v49.17:** (a) on an employee with an early punch that has a confirmed start
    time, edit only its jobsite/activities/clock-out — the "⚠ Confirm your start time" banner must
    *not* reappear (and editing the clock-in itself should still re-flag it); (b) as a supervisor, an
@@ -192,6 +210,22 @@ version entries are newest-first; v47.5–v49.17 are current, v44.1–v47.4 hist
 backfilled, v44.0 and earlier are the original log._
 
 ---
+
+## ✅ v49.18 — Employee "Export my timecard (PDF)" (submitted-only, phone share sheet)
+
+`app.js` + `index.html` only; no migration, no Edge Function. New block just above
+`refreshMyTcCatchupState`: `canExportMyTimecard(punches,statusRows)` (gate), `myTcPdfFilename`,
+`myTcPendingWaiveInfo`, `renderEmployeeTimecardPdf(doc,o)` (own renderer — `generatePDF`/
+`generateMasterPDF` untouched, so a later refactor of those onto a shared renderer is still open),
+`exportMyTimecard()` (fresh fetch → gate → build → `showCustomConfirm` "ready" step) and
+`shareMyTcPdf()` (`navigator.share({files})`, AbortError = cancelled, else anchor-download
+fallback). Button `#mytc-export-btn` sits between the hours total and the notes box.
+Design choices: build and share are two taps because share needs a fresh user gesture; pending
+lunch waives show the office's (deducted) number with a `*` footnote rather than the on-screen
+optimistic total; note text is read from the live textarea after flushing `saveMyTcNote()`; no
+supervisor line (none on the employee side), "Employee signature" instead of approval wording.
+Gotcha carried over: `pdfNoteLinesFor` takes rows shaped `{employee_id,period_start,period_end,note}`
+— the export builds one such row from the textarea.
 
 ## ✅ v49.17 — Start-time flag: stop the edit bug, give supervisors visibility + a fix + a gate
 

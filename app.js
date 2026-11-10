@@ -1291,6 +1291,314 @@ async function saveMyTcNote(){
   }
 }
 
+/* ─── v49.18: Export my timecard — employee PDF copy via the phone's share sheet ─────────────
+   Same look as the supervisor/master PDFs (generatePDF / generateMasterPDF), drawn by its own
+   renderer so those two payroll PDFs stay untouched. Only available once EVERY site the employee
+   worked this period has been submitted (emp_submitted or later); a pull-back re-locks it.
+   Flow: tap → fresh fetch + gate + build the PDF → "ready" confirm → tap again to share. The
+   build is split from the share on purpose: navigator.share must be called inside a user tap,
+   and iOS can reject it once a network fetch has happened since the tap. */
+
+// Gate: { ok, reason:'empty'|'unsubmitted'|undefined, sites:[still-open sites] }.
+function canExportMyTimecard(punches,statusRows){
+  const sites=[...new Set((punches||[]).map(p=>p.jobsite).filter(Boolean))];
+  if(!sites.length)return {ok:false,reason:'empty',sites:[]};
+  const stageBySite={};
+  (statusRows||[]).forEach(r=>{stageBySite[r.jobsite]=r.stage;});
+  const open=sites.filter(s=>!stageAtLeast(stageBySite[s]||TC_STAGE.OPEN,TC_STAGE.EMP)).sort();
+  return open.length?{ok:false,reason:'unsubmitted',sites:open}:{ok:true,sites:[]};
+}
+
+function myTcPdfFilename(empName,period){
+  const d=x=>x.toLocaleDateString('en-US',{month:'short',day:'numeric'}).replace(' ','-');
+  const safe=String(empName||'').replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')||'Employee';
+  return `PanoramaTrack_Timecard_${safe}_${d(period.start)}_to_${d(period.end)}.pdf`;
+}
+
+// Pending lunch-waive punches (employee asked, supervisor hasn't decided). paidHours() deducts
+// lunch for these until approved, so the PDF total can be LOWER than the optimistic on-screen
+// total (which counts them as approved) — the PDF flags the affected day rows with "*" and adds a
+// footnote. Keys match consolidatePunchesByDay's day|jobsite buckets. Estimated (synthetic) punches
+// skip the lunch rule entirely, so they never count.
+function myTcPendingWaiveInfo(punches){
+  const keys=new Set();let count=0;
+  (punches||[]).forEach(p=>{
+    if(!p.out||p.estimatedOut||!isPendingWaive(p))return;
+    count++;
+    keys.add(adjustedTimes(p).in.toDateString()+'|'+(p.jobsite||'—'));
+  });
+  return {keys,count};
+}
+
+// Draws one employee's timecard (one or more pages) onto an existing jsPDF doc.
+// o: {empName,dept,sites[],rows,periodFrom,periodTo,submittedStr,generatedStr,noteLines,
+//     formatTask(actName),pendingKeys:Set,pendingCount}
+function renderEmployeeTimecardPdf(doc,o){
+  const S=pdfSafeText;
+  const PW=215.9,PH=279.4,ML=14,MR=14,MT=14,CW=PW-ML-MR;
+  const GREEN=[45,122,45],TAN=[251,213,147],TAN_DARK=[200,140,60],BLACK=[30,30,30],WHITE=[255,255,255];
+  const LGRAY=[245,245,245],AMBER_BG=[255,243,220],RED_TEXT=[163,45,45],OVERLAP_BG=[252,222,222];
+  const COL={date:38,site:28,in:24,out:24,hrs:16,task:0};
+  COL.task=CW-COL.date-COL.site-COL.in-COL.out-COL.hrs;
+  const COL_WIDTHS=[COL.date,COL.site,COL.in,COL.out,COL.hrs,COL.task];
+  const colLabels=['DATE','JOBSITE','CLOCK IN','CLOCK OUT','HOURS','TASK CODE'];
+  const ROW_H=6.5,lineH=4,FN_LINE_H=3.6;
+  const fmtTime=d=>d instanceof Date?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'—';
+  const rows=o.rows;
+
+  // Footnotes, wrapped to the page width up front so their height can be reserved before the
+  // table starts (a long table must break to a new page early enough that these still fit).
+  doc.setFont('helvetica','italic');doc.setFontSize(7);
+  const footnotes=[];
+  const addFn=(text,color)=>footnotes.push({lines:doc.splitTextToSize(S(text),CW),color});
+  if(rows.some(r=>r.hasAuto))addFn('! Records marked ! were auto-clocked out at 12 hours and may require review.',RED_TEXT);
+  if(rows.some(r=>r.hasOverlap))addFn('!! Rows marked !! have overlapping punches for the same day/jobsite (e.g. a duplicate clock-in) — your supervisor will verify these before pay is finalized.',RED_TEXT);
+  if(rows.some(r=>r.hasEstimated))addFn('Hours marked (est.) use your own estimated end time because the punch was still open when you submitted. They are PRELIMINARY until the punch is closed.',[214,123,17]);
+  if(o.pendingCount>0)addFn(`* Lunch-waive request pending supervisor decision — lunch is deducted until it is approved, so the hours on these days may increase.`,[214,123,17]);
+  const fnReserve=footnotes.reduce((n,f)=>n+f.lines.length*FN_LINE_H+1,0);
+  const noteReserve=pdfNoteReserve(o.noteLines);
+
+  const colHeader=y=>{
+    doc.setFillColor(...TAN);doc.rect(ML,y,CW,ROW_H,'F');
+    doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
+    let cx=ML;COL_WIDTHS.forEach(w=>{cx+=w;if(cx<ML+CW)doc.line(cx,y,cx,y+ROW_H);});
+    doc.rect(ML,y,CW,ROW_H);
+    doc.setFont('helvetica','bold');doc.setFontSize(7.5);doc.setTextColor(...BLACK);
+    let lx=ML;COL_WIDTHS.forEach((w,i)=>{doc.text(colLabels[i],lx+w/2,y+ROW_H-1.8,{align:'center'});lx+=w;});
+  };
+
+  let y=MT;
+  // ── Header band ──
+  doc.setFillColor(...GREEN);doc.rect(ML,y,CW,12,'F');
+  doc.setTextColor(...WHITE);doc.setFont('helvetica','bold');doc.setFontSize(12);
+  doc.text('Panorama Building Systems — PanoramaTrack',ML+3,y+5);
+  doc.setFont('helvetica','normal');doc.setFontSize(8.5);
+  doc.text(`Pay period: ${o.periodFrom} – ${o.periodTo}`,ML+3,y+10);
+  doc.setFont('helvetica','bold');doc.setFontSize(7);
+  doc.text('EMPLOYEE COPY',ML+CW-3,y+5,{align:'right'});
+  doc.setFont('helvetica','normal');doc.setFontSize(6.5);
+  doc.text(S(`Generated ${o.generatedStr}`),ML+CW-3,y+9.5,{align:'right'});
+  y+=14;
+
+  // ── Title ──
+  doc.setTextColor(...BLACK);doc.setFont('helvetica','bold');doc.setFontSize(14);
+  doc.text('TIME CARD',PW/2,y+6,{align:'center'});
+  y+=11;
+
+  // ── Employee info ──
+  doc.setFontSize(8.5);
+  doc.setFont('helvetica','bold');doc.text('NAME:',ML,y+3.5);
+  doc.setFont('helvetica','normal');doc.text(S(o.empName),ML+16,y+3.5);
+  doc.setFont('helvetica','bold');doc.text('JOBSITE(S):',ML+CW*0.52,y+3.5);
+  doc.setFont('helvetica','normal');doc.text(S(o.sites.join(', ')),ML+CW*0.52+24,y+3.5);
+  y+=6;
+  doc.setFont('helvetica','bold');doc.text('DEPARTMENT:',ML,y+3.5);
+  doc.setFont('helvetica','normal');doc.text(S(o.dept||'—'),ML+27,y+3.5);
+  doc.setFont('helvetica','bold');doc.text('SUBMITTED:',ML+CW*0.52,y+3.5);
+  doc.setFont('helvetica','normal');doc.text(S(o.submittedStr||'—'),ML+CW*0.52+24,y+3.5);
+  y+=8;
+
+  doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.4);
+  doc.line(ML,y,ML+CW,y);y+=3;
+  colHeader(y);y+=ROW_H;
+
+  // ── Rows ──
+  doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+  let totalHrs=0;
+  rows.forEach((r,ri)=>{
+    const taskLines=r.hasAuto?['Auto-clocked']:[...r.acts].map(a=>S(o.formatTask(a)));
+    if(!taskLines.length)taskLines.push('—');
+    const rH=Math.max(ROW_H,taskLines.length*lineH+2);
+    if(y+rH>PH-50-noteReserve-fnReserve){
+      doc.addPage();y=MT;
+      doc.setFillColor(...GREEN);doc.rect(ML,y,CW,7,'F');
+      doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...WHITE);
+      doc.text(S(`${o.empName} — continued`),ML+3,y+5);
+      y+=9;colHeader(y);y+=ROW_H;
+      doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+    }
+    const rowBg=ri%2===0?WHITE:LGRAY;
+    doc.setFillColor(...(r.hasOverlap?OVERLAP_BG:(r.hasEstimated?AMBER_BG:rowBg)));
+    doc.rect(ML,y,CW,rH,'F');
+    doc.setDrawColor(...TAN_DARK);doc.setLineWidth(0.25);
+    let rx=ML;COL_WIDTHS.forEach(w=>{rx+=w;if(rx<ML+CW)doc.line(rx,y,rx,y+rH);});
+    doc.rect(ML,y,CW,rH);
+
+    const pending=o.pendingKeys.has(r.date.toDateString()+'|'+r.jobsite);
+    const dateStr=r.date.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})+(pending?' *':'');
+    const outStr=r.clockOut?(fmtTime(r.clockOut)+(r.hasEstimated?' (est.)':'')):'—';
+    const hrsStr=r.hrs>0?r.hrs.toFixed(2):'—';
+    totalHrs+=r.hrs;
+    const textY=y+4;
+    doc.setTextColor(...((r.hasAuto||r.hasOverlap)?RED_TEXT:BLACK));
+    let tx=ML;
+    doc.text((r.hasAuto?'! ':'')+(r.hasOverlap?'!! ':'')+dateStr,tx+2,textY);tx+=COL.date;
+    doc.setTextColor(...BLACK);
+    doc.text(S(r.jobsite),tx+COL.site/2,textY,{align:'center'});tx+=COL.site;
+    doc.text(fmtTime(r.clockIn),tx+COL.in/2,textY,{align:'center'});tx+=COL.in;
+    doc.setFont('helvetica',r.hasEstimated?'italic':'normal');
+    doc.text(outStr,tx+COL.out/2,textY,{align:'center'});tx+=COL.out;
+    doc.setFont('helvetica','bold');
+    doc.text(hrsStr,tx+COL.hrs-2,textY,{align:'right'});tx+=COL.hrs;
+    doc.setFont('helvetica','normal');
+    taskLines.forEach((line,li)=>{doc.text(line,tx+2,textY+li*lineH);});
+    y+=rH;
+  });
+
+  // ── Total ──
+  const TOT_H=7;
+  doc.setFillColor(...TAN);doc.rect(ML,y,CW,TOT_H,'F');
+  doc.setDrawColor(...TAN_DARK);doc.rect(ML,y,CW,TOT_H);
+  const hrsX=ML+COL.date+COL.site+COL.in+COL.out;
+  doc.line(hrsX,y,hrsX,y+TOT_H);
+  doc.setFont('helvetica','bold');doc.setFontSize(8.5);doc.setTextColor(...BLACK);
+  doc.text('TOTAL',ML+2,y+TOT_H-2);
+  doc.text(totalHrs.toFixed(2),hrsX+COL.hrs-2,y+TOT_H-2,{align:'right'});
+  y+=TOT_H+5;
+
+  // ── Footnotes ──
+  footnotes.forEach(f=>{
+    doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(...f.color);
+    f.lines.forEach(l=>{doc.text(l,ML,y);y+=FN_LINE_H;});
+    y+=1;
+  });
+  doc.setTextColor(...BLACK);
+
+  // ── Employee notes ──
+  if(o.noteLines.length){
+    doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...BLACK);
+    doc.text('EMPLOYEE NOTES:',ML,y);y+=4;
+    doc.setFont('helvetica','normal');doc.setFontSize(7.5);
+    o.noteLines.forEach(l=>{doc.text(l,ML,y);y+=PDF_NOTE_LINE_H;});
+    y+=2;
+  }
+
+  // ── Signature ──
+  const sigY=Math.max(y+10,PH-MT-25);
+  doc.setFont('helvetica','normal');doc.setFontSize(8);
+  doc.setDrawColor(...BLACK);doc.setLineWidth(0.3);
+  doc.line(ML,sigY,ML+70,sigY);
+  doc.text('Employee signature',ML,sigY+4);
+  doc.line(ML+CW-50,sigY,ML+CW,sigY);
+  doc.text('Date',ML+CW-50,sigY+4);
+}
+
+let _myTcPdfBusy=false;
+let _myTcPdfReady=null; // {blob,filename} — built by exportMyTimecard, consumed by shareMyTcPdf
+async function exportMyTimecard(){
+  if(_myTcPdfBusy||!myTcEmp||!myTcPeriod)return;
+  if(!window.jspdf){
+    showCustomAlert('PDF tool not loaded','The PDF tool didn’t load. Check your connection, reopen the app, and try again.');
+    return;
+  }
+  _myTcPdfBusy=true;
+  const btn=document.getElementById('mytc-export-btn');
+  const btnLabel=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Preparing…';}
+  const emp=myTcEmp,period=myTcPeriod;
+  try{
+    await saveMyTcNote(); // flush a note that's still being typed (no-op when unchanged)
+    const noteEl=document.getElementById('mytc-notes-input');
+    const noteText=((noteEl&&noteEl.value)||'').trim().slice(0,NOTE_MAX);
+
+    // Fresh from the DB (not the panel's cache): a supervisor may have edited a punch, or the
+    // employee pulled back on another device, since this screen loaded.
+    const ps=toDateStr(period.start);
+    const [punchRes,statusRes]=await Promise.all([
+      sb.from('punches').select('*').eq('employee_id',emp.id)
+        .gte('clock_in',period.start.toISOString()).lte('clock_in',period.end.toISOString())
+        .order('clock_in',{ascending:true}),
+      sb.from('pt_timecard_status').select('*').eq('employee_id',emp.id).eq('period_start',ps)
+    ]);
+    if(punchRes.error||statusRes.error){
+      console.warn('exportMyTimecard load error:',(punchRes.error||statusRes.error).message);
+      showCustomAlert('Couldn’t load your timecard','Check your connection and try again.');
+      return;
+    }
+    const punches=(punchRes.data||[]).map(dbRowToEntry);
+    const statusRows=statusRes.data||[];
+
+    const gate=canExportMyTimecard(punches,statusRows);
+    if(!gate.ok){
+      if(gate.reason==='empty'){
+        showCustomAlert('Nothing to export','There are no punches in this pay period yet.');
+      } else {
+        showCustomAlert('Submit your timecard first',
+          'A PDF copy of your timecard can only be exported once it has been submitted.'
+          +(gate.sites.length?` Not yet submitted: ${gate.sites.join(', ')}.`:'')
+          +' Submit it from the bar at the top of this screen, then come back here.');
+      }
+      return;
+    }
+    if(myTcEmp!==emp||myTcPeriod!==period)return; // switched employee/period while loading
+
+    // Same fallback as the master PDF: a punch still open at submit time prints with the
+    // employee's own estimate, as a shallow clone — never mutates the real records.
+    const withEst=punches.map(l=>
+      (!l.out&&l.employeeEstimatedOut)?{...l,out:l.employeeEstimatedOut,estimatedOut:l.employeeEstimatedOut}:l);
+    const rows=consolidatePunchesByDay(withEst);
+    const pend=myTcPendingWaiveInfo(withEst);
+    const sites=[...new Set(withEst.map(p=>p.jobsite).filter(Boolean))].sort();
+
+    const actCodeMap={};
+    (ALL_ACTIVITIES||ACTIVITIES||[]).forEach(a=>{if(a.code)actCodeMap[a.name]=a.code;});
+    const formatTask=n=>actCodeMap[n]?`${actCodeMap[n]} (${n})`:n;
+
+    const fmtLong=d=>d.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'});
+    const submittedAts=statusRows.map(r=>r.emp_submitted_at).filter(Boolean).map(s=>new Date(s)).filter(d=>!isNaN(d));
+    const submittedStr=submittedAts.length?fmtLong(new Date(Math.max(...submittedAts.map(d=>d.getTime())))):'';
+    const now=new Date();
+    const generatedStr=`${fmtLong(now)} ${now.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`;
+
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'letter'});
+    const noteRows=noteText?[{employee_id:emp.id,period_start:ps,period_end:toDateStr(period.end),note:noteText}]:[];
+    renderEmployeeTimecardPdf(doc,{
+      empName:emp.name,dept:emp.dept,sites,rows,
+      periodFrom:fmtLong(period.start),periodTo:fmtLong(period.end),
+      submittedStr,generatedStr,
+      noteLines:pdfNoteLinesFor(doc,noteRows,emp.id,doc.internal.pageSize.getWidth()-28),
+      formatTask,pendingKeys:pend.keys,pendingCount:pend.count
+    });
+
+    const filename=myTcPdfFilename(emp.name,period);
+    _myTcPdfReady={blob:doc.output('blob'),filename};
+    showCustomConfirm('Your timecard PDF is ready',
+      'Tap below to share or save a PDF copy — email it, text it, or save it to your files.',
+      `${fmtLong(period.start)} – ${fmtLong(period.end)}`,
+      'Share / save PDF','var(--green)',shareMyTcPdf);
+  } catch(err){
+    console.warn('exportMyTimecard failed:',err);
+    showCustomAlert('Couldn’t create the PDF','Something went wrong building your timecard PDF. Try again, and let your supervisor know if it keeps happening.');
+  } finally {
+    _myTcPdfBusy=false;
+    if(btn){btn.disabled=false;btn.textContent=btnLabel;}
+  }
+}
+
+// Runs directly inside the confirm button's tap, so navigator.share still has its user gesture.
+// Cancelling the share sheet is a normal outcome (AbortError) — no fallback download then.
+async function shareMyTcPdf(){
+  const r=_myTcPdfReady;
+  if(!r)return;
+  try{
+    const file=new File([r.blob],r.filename,{type:'application/pdf'});
+    if(navigator.share&&navigator.canShare&&navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:'My timecard'});
+      return;
+    }
+  } catch(e){
+    if(e&&e.name==='AbortError')return;
+    console.warn('share failed, falling back to download:',e);
+  }
+  // Desktop / browsers without file sharing: plain download.
+  const url=URL.createObjectURL(r.blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=r.filename;
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),10000);
+}
+
 /* v45.0: does this employee have an unsubmitted LAST period? Re-checked fresh every time the
    current period loads. v47.0: per-site model — show the catch-up banner if ANY site is still
    open (can submit). v49.4: this used to also nag while a site was merely "pullable" (submitted
@@ -5723,7 +6031,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.17',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.18',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -5772,7 +6080,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.17',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.18',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
