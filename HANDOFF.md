@@ -1,7 +1,7 @@
 # PanoramaTrack — Handoff
 
-**Version:** v49.19 *(light-mode logo shown as a rounded dark card — CSS only. v49.18: employee "Export my timecard (PDF)" on My Timecard, submitted-only, shared via the phone share sheet — no migration. v49.16's notes migration has been run — notes work in the live app)*
-**Last handoff update:** November 10, 2026
+**Version:** v49.20 *(unambiguous date readout under every clock in/out field — no migration. v49.19: light-mode logo shown as a rounded dark card — CSS only. v49.18: employee "Export my timecard (PDF)" on My Timecard, submitted-only, shared via the phone share sheet — no migration. v49.16's notes migration has been run — notes work in the live app)*
+**Last handoff update:** November 12, 2026
 
 > This is the living handoff file. Sections 1–4 below are the current state — read them first.
 > Everything under "Reference & History" is background: architecture, DB schema, standing build
@@ -11,11 +11,21 @@
 
 ## 1. Current Status — what was just completed
 
+- **v49.20 — unambiguous date readout on every clock in/out field.** `app.js`/`index.html`/
+  `styles.css`, **no migration.** Trigger: on a day-first phone the native `datetime-local` input
+  showed `06/11/2026` (= 6 Nov) and was misread as month/day — the app was storing/loading the
+  right value all along (`toLocal` is local-time, no UTC shift). The browser renders the field in
+  the *device* locale and the app can't control that, so each of the 4 fields (`edit-in/out`,
+  `mytc-edit-in/out`) now has a `.dt-readout` line under it: "Fri 6 Nov 2026 · 6:50 AM".
+  `fmtDtReadout` parses the `YYYY-MM-DDTHH:MM` string directly (no Date/UTC round-trip; invalid
+  dates → blank). Programmatic writes go through `setDtValue(id,v)` (sets + refreshes, since
+  `.value=` fires no event); user picks are caught by one delegated `input`/`change` listener.
+  Version badge/`app_version` → v49.20.
 - **v49.19 — light-mode logo card.** `styles.css` + `index.html` only (no migration). The logo WebP
   has an opaque black background, so in light mode it showed as a harsh black rectangle. The 5
   in-app logo `<img>`s (kiosk, two login screens, supervisor + admin headers) now carry class
   `pt-logo`; light/auto-light gives them `border-radius:8px` + a soft shadow. The black loading
-  overlay logo is untouched. Version badge/`app_version` → v49.19. **Uncommitted.** A proper fix
+  overlay logo is untouched. Version badge/`app_version` → v49.19. Committed (4480bf8). A proper fix
   later = transparent logo with dark "Panorama" text swapped by theme (needs the original SVG/PNG).
 - **v49.18 — "Export my timecard (PDF)" on My Timecard (employee).** `app.js`/`index.html` only,
   **no migration, no Edge Function.** A button on the My Timecard screen produces a PDF copy of the
@@ -53,7 +63,7 @@
 
 ## 2. Active State
 
-- **Branch:** `main` — v49.18 pushed; v49.19 (logo card) coded, `node --check` OK, **uncommitted**, not checked on a device.
+- **Branch:** `main` — v49.20 (date readout) committed + pushed Nov 12; `node --check` OK + 7-case formatter harness passes (run against the real `fmtDtReadout` sliced from `app.js`); not checked on a device. Untracked scratch files `CURRENT_STATE.md`, `app-DESKTOP-DIE9BC6.js`, `index-DESKTOP-DIE9BC6.html` are OneDrive/old copies and deliberately not committed.
   v49.16's notes still need their migration, see below.
 - **Build/test status:** no build step and no CI — the app is static `index.html` + `app.js` +
   `styles.css` served as-is. `node --check app.js` passes (current working tree, v49.18 included).
@@ -124,6 +134,10 @@
 
 ## 3. Next Steps
 
+0b. **Real-device check v49.20 date readout:** open Edit punch / Add missed punch (employee) and
+   Edit punch / Add manual punch (supervisor/master) on a day-first phone — the bold line under
+   each clock field matches the picker, updates on picking a date and on the quick-set buttons,
+   is hidden when the field is empty, and is readable in Light and Dark.
 0a. **Real-device check v49.19 logo:** kiosk + headers in Light and Auto(light OS) show a rounded dark card; Dark mode unchanged.
 0. **Real-device check v49.18 (employee PDF export):** (a) on an *unsubmitted* card, tap
    "📄 Export my timecard (PDF)" → "Submit your timecard first" alert; after submitting, pull back →
@@ -264,6 +278,16 @@ version entries are newest-first; v47.5–v49.17 are current, v44.1–v47.4 hist
 backfilled, v44.0 and earlier are the original log._
 
 ---
+
+## ✅ v49.20 — Unambiguous date readout under every clock in/out field
+
+`app.js` + `index.html` + `styles.css`; no migration. Helpers sit right after `toLocal`
+(`fmtDtReadout`, `updateDtReadout`, `setDtValue`, delegated listener). Each of the four
+`datetime-local` inputs has a sibling `<div class="dt-readout" id="<input-id>-readout">`; the
+readout id is always input id + `-readout`, so any future datetime-local field only needs that div
+and `setDtValue` for programmatic writes. CSS: `.dt-readout` uses `var(--txt)` (dark-mode safe) and
+`:empty{display:none}`. Gotcha: never set these fields with a bare `.value=` — the readout won't
+refresh.
 
 ## ✅ v49.18 — Employee "Export my timecard (PDF)" (submitted-only, phone share sheet)
 

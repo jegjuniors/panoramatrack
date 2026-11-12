@@ -143,6 +143,8 @@ select{cursor:pointer}
 .modal{background:var(--bg);border-radius:var(--radius-l);padding:1.5rem;width:92%;max-width:400px;border:0.5px solid var(--bdr);max-height:90vh;overflow-y:auto}
 .modal h3{font-size:15px;font-weight:600;margin-bottom:16px;color:var(--txt)}
 .field{margin-bottom:10px}
+.dt-readout{font-size:12px;font-weight:600;color:var(--txt);margin-top:4px;min-height:0}
+.dt-readout:empty{display:none}
 .field label{font-size:10px;color:var(--txt2);display:block;margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 .modal-actions{display:flex;gap:8px;margin-top:16px}
 .modal-actions button{flex:1;padding:9px;border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}

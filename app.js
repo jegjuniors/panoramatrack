@@ -142,6 +142,36 @@ function fmtDt(d){
 }
 function fmtDate(d){return d instanceof Date?d.toLocaleDateString([],{weekday:'long',month:'long',day:'numeric'}):'—'}
 function toLocal(d){if(!(d instanceof Date))return '';const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`}
+/* v49.20: unambiguous date readout under every datetime-local field.
+   The native input renders in the DEVICE locale (06/11/2026 is 6 Nov on a day-first phone but
+   June 11 on a month-first one), so we spell the same value out as "Fri 6 Nov 2026 · 6:50 AM".
+   Parses the 'YYYY-MM-DDTHH:MM' string directly — no Date/UTC round-trip, so it can't shift a day. */
+function fmtDtReadout(v){
+  const m=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(v||'');
+  if(!m)return '';
+  const y=+m[1],mo=+m[2],d=+m[3],h=+m[4],mi=+m[5];
+  const dt=new Date(y,mo-1,d);
+  if(dt.getMonth()!==mo-1||dt.getDate()!==d)return '';
+  const DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const h12=h%12===0?12:h%12;
+  return `${DOW[dt.getDay()]} ${d} ${MON[mo-1]} ${y} · ${h12}:${String(mi).padStart(2,'0')} ${h<12?'AM':'PM'}`;
+}
+function updateDtReadout(id){
+  const inp=document.getElementById(id),out=document.getElementById(id+'-readout');
+  if(!inp||!out)return;
+  out.textContent=fmtDtReadout(inp.value);
+}
+// Programmatic writes don't fire input events, so set + refresh together.
+function setDtValue(id,v){
+  const inp=document.getElementById(id);
+  if(inp)inp.value=v;
+  updateDtReadout(id);
+}
+// User edits via the native picker (delegated; the four datetime-local fields).
+['input','change'].forEach(ev=>document.addEventListener(ev,e=>{
+  const t=e.target;
+  if(t&&t.type==='datetime-local'&&t.id)updateDtReadout(t.id);
+}));
 function toDateStr(d){if(!(d instanceof Date))return '';const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`}
 
 /* ─── Pay-rule engine (v36.1) ──────────────────────────────────────────────
@@ -1961,8 +1991,8 @@ function openMyTcAdd(){
   if(!openSites.length)return;
   myTcAdding=true;myTcEditingDbId=null;myTcEditActs=new Set();
   document.getElementById('mytc-edit-title').textContent='Add a missed punch';
-  document.getElementById('mytc-edit-in').value='';
-  document.getElementById('mytc-edit-out').value='';
+  setDtValue('mytc-edit-in','');
+  setDtValue('mytc-edit-out','');
   document.getElementById('mytc-edit-jobsite').innerHTML=openSites.map(j=>`<option>${j}</option>`).join('');
   buildMyTcActGrid();
   // v47.0: show add-mode quick-set buttons
@@ -1988,8 +2018,8 @@ function openMyTcEdit(dbId){
   if(punchStage!==TC_STAGE.OPEN)return; // locked at this site
   myTcAdding=false;myTcEditingDbId=dbId;myTcEditActs=new Set(e.activity||[]);
   document.getElementById('mytc-edit-title').textContent='Edit my punch';
-  document.getElementById('mytc-edit-in').value=toLocal(e.in);
-  document.getElementById('mytc-edit-out').value=e.out?toLocal(e.out):'';
+  setDtValue('mytc-edit-in',toLocal(e.in));
+  setDtValue('mytc-edit-out',e.out?toLocal(e.out):'');
   document.getElementById('mytc-edit-jobsite').innerHTML=JOBSITES.map(j=>`<option${e.jobsite===j?' selected':''}>${j}</option>`).join('');
   buildMyTcActGrid();
   // v47.0: show edit-mode quick-set buttons (out only, on same date as clock-in)
@@ -4354,8 +4384,8 @@ async function openEditModal(ref){
   document.getElementById('out-quickset-edit').style.display='flex';
   editActs=new Set(entry.activity||[]);
   document.getElementById('edit-emp-name').value=entry.name;
-  document.getElementById('edit-in').value=toLocal(entry.in);
-  document.getElementById('edit-out').value=entry.out?toLocal(entry.out):'';
+  setDtValue('edit-in',toLocal(entry.in));
+  setDtValue('edit-out',entry.out?toLocal(entry.out):'');
   const jSel=document.getElementById('edit-jobsite');
   jSel.innerHTML=JOBSITES.map(j=>`<option${entry.jobsite===j?' selected':''}>${j}</option>`).join('');
   buildEditActGrid();
@@ -4385,8 +4415,8 @@ function openAddPunchModal(ctx){
   // v46.0: opened from the admin correction modal for a specific employee — pre-select them
   // (still changeable, but saves a step since we already know who this punch is for).
   if(ctx==='subcorrect'&&_adminCorrectEmpId)document.getElementById('add-emp-select').value=_adminCorrectEmpId;
-  document.getElementById('edit-in').value='';
-  document.getElementById('edit-out').value='';
+  setDtValue('edit-in','');
+  setDtValue('edit-out','');
   document.getElementById('edit-jobsite').innerHTML=JOBSITES.map(j=>`<option>${j}</option>`).join('');
   buildEditActGrid();
   // No lunch-waive decision on a brand-new manual punch (v42.0)
@@ -4403,13 +4433,13 @@ function quickSetAddTime(fieldId,dayWord,hh,mm){
   const base=new Date();
   if(dayWord==='yesterday')base.setDate(base.getDate()-1);
   base.setHours(hh,mm,0,0);
-  document.getElementById(fieldId).value=toLocal(base);
+  setDtValue(fieldId,toLocal(base));
 }
 function quickSetEditOut(hh,mm){
   const inV=document.getElementById('edit-in').value;
   const base=inV?new Date(inV):(_editEntry&&_editEntry.in instanceof Date?new Date(_editEntry.in):new Date());
   base.setHours(hh,mm,0,0);
-  document.getElementById('edit-out').value=toLocal(base);
+  setDtValue('edit-out',toLocal(base));
 }
 /* v47.0: My Timecard edit modal's clock-out quick-set — same logic as quickSetEditOut
    but reads/writes the mytc-edit-in / mytc-edit-out fields. */
@@ -4417,7 +4447,7 @@ function quickSetMyTcEditOut(hh,mm){
   const inV=document.getElementById('mytc-edit-in').value;
   const base=inV?new Date(inV):(myTcEditingDbId?(() => {const e=myTcPunches.find(p=>String(p.dbId)===String(myTcEditingDbId));return e&&e.in instanceof Date?new Date(e.in):new Date();})():new Date());
   base.setHours(hh,mm,0,0);
-  document.getElementById('mytc-edit-out').value=toLocal(base);
+  setDtValue('mytc-edit-out',toLocal(base));
 }
 /* ─── Lunch waive decision in edit modal (v42.0) ───
    _editWaiveDecision: the pending decision to write on save.
@@ -6031,7 +6061,7 @@ async function doArchivePunches(rows,cutoff){
   btn.disabled=true;
   status.textContent='Downloading…';status.style.color='var(--txt2)';
   try{
-    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.19',tables:{punches:rows}};
+    const payload={archived_at:new Date().toISOString(),cutoff:cutoff.toISOString(),app_version:'v49.20',tables:{punches:rows}};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
@@ -6080,7 +6110,7 @@ async function runBackup(){
       if(error)throw new Error(`${step.key}: ${error.message}`);
       tables[step.key]=data||[];
     }
-    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.19',tables};
+    const payload={backed_up_at:new Date().toISOString(),app_version:'v49.20',tables};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
